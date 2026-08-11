@@ -42,13 +42,19 @@ without understanding them):
 
 ```bash
 ffmpeg -y -framerate <fps> -i frame_%04d.png \
+  -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
   -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium \
   -movflags +faststart \
   output.mp4
 ```
 
 - `-pix_fmt yuv420p` — required for broad player/browser compatibility; without it some
-  players fail to display the video at all.
+  players fail to display the video at all. **It also requires even width and height** —
+  manga pages are not guaranteed to have either (confirmed by a real Phase 2 encode failure
+  on an 800x2305 sample page: `height not divisible by 2`); the `pad` filter above rounds
+  up to the nearest even dimension rather than cropping, so no source content is lost. See
+  [ADR 0005](../../docs/decisions/0005-phase2-model-selection.md)'s `video-rendering`
+  section.
 - `-crf 18` — visually near-lossless; raise toward 23 if file size matters more than
   fidelity to the (already lightly-modified) source frames.
 - `-movflags +faststart` — moves the moov atom to the front so the file starts playing

@@ -7,6 +7,11 @@ the benchmarking harness end-to-end and surface early signal — not a final sel
 "Next steps" below for what's still needed before the `grounding` stage in `configs/default.yaml`
 gets a `model_variants` entry.
 
+> Current cross-stage status (this result's standing as PRIMARY/FALLBACK, plus every other
+> stage's status) is tracked in
+> [ADR 0005](decisions/0005-phase2-model-selection.md), not here — this file stays a
+> point-in-time results record for the grounding stage specifically.
+
 ## Environment
 
 - Remote: Kaggle Jupyter session, 2x Tesla T4 (15360 MiB each), driver 580.159.04

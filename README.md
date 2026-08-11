@@ -28,7 +28,13 @@ with the machine-readable shortlist in
 [`src/manga_animation/benchmarking`](src/manga_animation/benchmarking). Actual benchmark
 runs — loading each candidate and measuring it — happen on the remote Kaggle/Jupyter GPU
 worker per [ADR 0003](docs/decisions/0003-remote-compute-workers.md); no model weights are
-downloaded or run locally.
+downloaded or run locally. Reproducible adapter code for every shortlisted candidate lives
+in [`scripts/phase2_kaggle_benchmark.py`](scripts/phase2_kaggle_benchmark.py); local,
+non-GPU feasibility checks for the `deterministic-animation` and `video-rendering` stages
+live in [`scripts/phase2_cv_feasibility.py`](scripts/phase2_cv_feasibility.py) and
+[`scripts/phase2_video_feasibility.py`](scripts/phase2_video_feasibility.py). Current
+per-stage status (PRIMARY/FALLBACK/PENDING) is tracked in
+[ADR 0005](docs/decisions/0005-phase2-model-selection.md).
 
 Planned phases:
 
