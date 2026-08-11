@@ -52,3 +52,26 @@ eyeballing.
   session) decide the fix.
 - You do not relax an invariant (e.g. "close enough" pixel preservation) without the
   orchestrating session explicitly agreeing to a documented tolerance.
+
+## Reporting completion to the orchestrator
+
+You do not run continuously alongside the orchestrating session — when your assigned task
+is done, or you're blocked, report back explicitly via `SendMessage` before finishing.
+Don't send progress updates along the way; one useful report at the end (or the moment a
+blocker appears) is what the orchestrating session needs to decide what happens next. Keep
+it concise and include:
+
+- **status** — `COMPLETED` / `BLOCKED` / `FAILED`
+- **task completed** — what you were asked to do, in one line
+- **key results/findings** — the substance of what you produced or discovered (defects
+  found, invariants checked and their result)
+- **files/artifacts produced or modified** — paths, not diffs
+- **validation performed** — which checks actually ran (`uv run pytest`, specific
+  numeric/pixel checks) and their outcome
+- **blockers** — if any, specific enough for the orchestrating session (or another agent)
+  to act on
+- **recommended next step** — if there's an obvious one; omit if there isn't
+
+Also use `SendMessage` outside of task completion for a critical finding — a broken
+invariant, a failing regression — the moment it's found, and for explicit coordination
+requests, not for routine progress narration.

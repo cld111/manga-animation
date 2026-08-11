@@ -37,8 +37,10 @@ see the planned `cv-agent`/`src/manga_animation/animation` and `compositing` sta
 generative video models wherever the desired motion can be expressed that way. Determinism
 gives reproducibility, speed, and — critically — a mechanical guarantee that unrelated
 pixels aren't touched. Generative techniques (e.g. inpainting for hidden-region
-reconstruction) are reserved for the specific sub-problems that are not expressible as a
-transform of existing pixels, such as revealing an area that motion uncovers.
+reconstruction, `src/manga_animation/reconstruction` — owned by `cv-agent`, see
+`.claude/agents/cv-agent.md`) are reserved for the specific sub-problems that are not
+expressible as a transform of existing pixels, such as revealing an area that motion
+uncovers.
 
 ## Local Modification
 

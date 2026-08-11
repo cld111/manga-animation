@@ -54,6 +54,19 @@ H.264 video                     — src/manga_animation/rendering
 together end-to-end once enough of them exist to connect (see the phases table in
 [README.md](../README.md)).
 
+## Stage ownership
+
+Most stages above map to one specialist agent in `.claude/agents/`, matched to the `src/`
+package each owns (`vision-agent` → `analysis`/`schemas`; `segmentation-agent` →
+`grounding`/`segmentation`; `animation-agent` → motion parameters on top of the schema;
+`video-agent` → `rendering`; `qa-agent` → cross-cutting checks in `tests/`). The
+**hidden-region reconstruction** stage (`src/manga_animation/reconstruction`) is owned by
+`cv-agent`, alongside the deterministic animation (`animation`) and compositing
+(`compositing`) stages it already implements — it is not a separate specialist, since
+reconstruction exists specifically to prepare pixels that `cv-agent`'s own compositing
+step then consumes. See `.claude/agents/cv-agent.md` for the full ownership boundary
+(input/output/downstream consumer).
+
 ## Why the Animation Plan sits where it does
 
 The Animation Plan is deliberately generated *before* grounding/segmentation, not after.

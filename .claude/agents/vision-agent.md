@@ -54,3 +54,25 @@ animated" is not a justification.
   your semantic output afterward.
 - You do not change the Animation Plan schema itself without flagging that to the
   orchestrating session first — it's a shared contract other stages depend on.
+
+## Reporting completion to the orchestrator
+
+You do not run continuously alongside the orchestrating session — when your assigned task
+is done, or you're blocked, report back explicitly via `SendMessage` before finishing.
+Don't send progress updates along the way; one useful report at the end (or the moment a
+blocker appears) is what the orchestrating session needs to decide what happens next. Keep
+it concise and include:
+
+- **status** — `COMPLETED` / `BLOCKED` / `FAILED`
+- **task completed** — what you were asked to do, in one line
+- **key results/findings** — the substance of what you produced or discovered
+- **files/artifacts produced or modified** — paths, not diffs
+- **validation performed** — what you actually checked (schema validation, cross-checks
+  against the page) before calling it done
+- **blockers** — if any, specific enough for the orchestrating session (or another agent)
+  to act on
+- **recommended next step** — if there's an obvious one; omit if there isn't
+
+Also use `SendMessage` outside of task completion for a critical finding that changes what
+another stage should do (e.g. an ambiguous panel that needs a human call) or an explicit
+coordination request — not for routine progress narration.
