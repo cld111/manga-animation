@@ -108,11 +108,20 @@ def build_default_clients(
     """
     device = config.resolve_device()
     vlm_client = Qwen25VLClient(source=_candidate_source("vlm", config), dtype=config.dtype)
+    # Real finding (Phase 3.1's first Kaggle run): Grounding DINO's processor produces
+    # float32 pixel_values regardless of config.dtype, which raises "Input type (float) and
+    # bias type (c10::Half) should be the same" against a float16-loaded model on this
+    # transformers version. ADR 0005's actual successful benchmark runs for both Grounding
+    # DINO and SAM 2.1 (see docs/phase2-benchmark-results.md) used float32 explicitly, never
+    # float16 -- config.dtype's float16 default (configs/kaggle.yaml) was only ever proven
+    # for the VLM stage. Hardcoding float32 here for these two stages reflects that real,
+    # tested evidence rather than the single global config default; kaggle.yaml's own comment
+    # already flagged dtype as something to "revisit per-model in Phase 2 if quality suffers".
     grounding_client = GroundingDinoClient(
-        source=_candidate_source("grounding", config), device=device, dtype=config.dtype
+        source=_candidate_source("grounding", config), device=device, dtype="float32"
     )
     segmentation_client = Sam21Client(
-        source=_candidate_source("segmentation", config), device=device, dtype=config.dtype
+        source=_candidate_source("segmentation", config), device=device, dtype="float32"
     )
     reconstruction_client = LamaClient(device=device)
     return vlm_client, grounding_client, segmentation_client, reconstruction_client
