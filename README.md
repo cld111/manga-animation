@@ -12,18 +12,29 @@ motion, composited back onto the original image.
 
 ## Project status
 
-**Phase 1 — Engineering foundation.** No ML models are integrated yet. This
-phase establishes the project skeleton, configuration system, logging
+**Phase 1 — Engineering foundation — complete.** No ML models are integrated yet. This
+phase established the project skeleton, configuration system, logging
 foundation, the Animation Plan schema, `.claude/` agents and skills, and the
-test suite that Phase 2+ will build on. See [`docs/pipeline.md`](docs/pipeline.md)
+test suite Phase 2+ builds on. See [`docs/pipeline.md`](docs/pipeline.md)
 for the planned pipeline and [`docs/decisions/`](docs/decisions) for why it's
 structured this way.
+
+**Phase 2 — Model benchmarking & selection — in progress.** The candidate
+shortlist and benchmark methodology are written up in
+[`docs/decisions/0004-phase2-model-candidates.md`](docs/decisions/0004-phase2-model-candidates.md),
+with the machine-readable shortlist in
+[`configs/benchmark_candidates.yaml`](configs/benchmark_candidates.yaml) and the
+(model-agnostic, no-GPU-required) timing/reporting harness in
+[`src/manga_animation/benchmarking`](src/manga_animation/benchmarking). Actual benchmark
+runs — loading each candidate and measuring it — happen on the remote Kaggle/Jupyter GPU
+worker per [ADR 0003](docs/decisions/0003-remote-compute-workers.md); no model weights are
+downloaded or run locally.
 
 Planned phases:
 
 | Phase | Scope |
 |---|---|
-| 1 | Engineering foundation (this phase): repo, config, schema, tests, docs, agents/skills |
+| 1 | Engineering foundation: repo, config, schema, tests, docs, agents/skills |
 | 2 | Model benchmarking & selection (VLM, grounding, segmentation, inpainting) |
 | 3 | Animation Plan generation from real VLM output |
 | 4 | Segmentation, layer decomposition, hidden-region reconstruction |

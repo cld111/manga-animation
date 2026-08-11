@@ -1,0 +1,79 @@
+# Phase 2 model candidate shortlist, consumed by src/manga_animation/benchmarking.
+# See docs/decisions/0004-phase2-model-candidates.md for rationale, sources, and the
+# benchmark methodology these candidates feed into. This file is data only — adding or
+# removing a candidate is a config edit, not a code change.
+#
+# Nothing here is a selection. `configs/default.yaml`'s `model_variants` stays empty until
+# real benchmark runs (on the remote Kaggle/Jupyter GPU) pick a winner per stage.
+
+vlm:
+  - id: qwen2.5-vl-7b-instruct
+    source: "Qwen/Qwen2.5-VL-7B-Instruct" # Hugging Face repo id
+    license: qwen-license
+    params: 7B
+    notes: >
+      Strong OCR (OCRBench ~888) — manga pages are text-dense. Fits comfortably on a
+      T4/L4 at this size.
+  - id: qwen3-vl-small
+    source: "Qwen/Qwen3-VL" # exact small-variant repo id to confirm at integration time
+    license: qwen-license
+    params: sub-10B (variant TBD)
+    notes: Newer generation than 2.5-VL; benchmark head-to-head rather than assuming it wins.
+  - id: internvl3-8b
+    source: "OpenGVLab/InternVL3-8B"
+    license: MIT
+    params: 8B
+    notes: Least restrictive license in this list; check quality/license tradeoff vs Qwen.
+
+grounding:
+  - id: grounding-dino-swin-l
+    source: "IDEA-Research/grounding-dino-base" # Swin-L backbone variant
+    license: apache-2.0
+    params: 218M
+    notes: Best published zero-shot accuracy (COCO mAP 52.5); runs once per object, not per frame.
+  - id: owlv2-vit-l14
+    source: "google/owlv2-large-patch14-ensemble"
+    license: apache-2.0
+    params: 428M
+    notes: ~2.7x faster than Grounding DINO; fallback if latency is a problem on Kaggle.
+  - id: sam3-concept-grounding
+    source: "facebookresearch/sam3"
+    license: sam-license # verify commercial terms at integration time
+    params: TBD
+    notes: >
+      Text/concept-promptable — may collapse the grounding and segmentation stages into
+      one model. Architectural implication, not just a model swap; see ADR 0004.
+
+segmentation:
+  - id: sam2.1-hiera-base
+    source: "facebook/sam2.1-hiera-base-plus"
+    license: apache-2.0
+    params: Hiera-B/L variants
+    notes: Mature, well-documented, box/point-promptable. The safe default.
+  - id: sam3
+    source: "facebookresearch/sam3"
+    license: sam-license
+    params: TBD
+    notes: >
+      2x reported gain over SAM 2 on concept segmentation; some sources report much slower
+      inference than lightweight detectors in certain configs — verify on our own workload,
+      don't take an aggregator's number at face value.
+
+inpainting:
+  - id: lama-large
+    source: "lama_large" # as used by manga-image-translator; exact checkpoint source TBD
+    license: apache-2.0
+    params: ~50M
+    notes: Proven in production for manga text-region removal/fill. Fast, no prompting needed.
+  - id: aot-inpainting-manga
+    source: "mayocream/aot-inpainting" # Hugging Face
+    license: TBD # community SafeTensors conversion — verify upstream license
+    params: small
+    notes: Manga-domain-tuned rather than generic-photo-tuned; direct prior art.
+  - id: sdxl-inpainting
+    source: "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+    license: TBD # CreativeML/SDXL license — verify commercial terms
+    params: ~2.6B UNet
+    notes: >
+      Higher quality, prompt-guided style matching. Only worth the extra compute if
+      LaMa/AOT visibly fail on complex screentone/texture regions.
