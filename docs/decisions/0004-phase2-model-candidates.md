@@ -122,6 +122,14 @@ license caveat."
   etc.) are added to `pyproject.toml` in this step; that happens once a candidate is actually
   selected, per stage, to avoid installing dependencies for models that lose the comparison.
 
+## Progress
+
+First real benchmark pass (grounding stage, on the remote Kaggle GPU) is in
+[`docs/phase2-benchmark-results.md`](../phase2-benchmark-results.md) — it already found one
+of this ADR's desk-research claims (OWLv2 being faster than Grounding DINO) doesn't hold on
+our actual workload, which is exactly why this ADR treats the shortlist as a starting point,
+not a conclusion.
+
 ## Sources
 
 - [Best Open-Weight Vision-Language Models 2026 — Presenc AI](https://presenc.ai/research/best-open-weight-vision-language-models-2026)

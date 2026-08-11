@@ -98,6 +98,13 @@ outputs/debug/*
 *.gif
 *.png.tmp
 
+# --- Sample manga pages (copyrighted third-party content, fetched on demand) ---
+# See scripts/fetch_sample_pages.py; never commit fetched pages, just the fetch script.
+examples/*.png
+examples/*.jpg
+examples/*.jpeg
+examples/*.webp
+
 # --- Kaggle / Jupyter remote artifacts ---
 kaggle.json
 .kaggle/
