@@ -201,16 +201,19 @@ class Qwen25VLAdapter:
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
-        # NOTE: confirmed OOM on a real Kaggle T4 (2026-08-12) — `.to("cuda")` onto a
-        # single T4 fails ("CUDA out of memory... 14.15 GiB is allocated by PyTorch" on
+        # CONFIRMED on a real Kaggle 2xT4 session (2026-08-12): `.to("cuda")` onto a
+        # single T4 OOMs ("CUDA out of memory... 14.15 GiB is allocated by PyTorch" on
         # a 14.56 GiB card), contradicting ADR 0004's desk-research "fits comfortably on
-        # a T4/L4" claim at float16. Not yet confirmed as fixed: `device_map="auto"`
-        # (sharding across this project's 2xT4 Kaggle profile) is the likely next thing
-        # to try, per docs/decisions/0005-phase2-model-selection.md.
+        # a T4/L4" claim at float16. `device_map="auto"` (sharding across both T4s) DOES
+        # fix it — confirmed loading (~101s from a warm HF cache) and, more importantly,
+        # confirmed generating real output (see docs/phase2-benchmark-results.md's third
+        # pass): visual encoder + early layers land on GPU0 (~7.9GB), later decoder layers
+        # + lm_head on GPU1 (~6.5GB). This requires >1 GPU — a single-T4/L4 profile still
+        # needs quantization or a smaller model, not yet tested.
         self.processor = AutoProcessor.from_pretrained(self.source)
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            self.source, torch_dtype=getattr(torch, self.dtype)
-        ).to(self.device)
+            self.source, torch_dtype=getattr(torch, self.dtype), device_map="auto"
+        )
         self.model.eval()
 
     def infer(self, sample: Image.Image) -> Any:
@@ -228,7 +231,12 @@ class Qwen25VLAdapter:
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.processor(text=[text], images=[sample], return_tensors="pt").to(self.device)
+        # Place inputs on the sharded model's first device, not a fixed `self.device` —
+        # with device_map="auto" the model spans multiple devices, and `model.device`
+        # resolves to wherever its first parameter (the embedding/visual stem) lives.
+        inputs = self.processor(text=[text], images=[sample], return_tensors="pt").to(
+            self.model.device
+        )
         with torch.no_grad():
             return self.model.generate(**inputs, max_new_tokens=200)
 
@@ -323,9 +331,10 @@ class Sam21Adapter:
         inputs = self.processor(sample, input_boxes=[box], return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs)
-        return self.processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(), inputs["original_sizes"], inputs["reshaped_input_sizes"]
-        )
+        # CONFIRMED signature on a real Kaggle run (2026-08-12, transformers 5.0.0):
+        # `post_process_masks(masks, original_sizes, ...)` — no `reshaped_input_sizes`
+        # argument exists on this version (an earlier guess here caused a real KeyError).
+        return self.processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])
 
     def unload(self) -> None:
         import torch
@@ -371,11 +380,26 @@ class LamaAdapter:
         # checkpoint behind a plain (image, mask) -> image call — see the candidate's notes
         # in configs/benchmark_candidates.yaml. VERIFY the exact checkpoint source at
         # integration time (ADR 0004: "exact checkpoint source TBD").
+        #
+        # ENVIRONMENT NOTE (real, 2026-08-12): importing `simple_lama_inpainting` AFTER
+        # `cv2`/`numpy` were already imported elsewhere in the same process raised
+        # `RuntimeError: empty_like method already has a different docstring` (a numpy/cv2
+        # ABI conflict from installing this package mid-session). Import it first, or in a
+        # fresh process, to avoid this — not a problem with the package itself.
         from simple_lama_inpainting import SimpleLama
 
         self.model = SimpleLama(device=self.device)
 
     def infer(self, sample: tuple[Image.Image, Image.Image]) -> Any:
+        # CONFIRMED real inference on a real Kaggle T4 (2026-08-12): works, ~2.9s/image,
+        # ~1.2GB peak VRAM. IMPORTANT finding: the raw output is NOT pixel-aligned with
+        # the input (a 1778x1000 input came back 1784x1000 — the model pads to its
+        # internal stride) — naively substituting the full raw output would silently
+        # violate "Original Image Is the Source of Truth" (see docs/architecture.md).
+        # This confirms compositing must resize/crop the output back to the source
+        # resolution and blend ONLY the masked hole (via `cv-agent`'s compositing step,
+        # see the reconstruction ownership section in .claude/agents/cv-agent.md) — never
+        # use this adapter's return value as a full-frame replacement.
         image, mask = sample
         return self.model(image, mask)
 

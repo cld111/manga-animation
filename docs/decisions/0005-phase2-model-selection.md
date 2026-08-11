@@ -1,11 +1,15 @@
 # 5. Phase 2 model selection — status and findings
 
-Status: Proposed — **partial**. `deterministic-animation` and `video-rendering` have local,
-executed evidence and a recommended approach. `grounding` now has two real remote-GPU passes
-(n=2, then n=6) with a leading candidate, not yet finalized. `vlm` has one real attempt that
-failed with a genuine, informative OOM — not yet a working candidate. `segmentation` and
-`inpainting` have **no executed benchmark evidence** — adapter code is written and committed,
-but nothing has run. This ADR will be superseded once those stages have real, working results.
+Status: Proposed — **every required stage now has at least one real, working result**.
+`deterministic-animation` and `video-rendering` have local, executed evidence and a
+recommended approach. `grounding` has two real remote-GPU passes (n=2, then n=6) with a
+leading candidate. `vlm`, `segmentation`, and `inpainting` each now have at least one
+confirmed-working real candidate (`qwen2.5-vl-7b-instruct` via `device_map="auto"`,
+`sam2.1-hiera-base`, `lama-large` respectively) — see the third pass in
+`docs/phase2-benchmark-results.md`. None of the six stages is "finalized" in the sense of
+exhaustive candidate comparison, broader sample coverage, or visual QA — see "Open
+questions" — but the Phase 2 acceptance bar (at least one working candidate / real benchmark
+per required stage) is met for all six.
 
 ## Context
 
@@ -52,17 +56,25 @@ otherwise.
 
 ### `vlm` — semantic manga/page analysis
 
-**ATTEMPTED — real failure, not yet a working candidate.** `qwen2.5-vl-7b-instruct` loaded
-fully (weights fetched, all 729 shards materialized to CPU) but **OOM'd on
-`.to("cuda")` against a single Kaggle T4** (see `docs/phase2-benchmark-results.md`'s second
-pass, 2026-08-12): float16 weights alone (14.15 GiB) leave essentially no headroom on a
-14.56 GiB-usable T4. This directly contradicts ADR 0004's desk-research claim that this
-model "fits comfortably on a T4/L4." A `device_map="auto"` retry (sharding across this
-environment's 2x T4s) was started but not completed/confirmed this pass — see "Open
-questions." `qwen3-vl-small` and `internvl3-8b` are entirely untried; both may be more
-T4-friendly by virtue of being smaller or better-quantized, but that's a hypothesis, not a
-result. Run with: `uv run python scripts/phase2_kaggle_benchmark.py --stage vlm` on the
-remote worker.
+**PRIMARY (preliminary): `qwen2.5-vl-7b-instruct`, with `device_map="auto"`.** The first
+attempt (`.to("cuda")` onto a single T4) OOM'd — float16 weights alone (14.15 GiB) leave
+essentially no headroom on a 14.56 GiB-usable T4, directly contradicting ADR 0004's
+desk-research "fits comfortably on a T4/L4" claim. Sharding across this environment's 2x T4s
+via `device_map="auto"` fixed it: loads (~101s warm-cache), runs real inference (not just
+loading), and produces valid structured output — a JSON-per-object list with
+`semantic_label`/`motion_type`/`confidence`/`reason` fields matching `ObjectPlan`'s naming
+and `MotionType`'s enum values, correctly defaulting to `static` on genuinely static pages
+(see `docs/phase2-benchmark-results.md`'s third pass for the full output and both peak-VRAM
+figures, ~9.3 GB / ~10.7 GB across the two GPUs).
+
+**Explicitly not final:** requires 2 GPUs at float16 — untested whether it fits a single
+T4/L4 with quantization (int8/int4), which matters for any single-GPU deployment profile.
+More importantly, every object across both tested pages came back `static` — this pass has
+**not yet confirmed the model correctly assigns PRIMARY/SECONDARY/MICRO** when a real drawn
+motion cue is present, because neither tested page had one (a known gap in this sample set
+since the first grounding pass). `qwen3-vl-small` and `internvl3-8b` remain untried; either
+could be more single-GPU-friendly, but that's a hypothesis, not a result. Run with:
+`uv run python scripts/phase2_kaggle_benchmark.py --stage vlm` on the remote worker.
 
 ### `grounding` — object grounding
 
@@ -96,18 +108,47 @@ Treat this PRIMARY as "best evidence so far, now on firmer ground," not settled.
 
 ### `segmentation` — pixel-accurate masks
 
-**PENDING — no candidate benchmarked.** Adapters committed for `sam2.1-hiera-base` and
-`sam3` (`# VERIFY:` on exact SAM2/SAM2.1 class name). Both adapters currently prompt with a
-placeholder synthetic box (no real grounding output is wired in yet) — timing-only until a
-real grounding candidate is selected and its output can be piped in.
+**PRIMARY (preliminary): `sam2.1-hiera-base`.** `Sam2Model`/`Sam2Processor` confirmed to
+exist in `transformers` 5.0.0 (resolving the adapter's `# VERIFY` note); one real API
+correction made (`post_process_masks` takes no `reshaped_input_sizes` argument on this
+version — fixed in `scripts/phase2_kaggle_benchmark.py`). Two real box prompts (taken from
+this session's own Grounding DINO output, not synthetic placeholders — "face" and "hair" on
+the same page) both produced a plausible top mask (IoU ≥0.89) at sensible latency
+(100.6-535.2ms) and low VRAM (0.78 GB, isolated measurement) — see
+`docs/phase2-benchmark-results.md`'s third pass for the full table.
+
+**Explicitly not final:** only 2 box prompts on 1 page tested; no pixel-level visual review
+was possible this pass (no way to render/view images from the session), so the project's
+actual acceptance bar — "good enough to not visibly damage the artwork" — is not yet
+verified, only approximated by IoU scores and coverage-fraction sanity checks. `sam3`
+untested.
+
+- **PENDING: `sam3`.** Adapter committed, not yet run.
 
 ### `inpainting` — hidden-region reconstruction (owned by `cv-agent`)
 
-**PENDING — no candidate benchmarked.** `lama-large` and `sdxl-inpainting` adapters are
-committed and should run as-is. `aot-inpainting-manga`'s adapter deliberately raises
-`NotImplementedError` — `mayocream/aot-inpainting` has no standard `transformers`/`diffusers`
-pipeline, and writing a guessed generator architecture would be worse than an honest
-placeholder (see ADR 0004: license/checkpoint format both still TBD for this candidate).
+**PRIMARY (preliminary): `lama-large`.** Real test: a synthetic rectangular hole (standing
+in for a region an object's motion would reveal) inpainted on a real sample page via
+`simple-lama-inpainting`. Works: 2.13s load (196MB checkpoint), 2863.5ms latency, 1.16 GB
+peak VRAM — small, matching ADR 0004's "~50M params" sizing. One real environment issue
+found and documented (a numpy/cv2 ABI conflict from installing the package mid-session,
+avoided by importing it before `cv2`/`numpy` — not a package defect).
+
+**Important finding, not a disqualifier:** the raw model output is not pixel-aligned with
+the input (a 1778x1000 page came back 1784x1000 — internal stride padding). Naively
+substituting the full raw output measured a max pixel diff of 255 (mean 9.0) *outside* the
+intended hole — this confirms `cv-agent`'s compositing step (alpha-blend only the masked
+hole onto an untouched source copy) is a hard requirement for this candidate, exactly as its
+ownership section in `.claude/agents/cv-agent.md` already specifies. Not a reason to
+downgrade the candidate; a reason the compositing step must not skip mask-based blending.
+
+- **PENDING / NOT RUNNABLE: `aot-inpainting-manga`.** `mayocream/aot-inpainting` has no
+  standard `transformers`/`diffusers` pipeline; the adapter deliberately raises
+  `NotImplementedError` rather than guess at an architecture (see ADR 0004: license/checkpoint
+  format both still TBD). This is a real "cannot currently execute" finding, not a rejection
+  after testing — per the Phase 2.1 continuation brief, recorded as PENDING/NOT RUNNABLE.
+- **PENDING: `sdxl-inpainting`.** Adapter committed (standard `diffusers` pipeline, high
+  confidence it would work), not yet run this pass.
 
 ### `deterministic-animation` — CV implementation feasibility
 
@@ -165,46 +206,59 @@ Every executed result above records, per the Phase 2 brief's reproducibility req
   and `outputs/experiments/phase2_video_feasibility.json` (git-ignored, regenerable by
   re-running the two scripts; see ADR 0002's "Remote Compute Is Disposable" — the same
   reasoning applies to any generated artifact).
-- **Grounding (both passes) and the `vlm` attempt:** environment recorded in
-  `docs/phase2-benchmark-results.md` (GPU, driver, `torch`/`transformers` versions, dtype,
-  sample provenance) — including the exact OOM error text for the `vlm` failure, so it's
-  independently verifiable rather than a paraphrased summary.
-- **Not-yet-run stages** (`segmentation`, `inpainting`, `vlm` beyond the one attempt):
-  `scripts/phase2_kaggle_benchmark.py` records environment metadata (git commit,
+- **Grounding, `vlm`, `segmentation`, and `inpainting` (all real runs):** environment
+  recorded in `docs/phase2-benchmark-results.md` (GPU, driver, `torch`/`transformers`
+  versions, dtype, sample provenance) — including exact error text where something failed
+  (the `vlm` OOM, the SAM2 `KeyError`, the LaMa numpy/cv2 `RuntimeError`), so every finding
+  is independently verifiable rather than a paraphrased summary.
+- `scripts/phase2_kaggle_benchmark.py` records environment metadata (git commit,
   `torch`/`transformers` versions, GPU name/memory, timestamp) automatically into its output
-  JSON on every run, so the *next* real run is reproducible from the moment it happens — this
-  was the gap the first grounding pass (pre-ADR-0005) left open, now fixed for every stage.
-- The repo now has a real git remote (`origin`, GitHub) specifically so the remote worker can
-  `git clone`/`git pull` rather than relying on ad hoc code transfer — closing a gap ADR 0002
-  had assumed was already true but wasn't (no remote existed before this pass).
+  JSON on every run, so any future run is reproducible from the moment it happens — this was
+  the gap the very first grounding pass (pre-ADR-0005) left open, now fixed for every stage.
+- The repo now has a real git remote (`origin`, GitHub, public) specifically so the remote
+  worker can `git clone`/`git pull` rather than relying on ad hoc code transfer — closing a
+  gap ADR 0002 had assumed was already true but wasn't (no remote existed before this ADR).
 
 ## Consequences
 
-- No `configs/default.yaml` `model_variants` entries are populated by this ADR — nothing
-  here is final enough to select, per its own "PENDING"/"ATTEMPTED" markers above.
-- Phase 3 (Animation Plan generation from real VLM output) cannot start until `vlm` has a
-  candidate that actually *runs* — the one attempt so far OOM'd before producing output.
+- No `configs/default.yaml` `model_variants` entries are populated by this ADR yet — every
+  stage's PRIMARY is still marked preliminary (single-page or few-page evidence, one
+  candidate per stage tried), not a finalized cross-candidate selection.
+- Phase 3 (Animation Plan generation from real VLM output) can now start prototyping against
+  `qwen2.5-vl-7b-instruct` + `device_map="auto"`, since it has confirmed working structured
+  output — but should treat the PRIMARY/SECONDARY/MICRO distinction as unverified until
+  tested on a page with a real motion cue.
 - The `video-rendering` skill (`.claude/skills/video-rendering/SKILL.md`) gets a short
   addition recording the even-dimensions padding requirement found here.
-- `scripts/phase2_kaggle_benchmark.py`'s `GroundingDinoAdapter` is corrected (`threshold`,
-  not `box_threshold`) based on this pass's real error — future runs use the fixed call.
-- This ADR should be superseded (not edited into a false "Accepted") once `vlm` has a
-  candidate that loads and runs, and `segmentation`/`inpainting` have real remote-GPU
-  results.
+- `scripts/phase2_kaggle_benchmark.py` is corrected in three places based on this pass's real
+  errors: `GroundingDinoAdapter` (`threshold`, not `box_threshold`), `Sam21Adapter`
+  (`post_process_masks` takes no `reshaped_input_sizes`), `Qwen25VLAdapter`
+  (`device_map="auto"`, not `.to(device)`) — future runs use the fixed calls.
+- Any future `cv-agent` compositing implementation must alpha-blend `LamaAdapter`'s (or any
+  inpainting candidate's) output through the mask onto an untouched source copy — never use
+  it as a full-frame replacement, per the real pixel-alignment finding above.
+- This ADR should be superseded once every stage has moved past "one preliminary candidate"
+  to a real cross-candidate comparison with broader sample coverage and visual QA.
 
 ## Open questions (need further remote GPU time and/or user input)
 
-- Does `device_map="auto"` (sharding `qwen2.5-vl-7b-instruct` across this environment's 2x
-  T4s) actually fix the OOM, or does the model need int8/int4 quantization or a smaller
-  variant (`qwen3-vl-small`, `internvl3-8b`) instead? Started, not confirmed, this pass.
+- Does `qwen2.5-vl-7b-instruct` correctly assign PRIMARY/SECONDARY/MICRO on a page with an
+  actual drawn motion cue, or does it default to `static` regardless of what's on the page?
+  Neither tested page had an unambiguous motion cue, so this is still unknown.
+- Does `qwen2.5-vl-7b-instruct` fit a single T4/L4 with int8/int4 quantization, for
+  deployment profiles without 2 GPUs? Untested.
 - Exact `transformers`/`diffusers` API for candidates released after this assistant's
   knowledge cutoff (Qwen3-VL, SAM 3) — marked `# VERIFY:` in
-  `scripts/phase2_kaggle_benchmark.py`; the `grounding` stage's `box_threshold`→`threshold`
-  fix this pass is a preview of the kind of correction these will likely also need.
+  `scripts/phase2_kaggle_benchmark.py`; this pass's three real API corrections (grounding,
+  segmentation, vlm) are a preview of the kind of fix these will likely also need.
 - `mayocream/aot-inpainting`'s actual generator architecture and checkpoint format — its
-  adapter currently raises `NotImplementedError` rather than guess.
-- `segmentation` and `inpainting` remain completely untested — zero GPU time was spent on
-  them this pass (prioritized fixing/extending `grounding` and attempting `vlm` first).
-- Real segmentation/inpainting timing is currently only meaningful against a placeholder
-  box/mask (no grounding candidate is selected yet to supply a real one) — re-run once
-  `grounding` is finalized.
+  adapter currently raises `NotImplementedError` rather than guess; recorded as
+  PENDING/NOT RUNNABLE.
+- Visual/qualitative review of SAM2.1 masks and LaMa fills — this pass only had numeric
+  access (IoU scores, pixel-diff statistics, coverage fractions) with no way to render or
+  view images from the Kaggle session. The project's actual acceptance bar for both stages
+  is fundamentally a visual judgment call that numeric proxies only approximate.
+  `qwen3-vl-small`, `internvl3-8b`, `sam3`, `sdxl-inpainting`, `sam3-concept-grounding` — all
+  committed, none run.
+- All real evidence so far is one MangaDex series (full-color manhwa) — a second, visually
+  distinct series (e.g. traditional black-and-white manga) has not been tested for any stage.
