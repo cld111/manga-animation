@@ -1,0 +1,9 @@
+# Remote profile for Kaggle/Jupyter GPU workers (T4, L4, ...). Kaggle is an ephemeral
+# compute worker, not the canonical project copy — see docs/decisions/0003-remote-compute-workers.md.
+
+device: cuda
+dtype: float16 # halves VRAM/bandwidth on T4/L4; revisit per-model in Phase 2 if quality suffers
+resolution: 2048
+batch_size: 2
+num_workers: 2
+debug: false
