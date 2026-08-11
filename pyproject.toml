@@ -31,7 +31,15 @@ video = ["ffmpeg-python>=0.2"]
 # GPU/ML stack. Deliberately left unpinned on torch's CUDA build so it
 # can be installed appropriately per-environment (local Apple MPS vs.
 # Kaggle CUDA) instead of dragging a fixed wheel into the base project.
-ml = ["torch>=2.3"]
+# Phase 3.1 selected one real candidate per model stage (see ADR 0005 and
+# configs/default.yaml's model_variants) -- these four are that selection's actual
+# runtime deps, not the full Phase 2 shortlist (owlv2/sam3/sdxl/etc. stay uninstalled).
+ml = [
+    "torch>=2.3",
+    "transformers>=5.0",
+    "accelerate>=0.30",     # required by device_map="auto" (Qwen2.5-VL sharding, ADR 0005)
+    "simple-lama-inpainting>=0.1",
+]
 
 dev = [
     "pytest>=8.2",

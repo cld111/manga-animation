@@ -4,11 +4,14 @@
 device: auto # resolved at runtime: cuda > mps > cpu
 dtype: float32
 
-# Populated in Phase 2 once models are benchmarked and selected, e.g.:
-#   vlm: qwen2-vl-7b-instruct
-#   grounding: grounding-dino-base
-#   segmentation: sam2-hiera-base
-model_variants: {}
+# Phase 3.1 implementation defaults (see the Phase 3.1 brief and ADR 0005) — preliminary,
+# single-candidate-per-stage selections from Phase 2's benchmarking, not a final
+# cross-candidate comparison. Swappable: see "Model Abstraction" in docs/architecture.md.
+model_variants:
+  vlm: qwen2.5-vl-7b-instruct
+  grounding: grounding-dino-swin-l
+  segmentation: sam2.1-hiera-base
+  inpainting: lama-large
 
 resolution: 1536 # max working long-edge resolution, px
 fps: 24
