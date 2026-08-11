@@ -152,6 +152,7 @@ def run_pipeline(
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient,
     out_dir: Path,
+    plan: AnimationPlan | None = None,
 ) -> PipelineRunResult:
     """Run the complete Phase 3.1 vertical slice on one real manga page.
 
@@ -159,12 +160,30 @@ def run_pipeline(
     fails. `out_dir` receives the rendered MP4 and the intermediate frame sequence (kept, per
     the Phase 3.1 brief's "keep the frame sequence available as an ignored output artifact for
     debugging") -- both are generated, git-ignored artifacts (see ADR 0002), not canonical.
+
+    `plan`: the controlled-fallback escape hatch the Phase 3.1 brief explicitly allows ("If
+    the VLM produces an unusable or ambiguous plan: ... use a controlled fallback/test fixture
+    if necessary; clearly distinguish the fallback from fully automatic operation"). Leave this
+    `None` for real automatic operation (the default, and what every real run should use first).
+    Pass a pre-built `AnimationPlan` ONLY when `analyze_page` has already been run for real and
+    genuinely returned an unusable result (e.g. a defensible all-STATIC read on every candidate
+    object) -- this skips the analysis stage's VLM call entirely, so the caller is responsible
+    for recording that substitution honestly wherever this run's results are reported.
     """
     device = config.resolve_device()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    with StageTimer("analysis", logger, device=device, model=config.model_variants.get("vlm")):
-        plan = analyze_page(image_path, vlm_client, config=config)
+    if plan is None:
+        with StageTimer(
+            "analysis", logger, device=device, model=config.model_variants.get("vlm")
+        ):
+            plan = analyze_page(image_path, vlm_client, config=config)
+    else:
+        logger.warning(
+            "run_pipeline: using an externally supplied AnimationPlan -- the analysis stage's "
+            "VLM call did NOT run for this invocation (controlled-fallback path, see the "
+            "Phase 3.1 brief's failure policy)"
+        )
     primary = _select_primary(plan, str(image_path))
     logger.info(
         "analysis selected PRIMARY object object_id=%s semantic_label=%s transform_kind=%s",

@@ -204,6 +204,75 @@ def test_run_pipeline_loads_and_unloads_grounding_and_segmentation_clients(
     assert grounding_client.unloaded is True
 
 
+# --- controlled-fallback plan override (Phase 3.1 failure policy escape hatch) -------------
+
+
+class ExplodingVLMClient:
+    """Proves the fallback path genuinely skips the analysis stage's VLM call."""
+
+    def generate(self, image, prompt: str) -> str:
+        raise AssertionError("the VLM must not be called when an explicit plan is supplied")
+
+
+@requires_ffmpeg
+def test_run_pipeline_with_explicit_plan_skips_analysis_vlm_call(
+    page_path: Path, config, tmp_path: Path
+):
+    from manga_animation.schemas.animation_plan import (
+        AnimationPlan,
+        BBox,
+        Easing,
+        LoopSpec,
+        MotionSpec,
+        MotionType,
+        ObjectPlan,
+        PanelPlan,
+        PivotSpec,
+        SourceImage,
+        TransformKind,
+        Vector2,
+    )
+
+    w, h = Image.open(page_path).size
+    plan = AnimationPlan(
+        source=SourceImage(path=str(page_path), width=w, height=h),
+        panels=[PanelPlan(panel_id="panel_1", bbox=BBox(x=0, y=0, width=1, height=1))],
+        objects=[
+            ObjectPlan(
+                object_id="obj_banner",
+                panel_id="panel_1",
+                semantic_label="hanging_banner",
+                confidence=0.9,
+                motion_type=MotionType.PRIMARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.TRANSLATE,
+                    direction=Vector2(x=1.0, y=0.0),
+                    amplitude=0.02,
+                    speed=1.0,
+                    easing=Easing.EASE_IN_OUT,
+                    pivot=PivotSpec(x=0.5, y=0.0, reference="object_bbox"),
+                ),
+            )
+        ],
+        loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+    )
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=ExplodingVLMClient(),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        plan=plan,
+    )
+
+    assert result.plan is plan
+    assert result.primary_object.object_id == "obj_banner"
+    assert result.render.output_path.exists()
+
+
 # --- failure propagation (no ffmpeg needed -- these fail before rendering) -----------------
 
 
