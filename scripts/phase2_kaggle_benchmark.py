@@ -100,10 +100,13 @@ class GroundingDinoAdapter:
         )
         with torch.no_grad():
             outputs = self.model(**inputs)
+        # NOTE: transformers 5.0.0 renamed `box_threshold` -> `threshold` on this call
+        # (confirmed via inspect.signature on a real Kaggle T4 run, 2026-08-12) — the
+        # ADR 0004-era `box_threshold` kwarg raises TypeError on this version.
         return self.processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
-            box_threshold=0.25,
+            threshold=0.25,
             text_threshold=0.2,
             target_sizes=[sample.size[::-1]],
         )
@@ -198,6 +201,12 @@ class Qwen25VLAdapter:
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+        # NOTE: confirmed OOM on a real Kaggle T4 (2026-08-12) — `.to("cuda")` onto a
+        # single T4 fails ("CUDA out of memory... 14.15 GiB is allocated by PyTorch" on
+        # a 14.56 GiB card), contradicting ADR 0004's desk-research "fits comfortably on
+        # a T4/L4" claim at float16. Not yet confirmed as fixed: `device_map="auto"`
+        # (sharding across this project's 2xT4 Kaggle profile) is the likely next thing
+        # to try, per docs/decisions/0005-phase2-model-selection.md.
         self.processor = AutoProcessor.from_pretrained(self.source)
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.source, torch_dtype=getattr(torch, self.dtype)

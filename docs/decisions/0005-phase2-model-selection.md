@@ -1,11 +1,11 @@
 # 5. Phase 2 model selection — status and findings
 
 Status: Proposed — **partial**. `deterministic-animation` and `video-rendering` have local,
-executed evidence and a recommended approach. `grounding` has one real (if limited) remote
-GPU pass with a leading candidate, not yet finalized. `vlm`, `segmentation`, and `inpainting`
-have **no executed benchmark evidence** — adapter code is written and committed, but nothing
-has run, because no Kaggle/Jupyter GPU session was available during this pass (see "Open
-questions"). This ADR will be superseded once those three stages have real results.
+executed evidence and a recommended approach. `grounding` now has two real remote-GPU passes
+(n=2, then n=6) with a leading candidate, not yet finalized. `vlm` has one real attempt that
+failed with a genuine, informative OOM — not yet a working candidate. `segmentation` and
+`inpainting` have **no executed benchmark evidence** — adapter code is written and committed,
+but nothing has run. This ADR will be superseded once those stages have real, working results.
 
 ## Context
 
@@ -15,20 +15,25 @@ plus confirm technical feasibility for the two non-model stages
 (`deterministic-animation`, `video-rendering`). Per standing project policy (ADR 0004; see
 [CLAUDE.md](../../CLAUDE.md)), model benchmarking runs on a remote Kaggle/Jupyter GPU worker,
 never locally, and the assistant must ask the user for the server URL rather than guess or
-reuse a stale one. No URL was available during this pass, so the four model-benchmarking
-stages are gated on that; see "Open questions" below.
+reuse a stale one — no URL was available for this ADR's first draft, but one was provided
+partway through this work and used for the `grounding`/`vlm` runs described below (see
+`docs/phase2-benchmark-results.md`'s "Second pass"). `segmentation` and `inpainting` are
+still untested — that GPU time ran out before reaching them; see "Open questions".
 
-What this pass *did* produce, all committed to git (the local canonical copy, per ADR 0002):
+What this pass produced, all committed to git (the local canonical copy, per ADR 0002):
 
 - `scripts/phase2_kaggle_benchmark.py` — a reproducible adapter implementation for all 11
   shortlisted candidates across `vlm`/`grounding`/`segmentation`/`inpainting`, built on the
   existing model-agnostic harness (`manga_animation.benchmarking`, from Phase 2's first
   commit). This fixes a real reproducibility gap: the first grounding-stage benchmark
   (`docs/phase2-benchmark-results.md`) was run ad hoc in a Kaggle notebook, and only its
-  numeric results were committed — the adapter code that produced them was not. Nothing in
-  this script has been executed; several candidates (Qwen3-VL, SAM 3, InternVL3, AOT
-  inpainting) carry explicit `# VERIFY:` comments where the exact library API could not be
-  confirmed against this assistant's knowledge (see "Open questions").
+  numeric results were committed — the adapter code that produced them was not. The
+  `grounding` and `vlm` adapters were exercised for real on a live Kaggle T4x2 session this
+  pass (one real bug found and fixed in `GroundingDinoAdapter`, one real OOM found and
+  documented in `Qwen25VLAdapter` — see "Stage-by-stage status"); `segmentation`/`inpainting`
+  adapters and the `qwen3-vl-small`/`internvl3-8b`/`sam3-concept-grounding` candidates remain
+  unexecuted, several still carrying `# VERIFY:` comments where the exact library API could
+  not be confirmed against this assistant's knowledge (see "Open questions").
 - `scripts/phase2_cv_feasibility.py` — executed locally (CPU, real sample manga page).
   Confirms all six `TransformKind`s are implementable via OpenCV/NumPy and that the
   project's two hard invariants (static-region pixel preservation, seamless-loop math) hold
@@ -47,29 +52,43 @@ otherwise.
 
 ### `vlm` — semantic manga/page analysis
 
-**PENDING — no candidate benchmarked.** Adapters committed for all three shortlisted
-candidates (`qwen2.5-vl-7b-instruct`, `qwen3-vl-small`, `internvl3-8b`); none executed.
-Run with: `uv run python scripts/phase2_kaggle_benchmark.py --stage vlm` on the remote
-worker. `qwen3-vl-small`'s adapter reuses Qwen2.5-VL's chat-template shape as a starting
-point (`# VERIFY:` on the model class) and `internvl3-8b`'s adapter's exact `.chat()` call
-is a placeholder pending its `trust_remote_code` model card — both need first-run
-correction, not just first-run timing.
+**ATTEMPTED — real failure, not yet a working candidate.** `qwen2.5-vl-7b-instruct` loaded
+fully (weights fetched, all 729 shards materialized to CPU) but **OOM'd on
+`.to("cuda")` against a single Kaggle T4** (see `docs/phase2-benchmark-results.md`'s second
+pass, 2026-08-12): float16 weights alone (14.15 GiB) leave essentially no headroom on a
+14.56 GiB-usable T4. This directly contradicts ADR 0004's desk-research claim that this
+model "fits comfortably on a T4/L4." A `device_map="auto"` retry (sharding across this
+environment's 2x T4s) was started but not completed/confirmed this pass — see "Open
+questions." `qwen3-vl-small` and `internvl3-8b` are entirely untried; both may be more
+T4-friendly by virtue of being smaller or better-quantized, but that's a hypothesis, not a
+result. Run with: `uv run python scripts/phase2_kaggle_benchmark.py --stage vlm` on the
+remote worker.
 
 ### `grounding` — object grounding
 
-**PRIMARY (preliminary): `grounding-dino-swin-l`.** One real pass exists
-(`docs/phase2-benchmark-results.md`, Kaggle T4x2, 2 sample pages): markedly faster
-(551.9ms vs. 3091.3ms mean latency) and lighter (1780MB vs. 5150MB peak) than
-`owlv2-vit-l14` on this actual workload — notable because it contradicts the aggregator
-literature ADR 0004 cited (OWLv2 reported *faster*). Explicitly **not final**:
-`docs/phase2-benchmark-results.md`'s own "Next steps" call for a broader sample set,
-per-class threshold sweeps, and a `sam3-concept-grounding` pass before concluding — none of
-which happened this pass (no GPU access). Treat this PRIMARY as "best evidence so far,"
-re-run `scripts/phase2_kaggle_benchmark.py --stage grounding` before treating it as settled.
+**PRIMARY (preliminary, strengthened by a second pass): `grounding-dino-swin-l`.** Two real
+passes now exist (`docs/phase2-benchmark-results.md`):
 
-- **FALLBACK: `owlv2-vit-l14`.** Works, but 5.6x slower and 2.9x more memory on this
-  workload; also noisier at the tested threshold (5 overlapping boxes vs. Grounding DINO's
-  1 clean box) — usable if Grounding DINO fails outright on a page, not a first choice.
+- **Pass 1** (n=2 pages): markedly faster (551.9ms vs. 3091.3ms mean latency) and lighter
+  (1780MB vs. 5150MB peak) than `owlv2-vit-l14` — contradicts the aggregator literature ADR
+  0004 cited (OWLv2 reported *faster*).
+- **Pass 2** (n=6 pages, broader sample, and a real API fix — `transformers` 5.0.0 renamed
+  `post_process_grounded_object_detection`'s `box_threshold` kwarg to `threshold`): mean
+  latency 497.6ms, still clearly faster than OWLv2's 2936.6ms at n=6. More importantly, this
+  pass **resolved pass 1's biggest open question** — at n=2, only `hand` was ever detected;
+  at n=6 with the threshold fix, every prompted class (`face`, `eye`, `hair`, `hand`,
+  `speech bubble`) is detected across the sample set. This was a real methodology bug
+  (wrong kwarg name silently no-op'ing thresholds in a way that suppressed most detections),
+  not a genuine manga-domain weakness — an important correction to how pass 1's qualitative
+  finding should be read.
+
+Still **not final**: both passes are the same one MangaDex series (full-color manhwa);
+per-class threshold sweeps still haven't happened; `sam3-concept-grounding` still untested.
+Treat this PRIMARY as "best evidence so far, now on firmer ground," not settled.
+
+- **FALLBACK: `owlv2-vit-l14`.** Works, consistently ~6x slower and ~1.2x more memory than
+  Grounding DINO across both passes; usable if Grounding DINO fails outright on a page, not
+  a first choice.
 - **PENDING: `sam3-concept-grounding`.** Adapter committed (`# VERIFY:` on exact SAM 3
   class), not yet run — this is also the candidate that could collapse `grounding` +
   `segmentation` into one stage (ADR 0004's architectural note), so it matters beyond just
@@ -146,36 +165,46 @@ Every executed result above records, per the Phase 2 brief's reproducibility req
   and `outputs/experiments/phase2_video_feasibility.json` (git-ignored, regenerable by
   re-running the two scripts; see ADR 0002's "Remote Compute Is Disposable" — the same
   reasoning applies to any generated artifact).
-- **Grounding (existing pass):** environment recorded in `docs/phase2-benchmark-results.md`
-  (GPU, driver, `torch`/`transformers` versions, dtype, sample provenance).
-- **Not-yet-run stages:** `scripts/phase2_kaggle_benchmark.py` records environment metadata
-  (git commit, `torch`/`transformers` versions, GPU name/memory, timestamp) automatically
-  into its output JSON on every run, so the *next* real run is reproducible from the moment
-  it happens — this was the gap the first grounding pass left open.
+- **Grounding (both passes) and the `vlm` attempt:** environment recorded in
+  `docs/phase2-benchmark-results.md` (GPU, driver, `torch`/`transformers` versions, dtype,
+  sample provenance) — including the exact OOM error text for the `vlm` failure, so it's
+  independently verifiable rather than a paraphrased summary.
+- **Not-yet-run stages** (`segmentation`, `inpainting`, `vlm` beyond the one attempt):
+  `scripts/phase2_kaggle_benchmark.py` records environment metadata (git commit,
+  `torch`/`transformers` versions, GPU name/memory, timestamp) automatically into its output
+  JSON on every run, so the *next* real run is reproducible from the moment it happens — this
+  was the gap the first grounding pass (pre-ADR-0005) left open, now fixed for every stage.
+- The repo now has a real git remote (`origin`, GitHub) specifically so the remote worker can
+  `git clone`/`git pull` rather than relying on ad hoc code transfer — closing a gap ADR 0002
+  had assumed was already true but wasn't (no remote existed before this pass).
 
 ## Consequences
 
 - No `configs/default.yaml` `model_variants` entries are populated by this ADR — nothing
-  here is final enough to select, per its own "PENDING" markers above.
-- Phase 3 (Animation Plan generation from real VLM output) cannot start until `vlm` moves
-  out of PENDING — it has zero executed evidence.
+  here is final enough to select, per its own "PENDING"/"ATTEMPTED" markers above.
+- Phase 3 (Animation Plan generation from real VLM output) cannot start until `vlm` has a
+  candidate that actually *runs* — the one attempt so far OOM'd before producing output.
 - The `video-rendering` skill (`.claude/skills/video-rendering/SKILL.md`) gets a short
   addition recording the even-dimensions padding requirement found here.
-- This ADR should be superseded (not edited into a false "Accepted") once `vlm`,
-  `segmentation`, and `inpainting` have real remote-GPU results and `grounding` has the
-  broader validation pass `docs/phase2-benchmark-results.md` already called for.
+- `scripts/phase2_kaggle_benchmark.py`'s `GroundingDinoAdapter` is corrected (`threshold`,
+  not `box_threshold`) based on this pass's real error — future runs use the fixed call.
+- This ADR should be superseded (not edited into a false "Accepted") once `vlm` has a
+  candidate that loads and runs, and `segmentation`/`inpainting` have real remote-GPU
+  results.
 
-## Open questions (need the remote GPU session and/or user input)
+## Open questions (need further remote GPU time and/or user input)
 
-- **A Kaggle/Jupyter server URL** — not guessed or reused per ADR 0003/CLAUDE.md; needed to
-  run `scripts/phase2_kaggle_benchmark.py` for `vlm`, `segmentation`, `inpainting`, and to
-  extend `grounding` per `docs/phase2-benchmark-results.md`'s "Next steps."
+- Does `device_map="auto"` (sharding `qwen2.5-vl-7b-instruct` across this environment's 2x
+  T4s) actually fix the OOM, or does the model need int8/int4 quantization or a smaller
+  variant (`qwen3-vl-small`, `internvl3-8b`) instead? Started, not confirmed, this pass.
 - Exact `transformers`/`diffusers` API for candidates released after this assistant's
   knowledge cutoff (Qwen3-VL, SAM 3) — marked `# VERIFY:` in
-  `scripts/phase2_kaggle_benchmark.py`; first real run on each will need small corrections,
-  not a rewrite.
+  `scripts/phase2_kaggle_benchmark.py`; the `grounding` stage's `box_threshold`→`threshold`
+  fix this pass is a preview of the kind of correction these will likely also need.
 - `mayocream/aot-inpainting`'s actual generator architecture and checkpoint format — its
   adapter currently raises `NotImplementedError` rather than guess.
+- `segmentation` and `inpainting` remain completely untested — zero GPU time was spent on
+  them this pass (prioritized fixing/extending `grounding` and attempting `vlm` first).
 - Real segmentation/inpainting timing is currently only meaningful against a placeholder
   box/mask (no grounding candidate is selected yet to supply a real one) — re-run once
   `grounding` is finalized.
