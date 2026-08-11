@@ -370,6 +370,27 @@ def build_plan(
     return AnimationPlan(source=source, panels=[panel], objects=objects, loop=loop)
 
 
+def _resized_for_vlm(image: Image.Image, max_long_edge: int) -> Image.Image:
+    """Downscale (never upscale) so the VLM sees `config.resolution`'s long edge, not the raw
+
+    source pixels. Real finding (Phase 3.1 first Kaggle run): a tall manga page (720x5062, a
+    ~7:1 aspect ratio, far taller than anything ADR 0005's benchmarking passes used) fed at
+    full resolution produced enough vision tokens to OOM a single T4 during `.generate()`
+    even under `device_map="auto"` sharding — `PipelineConfig.resolution` exists exactly to
+    bound this (see docs/architecture.md's "GPU Awareness") but `analyze_page` wasn't applying
+    it. The `AnimationPlan` this produces is unaffected by the resize: every spatial field is
+    normalized to [0, 1] (see docs/animation-plan-schema.md), and `SourceImage.width/height`
+    below are still the true source dimensions, not this resized copy's.
+    """
+    w, h = image.size
+    long_edge = max(w, h)
+    if long_edge <= max_long_edge:
+        return image
+    scale = max_long_edge / long_edge
+    new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+    return image.resize(new_size, Image.Resampling.LANCZOS)
+
+
 def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig) -> AnimationPlan:
     """Public entry point: real manga page -> validated `AnimationPlan`.
 
@@ -377,5 +398,6 @@ def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig)
     turned into a usable, schema-valid plan with exactly one PRIMARY object.
     """
     image = Image.open(image_path).convert("RGB")
-    decisions = _decisions_from_vlm(client, image, str(image_path))
+    vlm_image = _resized_for_vlm(image, config.resolution)
+    decisions = _decisions_from_vlm(client, vlm_image, str(image_path))
     return build_plan(decisions, image, image_path, config)

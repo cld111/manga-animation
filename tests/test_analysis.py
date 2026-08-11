@@ -21,9 +21,11 @@ class FakeVLMClient:
     def __init__(self, responses: list[str]):
         self._responses = list(responses)
         self.prompts: list[str] = []
+        self.image_sizes: list[tuple[int, int]] = []
 
     def generate(self, image, prompt: str) -> str:
         self.prompts.append(prompt)
+        self.image_sizes.append(image.size)
         if not self._responses:
             raise AssertionError("FakeVLMClient ran out of canned responses")
         return self._responses.pop(0)
@@ -165,3 +167,39 @@ def test_invalid_motion_type_value_triggers_recovery(sample_image_path, config):
     assert len(client.prompts) == 2
     primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
     assert len(primary_objects) == 1
+
+
+def test_tall_page_is_downscaled_to_config_resolution_before_reaching_the_vlm(tmp_path):
+    """Real bug found on the first Kaggle run: a 720x5062 (~7:1) page fed at full resolution
+
+    produced enough vision tokens to OOM a T4 during generate() -- config.resolution exists
+    to bound this (see docs/architecture.md's "GPU Awareness") and analyze_page must apply it
+    to what the VLM actually sees, without changing SourceImage's recorded true dimensions.
+    """
+    tall_page = tmp_path / "tall_page.png"
+    Image.new("RGB", (720, 5062), color=(255, 255, 255)).save(tall_page)
+    config = PipelineConfig(resolution=1024)
+    decisions = [_decision("banner", "primary", motion_description="waves")]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(tall_page, client, config=config)
+
+    assert len(client.image_sizes) >= 1
+    seen_w, seen_h = client.image_sizes[0]
+    assert max(seen_w, seen_h) <= 1024
+    assert seen_h / seen_w == pytest.approx(5062 / 720, rel=0.01)  # aspect ratio preserved
+    # SourceImage keeps the TRUE source dimensions, not the resized copy's
+    assert plan.source.width == 720
+    assert plan.source.height == 5062
+
+
+def test_page_within_resolution_is_not_upscaled(sample_image_path, config):
+    """sample_image_path is 100x200 -- well under the default resolution -- must pass through
+
+    unchanged (never upscaled).
+    """
+    client = FakeVLMClient([json.dumps([_decision("banner", "primary", motion_description="x")])])
+
+    analyze_page(sample_image_path, client, config=config)
+
+    assert client.image_sizes[0] == (100, 200)
