@@ -46,3 +46,19 @@ Concretely:
 - Losing access to a Kaggle session mid-task is an expected, handled situation (report
   unavailability, fall back to local work where possible, ask for a fresh URL when GPU work
   must resume) rather than an exceptional failure.
+
+## Addendum (Phase 3.1): interactive browser access is not the intended transport
+
+Phase 3.1's first real end-to-end run (see [`docs/phase3-results.md`](../phase3-results.md))
+reached the remote Kaggle session via interactive browser automation (Claude Code's
+`claude-in-chrome` integration driving the JupyterLab UI directly), because no programmatic
+transport existed yet. This worked for a one-off run but is explicitly **not** how this
+project's compute split is meant to work day to day: it depends on a live, manually-provided
+URL and an interactive UI session, neither of which is scriptable, reproducible, or usable by
+an unattended/background agent. Per explicit user direction, `claude-in-chrome` has been
+disabled for this project (denied in `.claude/settings.local.json`'s `permissions.deny`) and
+must not be relied on for the normal pipeline/benchmark execution path going forward. A
+programmatic transport (Jupyter REST/kernel API, SSH, or another mechanism, to be determined
+empirically against whatever the remote environment actually supports — not assumed) is
+required before further real-GPU runs happen without manual, interactive access. This is
+scoped, real follow-up work, deliberately not built as part of Phase 3.1.

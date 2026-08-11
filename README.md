@@ -19,7 +19,7 @@ test suite Phase 2+ builds on. See [`docs/pipeline.md`](docs/pipeline.md)
 for the planned pipeline and [`docs/decisions/`](docs/decisions) for why it's
 structured this way.
 
-**Phase 2 — Model benchmarking & selection — in progress.** The candidate
+**Phase 2 — Model benchmarking & selection — accepted.** The candidate
 shortlist and benchmark methodology are written up in
 [`docs/decisions/0004-phase2-model-candidates.md`](docs/decisions/0004-phase2-model-candidates.md),
 with the machine-readable shortlist in
@@ -32,9 +32,21 @@ downloaded or run locally. Reproducible adapter code for every shortlisted candi
 in [`scripts/phase2_kaggle_benchmark.py`](scripts/phase2_kaggle_benchmark.py); local,
 non-GPU feasibility checks for the `deterministic-animation` and `video-rendering` stages
 live in [`scripts/phase2_cv_feasibility.py`](scripts/phase2_cv_feasibility.py) and
-[`scripts/phase2_video_feasibility.py`](scripts/phase2_video_feasibility.py). Current
-per-stage status (PRIMARY/FALLBACK/PENDING) is tracked in
+[`scripts/phase2_video_feasibility.py`](scripts/phase2_video_feasibility.py). Per-stage
+status (PRIMARY/FALLBACK/PENDING) is tracked in
 [ADR 0005](docs/decisions/0005-phase2-model-selection.md).
+
+**Phase 3.1 — First end-to-end vertical slice — real run completed, open gaps documented.**
+Every stage (analysis, grounding, segmentation, reconstruction, animation, compositing,
+rendering) is implemented for real in `src/manga_animation/<stage>` and wired together in
+[`src/manga_animation/pipeline/orchestrator.py`](src/manga_animation/pipeline/orchestrator.py).
+A real manga page was run through the complete pipeline on the remote Kaggle GPU worker,
+producing a genuine, seamlessly-looping H.264 video — see
+[`docs/phase3-results.md`](docs/phase3-results.md) for the full write-up, including two real
+bugs found and fixed (a resolution-driven VLM OOM, a grounding/segmentation dtype mismatch)
+and two open gaps carried into later phases (automatic VLM operation still returns all-STATIC
+on every real page tested so far; the one successful render used a human-authored fallback
+object and exhibits a real grounding-accuracy defect, not just a mechanical one).
 
 Planned phases:
 
@@ -42,10 +54,11 @@ Planned phases:
 |---|---|
 | 1 | Engineering foundation: repo, config, schema, tests, docs, agents/skills |
 | 2 | Model benchmarking & selection (VLM, grounding, segmentation, inpainting) |
-| 3 | Animation Plan generation from real VLM output |
-| 4 | Segmentation, layer decomposition, hidden-region reconstruction |
-| 5 | Deterministic/kinematic animation + secondary motion |
-| 6 | Compositing, seamless looping, H.264 rendering |
+| 3.1 | First end-to-end vertical slice: one real page through every stage |
+| 3.2+ | Reliable automatic VLM PRIMARY assignment; grounding-accuracy gate |
+| 4 | Layer decomposition refinement, hidden-region reconstruction hardening |
+| 5 | Secondary/micro motion, multi-object plans |
+| 6 | Seamless-looping/rendering hardening at scale |
 | 7 | End-to-end QA, evaluation, regression testing |
 
 ## Architecture overview
