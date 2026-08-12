@@ -968,6 +968,224 @@ def test_run_pipeline_still_raises_for_primary_failure_even_with_a_secondary_pre
     assert not (tmp_path / "out" / "output.mp4").exists()
 
 
+def test_run_pipeline_multi_object_bbox_and_mask_are_correctly_associated_per_object_id(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 5 identity-preservation regression: a PRIMARY + SECONDARY plan must never
+    cross-associate one object's grounded bbox or segmented mask with the other's
+    object_id. This is the exact failure mode named in
+    docs/decisions/0010-multi-object-layer-decomposition.md's contract ("mask(A) ->
+    animation(B)") -- the existing multi-object tests only assert `mask.any()`, which
+    would not catch a positional/index mixup between two non-STATIC objects.
+    """
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    box_primary = (10, 10, 60, 90)
+    box_secondary = (70, 100, 110, 150)
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": box_primary, "trailing_cloth": box_secondary}
+    )
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    secondary = result.secondary_objects[0]
+    assert secondary.object_plan.object_id != result.primary_object.object_id
+
+    # Each object keeps its own grounded box -- never the other's.
+    assert result.grounding.bbox.as_xyxy() == box_primary
+    assert secondary.grounding.bbox.as_xyxy() == box_secondary
+
+    # Each object's mask is populated only inside ITS OWN box and is exactly zero inside
+    # the OTHER object's box.
+    px0, py0, px1, py1 = box_primary
+    sx0, sy0, sx1, sy1 = box_secondary
+    assert result.segmentation.mask[py0:py1, px0:px1].all()
+    assert not result.segmentation.mask[sy0:sy1, sx0:sx1].any()
+    assert secondary.segmentation.mask[sy0:sy1, sx0:sx1].all()
+    assert not secondary.segmentation.mask[py0:py1, px0:px1].any()
+
+
+def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loop(
+    config, tmp_path: Path
+):
+    """Practical, visual counterpart to the bbox/mask identity test above, exercised
+    through the REAL animation + layer + compositing + rendering path (not a hand-built
+    `Layer` fixture, unlike tests/test_compositing.py's multi-layer tests). Two distinct,
+    solidly-colored, non-overlapping regions get two distinct real transforms (translate
+    vs. rotate, via the same semantic-label heuristics real pages hit --
+    analysis/plan_builder.py's `_MOTION_HEURISTICS`).
+
+    What this test actually catches: a GROSS spatial mis-association (e.g. object B's
+    segmented region ending up composited near object A's location, or vice versa, or a
+    hole-fill painting the wrong object's color). It deliberately does NOT catch a pure
+    mask<->motion swap that keeps each mask at its own real, correct location (a rigid
+    per-pixel transform stays spatially local to whichever mask array it's given,
+    regardless of which object that mask "belongs to" conceptually, so a same-location
+    color check can't distinguish "translate applied to the right mask" from "rotate
+    applied to the right mask" by color alone) -- see the call-argument-level test below
+    for that.
+    """
+    width, height = 200, 220
+    box_primary = (10, 10, 60, 90)  # "character_hair" -> TRANSLATE (_MOTION_HEURISTICS)
+    box_secondary = (110, 130, 160, 200)  # "raised_hand" -> ROTATE (_MOTION_HEURISTICS)
+    red = (200, 30, 30)
+    blue = (30, 30, 200)
+
+    image = np.full((height, width, 3), (240, 240, 245), dtype=np.uint8)
+    image[box_primary[1] : box_primary[3], box_primary[0] : box_primary[2]] = red
+    image[box_secondary[1] : box_secondary[3], box_secondary[0] : box_secondary[2]] = blue
+    page_path = tmp_path / "two_color_page.png"
+    Image.fromarray(image).save(page_path)
+
+    decisions = [_primary_decision("character_hair"), _secondary_decision("raised_hand")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "raised_hand": box_secondary}
+    )
+
+    out_dir = tmp_path / "out"
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+    primary_motion = result.primary_object.motion
+    secondary_motion = result.secondary_objects[0].object_plan.motion
+    assert primary_motion is not None and primary_motion.transform_kind == "translate"
+    assert secondary_motion is not None and secondary_motion.transform_kind == "rotate"
+
+    frame_paths = sorted((out_dir / "frames").glob("frame_*.png"))
+    assert len(frame_paths) == result.plan.loop.frame_count
+    frames = [np.asarray(Image.open(p).convert("RGB")) for p in frame_paths]
+
+    # Generous padding around each box -- comfortably larger than either transform's real
+    # peak displacement at this amplitude (a few px for translate, ~10px for rotate at the
+    # box's far corner) but still leaving a clear gap between the two padded regions, so a
+    # cross-contamination bug (not merely a slightly-imprecise transform) is what this
+    # test would catch.
+    pad = 15
+
+    def _padded(box: tuple[int, int, int, int]) -> tuple[slice, slice]:
+        x0, y0, x1, y1 = box
+        return (
+            slice(max(0, y0 - pad), min(height, y1 + pad)),
+            slice(max(0, x0 - pad), min(width, x1 + pad)),
+        )
+
+    def _contains_color(region: np.ndarray, color: tuple[int, int, int], atol: int = 10) -> bool:
+        return bool(np.any(np.all(np.abs(region.astype(int) - np.array(color)) <= atol, axis=-1)))
+
+    a_region, b_region = _padded(box_primary), _padded(box_secondary)
+    for i, frame in enumerate(frames):
+        assert not _contains_color(frame[a_region], blue), f"frame {i}: blue leaked into A's region"
+        assert not _contains_color(frame[b_region], red), f"frame {i}: red leaked into B's region"
+
+    # Sanity: both objects actually moved at some point (this test would be vacuous if
+    # neither did) -- at least one frame differs from frame 0 within its own padded region.
+    assert any(not np.array_equal(f[a_region], frames[0][a_region]) for f in frames[1:])
+    assert any(not np.array_equal(f[b_region], frames[0][b_region]) for f in frames[1:])
+
+
+def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
+    page_path: Path, config, tmp_path: Path, monkeypatch
+):
+    """Direct wiring-level identity check for the two seams ADR 0010 explicitly names as the
+    risk ('mask(A) -> animation(B)', 'reconstruction(A) -> layer(B)'):
+    `pipeline.orchestrator.run_pipeline` must call `generate_transformed_layer` and
+    `reconstruct_hidden_region` with each object's OWN mask/motion, never the other
+    object's. A rigid per-pixel transform stays spatially local to whichever mask array
+    it's given regardless of which object that mask conceptually belongs to, so a
+    rendered-pixel check (see the color-bleed test above) cannot reliably distinguish a
+    pure mask<->motion swap between two objects -- this test instead asserts on the real
+    call arguments at the actual stage boundary.
+    """
+    import manga_animation.pipeline.orchestrator as orch
+
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    box_primary = (10, 10, 60, 90)
+    box_secondary = (70, 100, 110, 150)
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": box_primary, "trailing_cloth": box_secondary}
+    )
+
+    animation_calls: list[tuple[np.ndarray, object]] = []
+    real_generate_transformed_layer = orch.generate_transformed_layer
+
+    def spy_generate_transformed_layer(image, mask, motion, panel_bbox, page_shape, t_frac, **kw):
+        animation_calls.append((mask.copy(), motion))
+        return real_generate_transformed_layer(
+            image, mask, motion, panel_bbox, page_shape, t_frac, **kw
+        )
+
+    monkeypatch.setattr(orch, "generate_transformed_layer", spy_generate_transformed_layer)
+
+    reconstruction_calls: list[tuple[str, np.ndarray]] = []
+    real_reconstruct_hidden_region = orch.reconstruct_hidden_region
+
+    def spy_reconstruct_hidden_region(
+        image, original_mask, transformed_masks, client, *, object_id, model_id
+    ):
+        reconstruction_calls.append((object_id, original_mask.copy()))
+        return real_reconstruct_hidden_region(
+            image,
+            original_mask,
+            transformed_masks,
+            client,
+            object_id=object_id,
+            model_id=model_id,
+        )
+
+    monkeypatch.setattr(orch, "reconstruct_hidden_region", spy_reconstruct_hidden_region)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    secondary = result.secondary_objects[0]
+    frame_count = result.plan.loop.frame_count
+    # One call per frame per object -- PRIMARY's whole loop first, then SECONDARY's (the
+    # orchestrator's animation stage loops `for obj in animated_objects: for i in
+    # range(frame_count): ...`), so the calls split cleanly into two contiguous blocks.
+    assert len(animation_calls) == 2 * frame_count
+    primary_calls = animation_calls[:frame_count]
+    secondary_calls = animation_calls[frame_count:]
+
+    for mask_seen, motion_seen in primary_calls:
+        np.testing.assert_array_equal(mask_seen, result.segmentation.mask)
+        assert motion_seen is result.primary_object.motion
+        assert not np.array_equal(mask_seen, secondary.segmentation.mask)
+    for mask_seen, motion_seen in secondary_calls:
+        np.testing.assert_array_equal(mask_seen, secondary.segmentation.mask)
+        assert motion_seen is secondary.object_plan.motion
+        assert not np.array_equal(mask_seen, result.segmentation.mask)
+
+    assert len(reconstruction_calls) == 2
+    reconstruction_masks_by_object_id = dict(reconstruction_calls)
+    np.testing.assert_array_equal(
+        reconstruction_masks_by_object_id[result.primary_object.object_id], result.segmentation.mask
+    )
+    np.testing.assert_array_equal(
+        reconstruction_masks_by_object_id[secondary.object_plan.object_id],
+        secondary.segmentation.mask,
+    )
+
+
 def test_select_primary_raises_when_plan_has_no_primary_object():
     from manga_animation.schemas.animation_plan import AnimationPlan, PanelPlan, SourceImage
 
