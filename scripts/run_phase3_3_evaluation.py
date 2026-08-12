@@ -20,6 +20,12 @@ Usage (on the GPU worker, after `git pull`):
     uv run python scripts/run_phase3_3_evaluation.py --env kaggle
     uv run python scripts/run_phase3_3_evaluation.py --nondeterminism-runs 5
 
+Phase 7.2.2: the nondeterminism check's `--nondeterminism-samples` now defaults to EVERY
+sample_id in the loaded dataset (previously a hardcoded 2-sample subset,
+`sample_page_01`/`sample_page_02` -- the samples the real Phase 3.3/3.3.1/3.3.2 nondeterminism
+finding was based on). Pass it explicitly for a smaller/cheaper subset:
+    uv run python scripts/run_phase3_3_evaluation.py --nondeterminism-samples sample_page_01
+
 Writes `outputs/experiments/phase3_3_evaluation_<timestamp>.json` (per-page, per-mode outcomes;
 both modes' `EvaluationReport`s; nondeterminism summaries) and, for every page/mode that reaches
 rendering, the actual video under `outputs/videos/phase3_3/<mode>/<page-stem>/` (git-ignored
@@ -58,6 +64,13 @@ from manga_animation.pipeline.orchestrator import build_default_clients, run_pip
 from manga_animation.pipeline.types import PipelineStageError
 from manga_animation.schemas.animation_plan import MotionType
 
+# Phase 7.2.2: previously a hardcoded 2-sample subset (sample_page_01/02) -- the real Phase
+# 3.3/3.3.1/3.3.2 nondeterminism finding these two samples motivated. `main()` now defaults
+# `--nondeterminism-samples` to every sample_id in the LOADED dataset (see the `None` sentinel
+# below), so this constant only documents the historical/minimum floor and is used as a
+# fallback if the dataset somehow loads empty -- it does not silently cap real coverage at 2
+# samples going forward, and automatically includes any sample added later without editing
+# this script.
 DEFAULT_NONDETERMINISM_SAMPLE_IDS = ["sample_page_01", "sample_page_02"]
 
 
@@ -247,12 +260,21 @@ def main() -> None:
     parser.add_argument(
         "--nondeterminism-samples",
         nargs="*",
-        default=DEFAULT_NONDETERMINISM_SAMPLE_IDS,
-        help="sample_ids to repeat-run for the nondeterminism check",
+        default=None,
+        help=(
+            "sample_ids to repeat-run for the nondeterminism check. Defaults to EVERY "
+            "sample_id in the loaded dataset (Phase 7.2.2 -- 'the full currently configured "
+            "evaluation dataset, where practical'), not a fixed subset -- pass this "
+            "explicitly to run a smaller/cheaper subset instead."
+        ),
     )
     args = parser.parse_args()
 
     samples = load_eval_dataset()
+    if args.nondeterminism_samples is None:
+        args.nondeterminism_samples = [s.sample_id for s in samples] or (
+            DEFAULT_NONDETERMINISM_SAMPLE_IDS
+        )
     missing = [s for s in samples if not Path(s.image_path).exists()]
     if missing:
         fetchable = [s.image_path for s in missing if s.fetch_script]
