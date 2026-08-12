@@ -171,6 +171,29 @@ ADR implements explicitly required this: no weapon-specific or prompt-specific l
 - Only two real pages and two real semantic categories (`weapon`, `character_hair`) were used as
   live evidence this phase — the same "small honest dataset" caveat every prior phase's real
   evaluation already carries (see `docs/phase3.3-results.md`).
+- **The real end-to-end render described above animated a single PRIMARY object only** (a
+  controlled one-object `AnimationPlan`). It demonstrates that this ADR's grounding fix unblocks
+  a real PRIMARY render on `phase3_action_page.png`; it does **not** demonstrate a real,
+  simultaneous multi-object (PRIMARY + SECONDARY/MICRO, each potentially on a different panel)
+  render against live GPU models — that combination is currently verified only by deterministic
+  fake-client tests (`tests/test_pipeline.py`'s identity/multi-object-safety tests), not by a
+  live run. Not claimed as demonstrated; real future work if needed.
+- The live E2E run confirmed `reconstruction` *ran* (not `None`) but its actual inpainted pixel
+  content was not visually inspected this phase (unlike Phase 4's own real-data hole-mask visual
+  check) — this ADR's evidence covers that reconstruction executes, not that its output quality
+  is correct; that remains the same open, model-quality question ADR 0010's "Revision" section
+  already flagged.
+- **Minor DRY duplication, not a correctness issue**: `grounding/ground.py::_grounding_region`
+  and `validation/transform_geometry.py::_reference_region` independently implement the same
+  "`panel_bbox_px` when given, else the whole page/image as a `BBoxPx`" fallback. Both are
+  correct and independently tested, but a future change to one's edge-case handling could drift
+  from the other undetected. Worth consolidating into one shared `pipeline.types` helper in a
+  future pass; not done here (no correctness bug to justify touching either module further).
+- No test exercises a caller passing `panel_bbox_px` that is inconsistent with the actual
+  `image` array's dimensions (e.g. computed against a different page). Every current production
+  call site derives both from the same `page_shape`, so this is structurally unreachable today,
+  not a live bug — but `ground_object_candidates` itself has no defensive check for it, only
+  numpy's silent-truncation behavior on an out-of-range slice.
 
 ## Open questions
 
@@ -182,3 +205,17 @@ ADR implements explicitly required this: no weapon-specific or prompt-specific l
 - Whether a *second*, tighter crop (e.g. a saliency-based sub-region within a panel) would help
   further on a page where even the panel-level crop still fails is not investigated here — no
   real page in this project's evidence base needed it yet.
+
+## Acceptance
+
+An independent acceptance audit (separate pass, after this ADR's initial "Accepted" status and
+live evidence above were recorded) re-verified every claim in this document against the
+repository, the test suite, and git history rather than trusting this ADR's own account —
+**verdict: PASS**. Confirmed independently: coordinate translation/clipping correctness, the
+`None`/page-mode/`fallback_full_page` fallback equivalence, no existing test weakened or
+deleted, 323/323 tests green with ruff/mypy clean, and every live-evidence number above matches
+the real session output it was transcribed from. The audit is also the source of this section's
+"Known limitations" additions (single-object E2E scope, reconstruction not visually inspected,
+the `_grounding_region`/`_reference_region` duplication, and the untested
+`panel_bbox_px`/`image` consistency assumption) — surfaced, not hidden, and explicitly left
+unfixed as out of Phase 5.1's scope.
