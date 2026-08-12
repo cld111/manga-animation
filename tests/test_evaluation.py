@@ -8,6 +8,7 @@ correctness can be checked exactly.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from manga_animation.evaluation.dataset import EvalSample, load_eval_dataset
 from manga_animation.evaluation.metrics import Rate, compute_metrics
@@ -371,3 +372,141 @@ samples:
     assert len(samples) == 1
     assert samples[0].animation_possible == "uncertain"  # the schema's own safe default
     assert samples[0].expected_target_category is None
+    assert samples[0].annotation_version == 1  # the schema's own safe default
+
+
+# --- ground-truth integrity (Phase 3.3.2) --------------------------------------------------
+#
+# Regression tests for the evaluation-oracle-instability failure class: a real, evidenced
+# incident where `sample_page_02`'s ground truth (`animation_possible: "yes"`) had originally
+# been set on the strength of a single VLM read, then two further independent real sessions had
+# the same VLM read the same page as all-STATIC (docs/phase3.3-results.md's "VLM
+# nondeterminism" section; docs/decisions/0009-evaluation-ground-truth-integrity.md). These
+# tests protect the fix: VLM output must never be able to define or silently change stored
+# ground truth, and evaluation must always compare a prediction against ground truth, never
+# treat one as the other.
+
+
+def test_eval_sample_ground_truth_is_frozen():
+    """A loaded `EvalSample` cannot be mutated in place -- not by a VLM call, not by any other
+
+    in-process code. This is the direct fix for the failure mode this phase investigated: ground
+    truth silently drifting to match whatever a VLM said most recently.
+    """
+    sample = _sample("s", animation_possible="yes")
+    with pytest.raises(ValidationError):
+        sample.animation_possible = "no"  # type: ignore[misc]
+    assert sample.animation_possible == "yes"  # the mutation attempt did not partially apply
+
+
+def test_eval_sample_construction_still_works_when_frozen():
+    """Frozen only blocks post-construction mutation -- normal construction (how every loader
+
+    and test fixture builds a sample) is unaffected.
+    """
+    sample = _sample("s", animation_possible="no", ground_truth_uncertain=False)
+    assert sample.animation_possible == "no"
+
+
+def test_compute_metrics_result_depends_only_on_stored_ground_truth_not_on_predictions():
+    """Two directly conflicting predictions (`PageRunOutcome`s) for the same sample_id, scored
+
+    against the SAME stored ground truth, must each be judged against that one fixed ground
+    truth -- never against each other, and never by treating either prediction as if it were
+    itself the ground truth.
+    """
+    samples = {"hair_page": _sample("hair_page", animation_possible="yes")}
+
+    vlm_session_a_said_usable = compute_metrics([_completed("hair_page")], samples)
+    vlm_session_b_said_static = compute_metrics(
+        [_failed("hair_page", stage="analysis", detail="VLM marked every object STATIC")],
+        samples,
+    )
+
+    # Same ground truth, opposite predictions -> opposite semantic-false-negative verdicts;
+    # the ground truth sample itself is untouched by either call.
+    assert vlm_session_a_said_usable.semantic_false_negative_rate == Rate(0, 1)
+    assert vlm_session_b_said_static.semantic_false_negative_rate == Rate(1, 1)
+    assert samples["hair_page"].animation_possible == "yes"
+
+
+def test_repeated_evaluation_never_mutates_the_real_dataset_manifest():
+    """Running evaluation (even with wildly different, conflicting predictions) many times must
+
+    never alter the on-disk manifest -- ground truth changes only ever happen by hand-editing
+    `configs/phase3_3_eval_dataset.yaml` and committing the change.
+    """
+    from manga_animation.evaluation.dataset import DEFAULT_DATASET_PATH
+
+    before = DEFAULT_DATASET_PATH.read_bytes()
+
+    samples = load_eval_dataset()
+    samples_by_id = {s.sample_id: s for s in samples}
+    conflicting_predictions = [
+        _completed(s.sample_id) if i % 2 == 0 else _failed(s.sample_id, stage="analysis")
+        for i, s in enumerate(samples)
+    ]
+    for _ in range(5):
+        compute_metrics(conflicting_predictions, samples_by_id)
+        load_eval_dataset()  # reload too -- must not pick up any in-memory drift
+
+    after = DEFAULT_DATASET_PATH.read_bytes()
+    assert after == before
+
+
+def test_real_dataset_ground_truth_changes_carry_an_explicit_annotation_version():
+    """`sample_page_02` is this project's one real, evidenced case of a ground-truth revision --
+
+    its `annotation_version` must reflect that it was intentionally revised (2), while every
+    unrevised sample stays at the schema's default (1). A version bump is the auditable signal
+    that a human reviewed and changed the annotation, not that a VLM run overwrote it.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    assert samples["sample_page_02"].annotation_version == 2
+    assert samples["sample_page_02"].animation_possible == "uncertain"
+    assert samples["sample_page_02"].ground_truth_uncertain is True
+    for sample_id, sample in samples.items():
+        if sample_id != "sample_page_02":
+            assert sample.annotation_version == 1
+
+
+def test_transform_geometry_failure_does_not_alter_semantic_ground_truth():
+    """A sample can be semantically true-positive (`animation_possible="yes"`) while a specific
+
+    run fails at the transform-geometry-validation stage (Phase 3.3.1/ADR 0008) -- that failure
+    must count against the pipeline's semantic-false-negative rate exactly like any other
+    failure, but must never be mistaken for, or change, the sample's stored semantic ground
+    truth. Guards against collapsing "semantically animatable" and "safe for this transform"
+    into one label (see ADR 0009's explicit distinction from ADR 0008's).
+    """
+    samples = {"weapon_page": _sample("weapon_page", animation_possible="yes")}
+    geometrically_unsafe_outcome = _failed(
+        "weapon_page",
+        stage="validation",
+        detail=(
+            "all 1 grounding candidate(s) for semantic_label='weapon' failed target "
+            "validation: rank=0 bbox covers 27.6% of its reference region, exceeding the 15% "
+            "bound a rotate target allows"
+        ),
+    )
+    report = compute_metrics([geometrically_unsafe_outcome], samples)
+    assert report.semantic_false_negative_rate == Rate(1, 1)
+    # the ground truth itself never changed -- still semantically "yes", not downgraded because
+    # this particular candidate was geometrically unsafe for its transform.
+    assert samples["weapon_page"].animation_possible == "yes"
+
+
+def test_compute_metrics_is_a_pure_deterministic_function_of_its_inputs():
+    """Repeated evaluation over identical predictions and identical ground truth must produce
+
+    an identical `EvaluationReport` -- the comparison procedure itself is deterministic, even
+    though the real VLM predictions it consumes are not.
+    """
+    samples = {
+        "a": _sample("a", animation_possible="yes"),
+        "b": _sample("b", animation_possible="no"),
+    }
+    outcomes = [_completed("a"), _failed("b", stage="analysis", detail="all STATIC")]
+
+    reports = [compute_metrics(outcomes, samples) for _ in range(5)]
+    assert all(r == reports[0] for r in reports)

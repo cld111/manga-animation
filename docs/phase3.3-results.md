@@ -554,3 +554,199 @@ overly-strict bound, caught by the required re-verification, corrected, and re-c
 working) — real evidence for both directions, not just the one the brief called out. 269 tests
 pass; ruff/mypy clean, locally and on the remote worker. Nothing has been committed to `main`;
 everything above is on `phase-3.3-wip` pending explicit approval.
+
+---
+
+# Phase 3.3.2: evaluation oracle stabilization (ground-truth integrity)
+
+Follow-up investigation, separate narrower brief: a serious evaluation-integrity concern was
+raised after Phase 3.3.1 shipped — `sample_page_02`'s classification had changed between
+independent sessions (once a usable `character_hair` PRIMARY read, twice all-STATIC), and the
+central question was whether this project's evaluation ground truth could be silently redefined
+by VLM output. See [ADR 0009](decisions/0009-evaluation-ground-truth-integrity.md) for the full
+architectural decision; this section is the investigation record.
+
+## Investigation approach
+
+Per CLAUDE.md's standing policy (ADR 0002/0003), no model inference runs locally, and no
+Jupyter/Kaggle URL may be guessed — none was available this session. Rather than block on a new
+live GPU run, this investigation first inventoried the real, already-collected evidence already
+in this repository: three independent real sessions against `sample_page_02.png`, each already
+documented before this phase began:
+
+| Session | When / commit | Result |
+| --- | --- | --- |
+| Phase 3.2 "Run 1" | `docs/phase3.2-results.md` | `PRIMARY: character_hair` (translate), grounded (score 0.610), validated ACCEPT (confidence 0.95), COMPLETED — real MP4 rendered |
+| Phase 3.3 main run | commit `7d05bd2`, `outputs/experiments/phase3_3_evaluation_20260812T094106Z.json` (local, git-ignored per ADR 0002) | all-STATIC (page mode and panel mode both), and all-STATIC in all 3 repeated `analyze_page` calls in the same session's nondeterminism check |
+| Phase 3.3.1 re-check | `outputs/experiments/phase3_3_1_recheck.json` (local, git-ignored) | all-STATIC |
+
+This is real, multi-session evidence: the "usable" read happened exactly once; the all-STATIC
+read has now been independently reproduced twice, in separate process/session boundaries
+(matching the brief's Experiment 3.F distinction — this instability crosses session boundaries,
+not only within-process repeated calls, which Phase 3.3's own nondeterminism harness already
+showed were internally self-consistent within any one of these three sessions).
+
+## Root cause
+
+`Qwen25VLClient.generate()` (`src/manga_animation/analysis/client.py`) calls
+`self._model.generate(**inputs, max_new_tokens=self.max_new_tokens)` with no `do_sample`, no
+`temperature`, and no fixed seed — this was already identified as a real, evidenced gap in
+`docs/phase3.2-results.md` (the original `sample_page_01` flip) and repeated here for
+`sample_page_02`: the model is free to sample differently across calls on byte-identical input,
+and nothing in this codebase constrains that. This is category **(1) genuine VLM
+stochasticity**, compounded by **(4) model/configuration**: the runtime never overrides
+`transformers`' default generation config to make decoding deterministic. No evidence was found
+for categories (2) prompt drift (the exact same `ANALYSIS_PROMPT` constant is reused
+byte-for-byte across all three sessions — verified by reading `plan_builder.py`'s current
+source, unchanged since Phase 3.1), (3) preprocessing differences (`_resized_for_vlm` is a pure
+function of `config.resolution`, unchanged across these sessions), (5)/(6) caching or hidden
+state (no cache layer exists anywhere in the analysis stage), or (7) an incorrect evaluation
+assumption *in the metric computation itself* — `compute_metrics` was already comparing
+predictions against stored `EvalSample` ground truth correctly (see "Architectural diagnosis"
+below for the narrower, real gap that *does* exist).
+
+**Experiment 3 (progressively freezing variables) was not run live this phase** — no remote GPU
+worker was available, and per CLAUDE.md's explicit policy this project does not guess at one.
+This is a real, disclosed limitation (see ADR 0009's "Open questions"), not a gap papered over:
+the existing real evidence is sufficient to identify the *mechanism* (unpinned decoding) without
+a new run, but does not by itself prove decoding-parameter pinning is sufficient to fully
+eliminate the instability — that remains to be confirmed against real hardware in a future
+phase, deliberately not attempted here.
+
+## Scope: dataset-wide stability
+
+Beyond `sample_page_02`, this project's own repeated-run nondeterminism harness
+(`DEFAULT_NONDETERMINISM_SAMPLE_IDS` in `scripts/run_phase3_3_evaluation.py`) only ever covered
+`sample_page_01`/`sample_page_02` — the two samples already flagged from Phase 3.2. The real
+data already collected for the full 5-sample dataset (`docs/phase3.3-results.md`'s "Page-level
+vs. panel-level comparison" table above) shows **every other sample's real outcome has stayed
+directionally consistent across the sessions it was actually re-run in**
+(`phase3_action_page`: grounding-stage failure, both the main run and Phase 3.3.1's re-check;
+`eval_static_dialogue`: all-STATIC, both times; `eval_weapon_effects`: COMPLETED then, after the
+Phase 3.3.1 geometry fix, correctly REJECTed at validation instead — an intentional, understood
+change from the fix itself, not nondeterminism). **`sample_page_01` and `sample_page_02` remain
+the only two samples in this dataset with real, evidenced cross-session instability** — both
+already carry (after this phase's fix) `animation_possible: uncertain` /
+`ground_truth_uncertain: true`. Extending the repeated-run harness to cover all 5 samples, on a
+live worker, is flagged as natural future work, not attempted this phase (no live worker;
+doing so also isn't required to fix the architectural gap this phase targets).
+
+## Architectural diagnosis
+
+`evaluation/metrics.py::compute_metrics` was already, and remains, structurally correct: every
+metric is computed by comparing a `PageRunOutcome`/`RepeatedRunRecord` (a prediction) against an
+`EvalSample` (`evaluation/dataset.py`, ground truth) — never the reverse, and no code path
+anywhere in this project writes to `configs/phase3_3_eval_dataset.yaml` or constructs an
+`EvalSample` from live VLM output. The real gap was narrower and one level removed from the
+obvious form:
+
+1. `EvalSample` was an ordinary **mutable** pydantic model — nothing enforced the immutability
+   the architecture already implicitly relied on.
+2. There was no versioning/audit signal on ground-truth fields beyond raw git history.
+3. `sample_page_02`'s specific ground truth had **insufficient independent provenance**: its
+   `animation_possible: "yes"` traced back to a single VLM classification, "confirmed" only by a
+   pixel-diff of that same classification's own downstream render (real evidence the *rendering*
+   pipeline worked correctly, not independent evidence that hair is *the* justified target on
+   this page) — unlike `eval_static_dialogue`'s STATIC label, which cites a direct check of the
+   source artwork itself.
+
+## Changes made
+
+See [ADR 0009](decisions/0009-evaluation-ground-truth-integrity.md) for full rationale.
+
+- **`src/manga_animation/evaluation/dataset.py`**: `EvalSample` gains `model_config =
+  ConfigDict(frozen=True)` (any mutation now raises `pydantic.ValidationError`) and a new
+  `annotation_version: int` field (default `1`), plus an expanded module docstring making the
+  ground-truth/prediction separation explicit.
+- **`configs/phase3_3_eval_dataset.yaml`**: `sample_page_02`'s `animation_possible` revised
+  `"yes"` → `"uncertain"`, `ground_truth_uncertain` `false` → `true`, `annotation_version`
+  bumped to `2` — the exact same pattern this dataset already used for `sample_page_01`'s
+  cross-session nondeterminism, not a new invented category. `expected_target_category`/
+  `expected_motion_category`/`expected_region_note`/`regression_reference` nulled to match.
+  Every other sample gets an explicit `annotation_version: 1` for auditability. A new header
+  comment documents the versioning convention next to the data it governs.
+- **`docs/decisions/0009-evaluation-ground-truth-integrity.md`**: new ADR.
+- **`tests/test_evaluation.py`**: 7 new tests (see "Tests" below).
+- No changes to `evaluation/metrics.py`, `evaluation/nondeterminism.py`,
+  `evaluation/schemas.py`, or any pipeline stage — this phase's fix is entirely in how ground
+  truth is stored and protected, not in how predictions are computed or compared.
+
+## Ground-truth model
+
+`EvalSample` (frozen, versioned) is this project's only representation of evaluation ground
+truth. `PageRunOutcome`/`RepeatedRunRecord` remain the separate, ordinary-mutable representation
+of what one real pipeline run actually produced (a prediction). `compute_metrics` always takes
+both as separate arguments and only ever reads the `EvalSample` side as the fixed comparison
+target. Changing ground truth now means: edit `configs/phase3_3_eval_dataset.yaml`, bump the
+affected sample's `annotation_version`, and commit — an explicit, reviewed, git-tracked change.
+No code path may do this at runtime; attempting to mutate a loaded `EvalSample` raises
+immediately.
+
+## Tests
+
+7 new tests added to `tests/test_evaluation.py`:
+`test_eval_sample_ground_truth_is_frozen`,
+`test_eval_sample_construction_still_works_when_frozen`,
+`test_compute_metrics_result_depends_only_on_stored_ground_truth_not_on_predictions`,
+`test_repeated_evaluation_never_mutates_the_real_dataset_manifest`,
+`test_real_dataset_ground_truth_changes_carry_an_explicit_annotation_version`,
+`test_transform_geometry_failure_does_not_alter_semantic_ground_truth`,
+`test_compute_metrics_is_a_pure_deterministic_function_of_its_inputs`.
+
+```
+uv run pytest -q      -> 276 passed
+uv run ruff check .   -> All checks passed!
+uv run mypy src       -> Success: no issues found in 41 source files
+```
+
+All 269 pre-existing Phase 1–3.3.1 tests remain green, unmodified.
+
+## Reproducibility demonstration
+
+`test_repeated_evaluation_never_mutates_the_real_dataset_manifest` runs `compute_metrics`
+against the real dataset 5 times with deliberately conflicting synthetic predictions per sample
+(alternating COMPLETED/FAILED for the same `sample_id`s) and asserts
+`configs/phase3_3_eval_dataset.yaml`'s on-disk bytes are byte-identical before and after.
+`test_compute_metrics_result_depends_only_on_stored_ground_truth_not_on_predictions` shows two
+directly opposite predictions for the same sample_id, scored against the same fixed ground
+truth, produce the expected opposite metric verdicts while the ground truth object itself
+(`samples["hair_page"].animation_possible`) is provably untouched by either call.
+
+## Remaining limitations
+
+- Experiment 3 (deterministic decoding config: `temperature=0`/`do_sample=False`/fixed seed) was
+  not run live — no remote GPU worker was available this session, and CLAUDE.md/ADR 0002/0003
+  forbid guessing at one. The mechanism (unpinned decoding in `Qwen25VLClient.generate()`) is
+  well-evidenced by three independent real sessions already in this repository, but pinning it
+  and re-confirming stability is real future work, not done here.
+- The repeated-run nondeterminism harness (`scripts/run_phase3_3_evaluation.py`) still only
+  targets `sample_page_01`/`sample_page_02` by default — extending it to the full dataset on a
+  live worker would strengthen "Scope" above from "no *evidenced* instability elsewhere" to "no
+  instability elsewhere, actively tested," which is a real, honest, currently-open gap.
+- `sample_page_02` no longer has a confident positive-control sample to replace it in this
+  dataset. Establishing a new one requires actual human adjudication — of `sample_page_02`
+  itself (direct visual inspection of `examples/sample_page_02.png` for a real drawn motion cue
+  on the hair) or of a different page — explicitly left to the user, not resolved here.
+- The pre-existing `_check_regression` implementation in `evaluation/metrics.py` only ever
+  flags a *completed* outcome as a regression violation, regardless of which object was
+  actually chosen — a real, separate, pre-existing limitation noticed while reviewing
+  `sample_page_02`'s old `regression_reference` text (which asserted "even going all-STATIC
+  would be a regression," a claim the code never actually checked). Out of this phase's scope
+  (unrelated to ground-truth mutability/provenance) — flagged, not fixed.
+
+## Is the evaluation oracle now stable enough to begin Phase 3.4?
+
+**Ground-truth integrity: yes.** Ground truth is now immutable at the type level, versioned,
+and the one sample with insufficiently independent provenance has been honestly re-labeled
+uncertain rather than left silently overconfident. `compute_metrics` was already comparing
+predictions against stored ground truth correctly; that guarantee is now enforced by
+construction, not merely by convention, and is covered by regression tests.
+
+**VLM prediction reliability: not resolved, and not in this phase's scope.** Two of five
+dataset samples (`sample_page_01`, `sample_page_02`) still have genuinely unstable underlying
+VLM reads — that is a real property of the current unpinned-decoding VLM client, honestly
+recorded as `ground_truth_uncertain` rather than hidden, but it is a *prediction*-quality
+problem, not a ground-truth-integrity one, and fixing it (decoding parameters, prompt work, or
+otherwise) is explicitly out of this phase's brief. A future phase should treat "pin/measure
+VLM decoding determinism" as a real prerequisite before leaning heavily on this dataset's
+usable-target/STATIC rate metrics for go/no-go decisions.
