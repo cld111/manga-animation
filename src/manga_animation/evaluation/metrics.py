@@ -85,13 +85,25 @@ class EvaluationReport:
     end_to_end_completion_rate: Rate
     """Pages that reached a completed run (a real rendered video) / pages attempted."""
     semantic_false_positive_rate: Rate
-    """Among samples with ground-truth animation_possible="no", the fraction that still
+    """Among samples with ground-truth animation_possible="no" AND ground_truth_uncertain=False,
 
-    COMPLETED (the pipeline animated something where a human found no justified target)."""
+    the fraction that still COMPLETED (the pipeline animated something where a human found no
+    justified target). Samples with ground_truth_uncertain=True are excluded from this
+    denominator regardless of their animation_possible value -- see
+    `unresolved_ground_truth_count` (Phase 3.4 baseline cleanup)."""
     semantic_false_negative_rate: Rate
-    """Among samples with ground-truth animation_possible="yes", the fraction that FAILED (the
+    """Among samples with ground-truth animation_possible="yes" AND ground_truth_uncertain=False,
 
-    pipeline found nothing where a human found a real, justified target)."""
+    the fraction that FAILED (the pipeline found nothing where a human found a real, justified
+    target). Same exclusion as `semantic_false_positive_rate` above."""
+    unresolved_ground_truth_count: int
+    """How many of this report's `sample_count` outcomes belong to a sample whose
+
+    `EvalSample.ground_truth_uncertain` is `True` (e.g. `sample_page_01`/`sample_page_02` as of
+    Phase 3.3.2) -- these never contribute to `semantic_false_positive_rate`/
+    `semantic_false_negative_rate`'s numerators or denominators. Reported explicitly so an
+    unresolved sample's exclusion is visible, not an invisible side effect of the rate
+    denominators being smaller than `sample_count` (Phase 3.4 baseline cleanup)."""
     regression_violation_count: int
     """How many samples with a `regression_reference` (a specific, named, known-bad outcome)
 
@@ -121,19 +133,53 @@ def _reached_grounding(outcome: PageRunOutcome) -> bool:
     return not (outcome.status == "failed" and outcome.failing_stage == "analysis")
 
 
+def _target_matches_expectation(
+    primary_semantic_label: str | None, expected_target_category: str
+) -> bool:
+    """Loose, case-insensitive substring match -- mirrors the same style of keyword matching
+
+    `analysis/plan_builder.py::_motion_spec_for` already uses for this project's semantic
+    labels (e.g. `expected_target_category="hair"` matches a VLM-produced
+    `primary_semantic_label="character_hair"`), rather than requiring exact string equality
+    that would never match in practice.
+    """
+    if not primary_semantic_label:
+        return False
+    return expected_target_category.strip().lower() in primary_semantic_label.strip().lower()
+
+
 def _check_regression(outcome: PageRunOutcome, sample: EvalSample | None) -> bool:
     """True if this outcome reproduced the specific, named, known-bad case a sample's
 
-    `regression_reference` describes -- currently: a validated ACCEPT whose grounded candidate
-    the ground-truth notes identify as the known-wrong one. Conservative by construction: only
-    samples that both HAVE a `regression_reference` and whose ground truth says
-    `animation_possible != "no"` (a completion isn't inherently the violation) are checked, and
-    only a `status == "completed"` outcome can violate it -- absence of evidence is not treated
-    as a violation.
+    `regression_reference` describes.
+
+    A completion is NOT inherently a violation -- several flagged samples' own
+    `acceptable_outcome` explicitly allow a validated ACCEPT as a correct result (e.g.
+    `phase3_action_page`: "a validated ACCEPT on a real weapon-shaped or cloth-banner-shaped
+    region" is explicitly acceptable). This only flags a violation when there is real,
+    structured evidence the WRONG target was selected: `status == "completed"` AND
+    `sample.expected_target_category` is recorded AND the outcome's `primary_semantic_label`
+    does not match it (Phase 3.4 baseline cleanup fix -- the previous implementation flagged
+    *any* completed outcome on a flagged sample, which would have falsely flagged a genuinely
+    correct `phase3_action_page` completion as a regression).
+
+    When no `expected_target_category` is recorded (a genuinely open question for some samples
+    -- see `phase3_action_page`'s own manifest entry, which deliberately does not assert a
+    single correct target among several plausible ones), this function cannot distinguish a
+    correct completion from a regression automatically and returns `False`; that specific
+    historical defect is instead re-verified by deliberate reproduction (see
+    docs/phase3.3-results.md's "Phase 3.1/3.2 regression re-verification"), not by this
+    automatic per-run check.
     """
     if sample is None or not sample.regression_reference:
         return False
-    return outcome.status == "completed"
+    if outcome.status != "completed":
+        return False
+    if sample.expected_target_category is None:
+        return False
+    return not _target_matches_expectation(
+        outcome.primary_semantic_label, sample.expected_target_category
+    )
 
 
 def compute_metrics(
@@ -174,6 +220,7 @@ def compute_metrics(
 
     fp_num = fp_den = fn_num = fn_den = 0
     regression_checked = regression_violated = 0
+    unresolved_ground_truth = 0
     for outcome in outcomes:
         sample = samples.get(outcome.sample_id)
         if sample is not None and sample.regression_reference:
@@ -181,7 +228,15 @@ def compute_metrics(
             if _check_regression(outcome, sample):
                 regression_violated += 1
 
-        if sample is None or sample.animation_possible == "uncertain":
+        if sample is None:
+            continue
+        if sample.ground_truth_uncertain:
+            # An unresolved ground truth must never be silently treated as a known positive or
+            # negative label -- gated on the dedicated `ground_truth_uncertain` flag, not on
+            # `animation_possible == "uncertain"` (Phase 3.4 baseline cleanup fix): a sample
+            # could in principle carry a hedged "yes"/"no" that is still marked uncertain, and
+            # the previous check would have let it silently contaminate fp/fn.
+            unresolved_ground_truth += 1
             continue
         if sample.animation_possible == "no":
             fp_den += 1
@@ -209,6 +264,7 @@ def compute_metrics(
         end_to_end_completion_rate=Rate(completed, n),
         semantic_false_positive_rate=Rate(fp_num, fp_den),
         semantic_false_negative_rate=Rate(fn_num, fn_den),
+        unresolved_ground_truth_count=unresolved_ground_truth,
         regression_violation_count=regression_violated,
         regression_samples_checked=regression_checked,
         panel_detection_multi_panel_rate=panel_rate,

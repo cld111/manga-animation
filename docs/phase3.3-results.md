@@ -102,7 +102,7 @@ limitation of a pure-variance-based signal on this kind of layout.
 | Sample | Series | Diversity tag | Ground truth (`animation_possible`) |
 | --- | --- | --- | --- |
 | `sample_page_01` | (Phase 2 fetch, citation not preserved — see manifest) | ambiguous/nondeterministic | uncertain |
-| `sample_page_02` | (Phase 2 fetch, citation not preserved) | hair | yes (Phase 3.2 positive control) |
+| `sample_page_02` | (Phase 2 fetch, citation not preserved) | hair | uncertain — see Phase 3.3.2 below; was "yes" at original Phase 3.3 time of writing |
 | `phase3_action_page` | The Skeleton Soldier Failed to Defend the Dungeon | weapon/action/effects | yes |
 | `eval_static_dialogue` | Who Made Me a Princess | static/dialogue | no |
 | `eval_weapon_effects` | Latna Saga: Survival of a Sword King | weapon/action/effects | yes |
@@ -772,12 +772,12 @@ truth, produce the expected opposite metric verdicts while the ground truth obje
   dataset. Establishing a new one requires actual human adjudication — of `sample_page_02`
   itself (direct visual inspection of `examples/sample_page_02.png` for a real drawn motion cue
   on the hair) or of a different page — explicitly left to the user, not resolved here.
-- The pre-existing `_check_regression` implementation in `evaluation/metrics.py` only ever
-  flags a *completed* outcome as a regression violation, regardless of which object was
-  actually chosen — a real, separate, pre-existing limitation noticed while reviewing
-  `sample_page_02`'s old `regression_reference` text (which asserted "even going all-STATIC
-  would be a regression," a claim the code never actually checked). Out of this phase's scope
-  (unrelated to ground-truth mutability/provenance) — flagged, not fixed.
+- **Fixed in the follow-up pre-Phase-3.4 baseline cleanup** (see the section below): the
+  pre-existing `_check_regression` implementation in `evaluation/metrics.py` flagged *any*
+  completed outcome on a flagged sample as a regression violation, regardless of which object
+  was actually chosen — provably wrong against `phase3_action_page`'s own `acceptable_outcome`,
+  which explicitly allows a validated ACCEPT on a real weapon/banner region as a correct result.
+  Flagged here, out of this phase's own scope; fixed in the dedicated follow-up.
 
 ## Is the evaluation oracle now stable enough to begin Phase 3.4?
 
@@ -788,13 +788,158 @@ predictions against stored ground truth correctly; that guarantee is now enforce
 construction, not merely by convention, and is covered by regression tests.
 
 **VLM prediction reliability: not resolved, and not in this phase's scope.** Two of five
-dataset samples (`sample_page_01`, `sample_page_02`) still have genuinely unstable underlying
-VLM reads across sessions — honestly recorded as `ground_truth_uncertain` rather than hidden,
-but a *prediction*-quality problem, not a ground-truth-integrity one, and fixing it is
-explicitly out of this phase's brief. The live Experiment 3 run ruled out the leading
+dataset samples (`sample_page_01`, `sample_page_02`) — **the only two samples this project has
+ever subjected to its repeated-run session-stability experiment** — carry genuinely unstable
+underlying VLM reads across sessions, honestly recorded as `ground_truth_uncertain` rather than
+hidden. The other three samples' outcomes have stayed directionally consistent across the
+sessions they happened to be re-run in (see "Scope: dataset-wide stability" above), but that is
+not the same experimental coverage as `sample_page_01`/`sample_page_02` received — they have not
+been tested for cross-session instability with the same repeated-run harness, only observed to
+agree across the handful of real runs performed so far. This is a *prediction*-quality problem,
+not a ground-truth-integrity one, and fixing it is explicitly out of this phase's brief. The
+live Experiment 3 run ruled out the leading
 hypothesis (unpinned decoding) as the cause, which means "pin the decoding config" is **not**
 a real fix a future phase can reach for here — the actual mechanism (most plausibly
 cross-session GPU/hardware nondeterminism, unconfirmed) needs real investigation across
 multiple fresh remote sessions before this dataset's usable-target/STATIC rate metrics should
 be leaned on for go/no-go decisions, and a future phase should treat identifying that mechanism
 as the real prerequisite, not assume decoding pinning above.
+
+---
+
+# Pre-Phase 3.4: evaluation baseline cleanup
+
+Narrow, focused follow-up before Phase 3.4 starts: two specific issues left open by Phase
+3.3.2's own "Remaining limitations" were investigated and resolved. Neither is new animation
+capability; both are evaluation-framework correctness.
+
+## Issue A: uncertain ground truth could still leak into binary metrics
+
+`evaluation/metrics.py::compute_metrics` already excluded `sample_page_01`/`sample_page_02`
+from `semantic_false_positive_rate`/`semantic_false_negative_rate` — but the exclusion gate
+checked `sample.animation_possible == "uncertain"`, not the dedicated
+`sample.ground_truth_uncertain` flag. For today's real dataset the two fields happen to always
+agree, so this was not observably wrong yet, but it was the wrong signal: nothing prevented a
+future sample from carrying a hedged, still-uncertain `animation_possible="yes"`/`"no"` (exactly
+what `ground_truth_uncertain`'s own docstring describes — "even the fields above are a
+best-effort read, not a confident one") and silently contaminating a rate as if it were a known
+label. **Fixed**: the gate is now `sample.ground_truth_uncertain`, the one field this schema
+already designates as authoritative for exactly this question. A new `unresolved_ground_truth_
+count` field on `EvaluationReport` makes the exclusion itself visible — comparing it against
+`sample_count` shows how many of a report's samples actually contribute to the two semantic
+rates, rather than leaving that as an invisible side effect of smaller-than-expected
+denominators.
+
+`sample_page_01`/`sample_page_02` themselves were **not** further resolved. No new independent
+evidence exists beyond what Phase 3.3.2 already gathered (this task's own brief explicitly
+excludes chasing GPU-nondeterminism experiments further). Per the operational rule governing
+this cleanup, VLM output — including re-running the model again — is not an acceptable source of
+ground truth, and neither is the assistant's own visual read of the source pages: resolving
+these two samples requires the human project owner to directly inspect
+`examples/sample_page_01.png`/`examples/sample_page_02.png` for a real drawn motion cue on the
+hair, the same evidentiary bar `eval_static_dialogue`'s negative label already meets. **Human
+adjudication is explicitly still required and outstanding** — both samples remain
+`ground_truth_uncertain: true`, correctly excluded from binary metrics rather than guessed at.
+
+## Issue B: `_check_regression` was provably too permissive
+
+Confirmed as a real bug, not merely a theoretical one. `phase3_action_page`'s own manifest entry
+states its `acceptable_outcome` explicitly allows "a validated ACCEPT on a real weapon-shaped or
+cloth-banner-shaped region" as a *correct* result — but the previous `_check_regression`
+implementation (`return outcome.status == "completed"`) would have flagged **any** completed
+outcome on this sample as a regression violation, including a genuinely correct one. The
+function's own docstring already claimed a narrower intent ("a validated ACCEPT whose grounded
+candidate... is the known-wrong one") that the implementation never actually carried out.
+
+**Fixed**: `_check_regression` now only flags a violation when there is real, structured
+evidence the wrong target was selected — `status == "completed"` AND `sample.
+expected_target_category` is recorded AND the outcome's `primary_semantic_label` doesn't match
+it (loose case-insensitive substring match, the same style `analysis/plan_builder.py::
+_motion_spec_for` already uses for this project's semantic labels). When no `expected_target_
+category` is recorded — `phase3_action_page`'s actual real case, since this dataset deliberately
+does not assert a single correct target among several plausible ones — the function now honestly
+returns `False` rather than guessing; that specific historical defect continues to be
+re-verified by deliberate reproduction (see this document's own "Phase 3.1/3.2 regression
+re-verification" section above), not by this automatic per-run check. This real dataset's one
+`regression_reference`-carrying sample (`phase3_action_page`) has never actually reached
+`COMPLETED` in any real run so far (grounding has always failed first), so the fix does not
+change any *historical* recorded number — it changes what would happen the next time this
+sample does complete, closing a real false-alarm risk before Phase 3.4 can trip over it.
+
+## Transform-aware validation (Phase 3.3.1) — unaffected
+
+Neither fix touches `validation/`, `pipeline/orchestrator.py`, or anything ADR 0008 added.
+`sample.animation_possible` (semantic ground truth) and a candidate's `transform_compatible`
+(geometric safety) remain independent axes, unchanged from Phase 3.3.2
+(`tests/test_evaluation.py::test_transform_geometry_failure_does_not_alter_semantic_ground_
+truth`, still passing, untouched).
+
+## Tests added
+
+`tests/test_evaluation.py`: `test_ground_truth_uncertain_flag_excludes_a_sample_even_with_a_
+resolved_animation_possible` (the Issue A fix, direct), `test_real_dataset_uncertain_samples_
+are_excluded_from_semantic_metrics` (real-dataset-level), `test_regression_not_violated_when_
+completed_outcome_selects_the_expected_target` and `test_regression_cannot_be_auto_detected_
+without_an_expected_target_category` (the Issue B fix, both directions) — plus the existing
+`test_regression_violation_is_flagged_only_for_a_completed_outcome_on_a_flagged_sample` was
+renamed to `..._when_completed_outcome_selects_the_wrong_target` and given a real
+`expected_target_category`/mismatching `primary_semantic_label`, since its old assertion
+embodied exactly the bug this cleanup fixes.
+
+```
+uv run pytest -q      -> 280 passed
+uv run ruff check .   -> All checks passed!
+uv run mypy src       -> Success: no issues found in 41 source files
+```
+
+## Baseline evaluation (real data, no new GPU run)
+
+Per this task's own explicit instruction not to chase further GPU-nondeterminism investigation,
+this baseline reuses the real, already-collected page-mode outcomes from the main Phase 3.3 run
+(`outputs/experiments/phase3_3_evaluation_20260812T094106Z.json`, commit `7d05bd2`, all 5 real
+samples), recomputed through the corrected `compute_metrics` — real data, not fabricated, just
+re-scored under the fixed code.
+
+**All evaluation samples (n=5):**
+
+| Metric | Value |
+| --- | --- |
+| usable_target_rate | 3/5 (60.0%) |
+| static_rate | 2/5 (40.0%) |
+| grounding_success_rate | 2/3 (66.7%) |
+| end_to_end_completion_rate | 2/5 (40.0%) |
+| regression_violations | 0/1 |
+
+**Ground-truth-resolved subset (n=3 of 5 — `phase3_action_page`, `eval_static_dialogue`,
+`eval_weapon_effects`; `unresolved_ground_truth_count=2` for `sample_page_01`/`sample_page_02`):**
+
+| Metric | Value |
+| --- | --- |
+| semantic_false_positive_rate | 0/1 (0.0%) |
+| semantic_false_negative_rate | 1/2 (50.0%) |
+
+The operational metrics (usable-target, static, grounding, completion) are computed the same
+way as before — they describe pipeline behavior, not ground-truth-judged correctness, so they
+are not gated on `ground_truth_uncertain`. The two semantic rates are gated, and their
+denominators (1 and 2) now sum to exactly the 3 samples with resolved ground truth, not 5 —
+`unresolved_ground_truth_count` makes that arithmetic explicit instead of leaving it implicit in
+smaller-than-`sample_count` denominators.
+
+## Verdict against this cleanup's acceptance criteria
+
+1. **Evaluation oracle**: ground truth remains immutable and independent of VLM predictions —
+   unchanged from Phase 3.3.2, reconfirmed by the full test suite.
+2. **Uncertain samples**: `sample_page_01`/`sample_page_02` are explicitly retained as
+   unresolved and are now correctly excluded from binary metrics by the authoritative
+   `ground_truth_uncertain` flag — not independently resolved; human adjudication is still
+   required and explicitly flagged, not silently deferred.
+3. **Regression metric**: `_check_regression` was verified incorrect against its own governing
+   sample's `acceptable_outcome` and corrected to require real target-mismatch evidence.
+4. **Transform semantics**: Phase 3.3.1's transform-aware validation is untouched and its
+   regression coverage still passes.
+5. **Documentation**: this document's "Is the evaluation oracle now stable enough" section now
+   explicitly distinguishes the 2 samples actually subjected to the repeated-run stability
+   experiment from the dataset's other 3, which were only observed to agree across incidental
+   re-runs, not tested the same way.
+6. **Tests**: 280 passed (276 → 280, +4 new, 1 renamed/re-scoped).
+7. **Static analysis**: ruff and mypy both clean.

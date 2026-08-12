@@ -294,6 +294,10 @@ def main() -> None:
         print(f"  semantic_false_positive_rate: {r.semantic_false_positive_rate}")
         print(f"  semantic_false_negative_rate: {r.semantic_false_negative_rate}")
         print(
+            f"  unresolved_ground_truth_count: {r.unresolved_ground_truth_count}/"
+            f"{r.sample_count} (excluded from the two rates above)"
+        )
+        print(
             f"  regression_violations: {r.regression_violation_count}/"
             f"{r.regression_samples_checked}"
         )

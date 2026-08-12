@@ -200,11 +200,53 @@ def test_semantic_false_negative_rate_flags_failures_on_yes_target_samples():
 
 
 def test_uncertain_ground_truth_samples_are_excluded_from_fp_fn_denominators():
-    samples = {"ambiguous": _sample("ambiguous", animation_possible="uncertain")}
+    samples = {
+        "ambiguous": _sample(
+            "ambiguous", animation_possible="uncertain", ground_truth_uncertain=True
+        )
+    }
     outcomes = [_completed("ambiguous")]
     report = compute_metrics(outcomes, samples)
     assert report.semantic_false_positive_rate == Rate(0, 0)
     assert report.semantic_false_negative_rate == Rate(0, 0)
+    assert report.unresolved_ground_truth_count == 1
+
+
+def test_ground_truth_uncertain_flag_excludes_a_sample_even_with_a_resolved_animation_possible():
+    """The exclusion gate is `ground_truth_uncertain`, not `animation_possible == "uncertain"`
+
+    (Phase 3.4 baseline cleanup fix) -- a hedged sample that carries a resolved-looking
+    `animation_possible="yes"` but is still marked `ground_truth_uncertain=True` must not
+    silently contaminate semantic_false_negative_rate. Before this fix, only the literal
+    `animation_possible == "uncertain"` value was excluded, so this exact case would have
+    counted as a known positive.
+    """
+    samples = {
+        "hedged": _sample("hedged", animation_possible="yes", ground_truth_uncertain=True)
+    }
+    outcomes = [_failed("hedged", stage="analysis", detail="all STATIC")]
+    report = compute_metrics(outcomes, samples)
+    assert report.semantic_false_negative_rate == Rate(0, 0)
+    assert report.unresolved_ground_truth_count == 1
+
+
+def test_real_dataset_uncertain_samples_are_excluded_from_semantic_metrics():
+    """Real-dataset-level check: of the 5 real samples, exactly the 2 marked
+
+    `ground_truth_uncertain=True` (`sample_page_01`, `sample_page_02`) are excluded from
+    semantic_false_positive_rate/semantic_false_negative_rate's denominators, regardless of
+    what the (synthetic, here) predictions say.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    outcomes = [_completed(sample_id) for sample_id in samples]
+    report = compute_metrics(outcomes, samples)
+    assert report.unresolved_ground_truth_count == 2
+    resolved_count = sum(1 for s in samples.values() if not s.ground_truth_uncertain)
+    assert (
+        report.semantic_false_positive_rate.denominator
+        + report.semantic_false_negative_rate.denominator
+        == resolved_count
+    )
 
 
 def test_samples_missing_from_ground_truth_dict_are_skipped_not_crashed():
@@ -214,22 +256,75 @@ def test_samples_missing_from_ground_truth_dict_are_skipped_not_crashed():
     assert report.semantic_false_negative_rate == Rate(0, 0)
 
 
-def test_regression_violation_is_flagged_only_for_a_completed_outcome_on_a_flagged_sample():
+def test_regression_violation_is_flagged_when_completed_outcome_selects_the_wrong_target():
+    """ground truth: expected target = weapon; pipeline result: COMPLETED, selected = hair --
+
+    a real, structured mismatch, not merely "it completed" (Phase 3.4 baseline cleanup fix: the
+    previous implementation flagged any completion on a flagged sample, regardless of target).
+    """
     samples = {
         "flagged": _sample(
-            "flagged", regression_reference="must never accept the known-bad face crop"
+            "flagged",
+            regression_reference="must never accept the known-bad face crop",
+            expected_target_category="weapon",
         ),
         "unflagged": _sample("unflagged"),
     }
-    outcomes = [_completed("flagged"), _completed("unflagged")]
+    outcomes = [
+        _completed("flagged", primary_semantic_label="hair"),
+        _completed("unflagged", primary_semantic_label="hair"),
+    ]
     report = compute_metrics(outcomes, samples)
     assert report.regression_samples_checked == 1  # only "flagged" carries a reference
-    assert report.regression_violation_count == 1  # it completed -> flagged as a violation
+    assert report.regression_violation_count == 1  # completed, but selected the wrong target
+
+
+def test_regression_not_violated_when_completed_outcome_selects_the_expected_target():
+    """ground truth: expected target = weapon; pipeline result: COMPLETED, selected = weapon --
+
+    a genuinely correct completion must NOT be flagged as a regression (mirrors
+    `phase3_action_page`'s own `acceptable_outcome`, which explicitly allows a validated ACCEPT
+    on a real weapon-shaped region as a good result).
+    """
+    samples = {
+        "flagged": _sample(
+            "flagged",
+            regression_reference="must never accept the known-bad face crop",
+            expected_target_category="weapon",
+        ),
+    }
+    outcomes = [_completed("flagged", primary_semantic_label="raised_weapon")]
+    report = compute_metrics(outcomes, samples)
+    assert report.regression_samples_checked == 1
+    assert report.regression_violation_count == 0
+
+
+def test_regression_cannot_be_auto_detected_without_an_expected_target_category():
+    """Mirrors the real `phase3_action_page` case: a `regression_reference` exists, but
+
+    `expected_target_category` is deliberately left unset because the dataset does not assert
+    a single correct target. `_check_regression` cannot then distinguish a correct completion
+    from a regression automatically, and must not guess -- it stays `False`, not `True`, so a
+    real successful completion is never falsely flagged.
+    """
+    samples = {
+        "flagged": _sample(
+            "flagged", regression_reference="must never ground to the face/dialogue-box region"
+        ),
+    }
+    outcomes = [_completed("flagged", primary_semantic_label="raised_sword")]
+    report = compute_metrics(outcomes, samples)
+    assert report.regression_samples_checked == 1
+    assert report.regression_violation_count == 0
 
 
 def test_regression_not_violated_when_the_flagged_sample_correctly_fails():
     samples = {
-        "flagged": _sample("flagged", regression_reference="must never accept the bad crop"),
+        "flagged": _sample(
+            "flagged",
+            regression_reference="must never accept the bad crop",
+            expected_target_category="weapon",
+        ),
     }
     outcomes = [_failed("flagged", stage="validation", detail="rejected correctly")]
     report = compute_metrics(outcomes, samples)
