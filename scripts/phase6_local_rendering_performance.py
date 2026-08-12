@@ -19,6 +19,15 @@ Timings are wall-clock and therefore environment-dependent — this script repor
 as evidence (see docs/phase6-results.md for one real, captured run), not a pass/fail gate; it
 does not assert on the numbers itself.
 
+Post-Phase-6 follow-up: `_time_generate_transformed_layer` also measures `bbox_of_mask`'s own
+per-call share of the "new" (default, bbox-recomputed-every-call) cost, and a "hoisted" variant
+that calls `generate_transformed_layer(..., object_bbox_px=<precomputed once>)` — mirroring
+`pipeline/orchestrator.py`'s actual per-object usage, where the bbox is computed exactly once
+(from `SegmentationResult.bbox`) and reused across every frame of that object's loop, instead of
+being recomputed via a full-page `np.where` scan on every single frame call. See
+`docs/decisions/0012-phase6-seamless-loop-and-local-rendering.md`'s "Known limitations" and
+`docs/phase6-results.md` for the numbers this closes.
+
 Usage: uv run python scripts/phase6_local_rendering_performance.py
 Requires the `cv` optional dependency group: `uv sync --extra cv`.
 """
@@ -114,6 +123,18 @@ class TimingResult:
     old_mean_ms: float
     new_mean_ms: float
     speedup: float
+    bbox_of_mask_mean_ms: float
+    """Mean cost of a single `bbox_of_mask(mask)` call alone -- isolates the specific cost the
+    post-Phase-6 follow-up fix hoists out of the per-frame loop (see module docstring)."""
+    bbox_of_mask_share_of_new: float
+    """`bbox_of_mask_mean_ms / new_mean_ms` -- what fraction of the default (bbox recomputed on
+    every call) `generate_transformed_layer` cost is this one call."""
+    new_hoisted_mean_ms: float
+    """Mean cost of `generate_transformed_layer(..., object_bbox_px=<precomputed once>)`,
+    mirroring the orchestrator's real per-object-loop usage after the follow-up fix."""
+    hoisted_speedup: float
+    """`old_mean_ms / new_hoisted_mean_ms` -- the end-to-end speedup once the redundant
+    per-frame bbox recomputation is hoisted out, comparable to `speedup` above."""
 
 
 def _make_page(
@@ -153,15 +174,52 @@ def _time_generate_transformed_layer(
         )
     new_elapsed_ms = (time.perf_counter() - start) * 1000.0
 
+    # Isolates bbox_of_mask's own share of the "new" cost above -- the mask never changes across
+    # these calls (same `mask` argument every time, per generate_transformed_layer's own
+    # docstring), so this repeated recomputation is the exact redundancy the follow-up fix
+    # removes when a caller hoists it (see below).
+    start = time.perf_counter()
+    for _t_frac in t_fracs:
+        bbox_of_mask(mask)
+    bbox_elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    # Mirrors pipeline/orchestrator.py's real per-object usage post-fix: the bbox is computed
+    # exactly once (here, outside this timing loop, matching SegmentationResult.bbox being
+    # computed once during segmentation) and passed into every per-frame call, instead of being
+    # recomputed by generate_transformed_layer on every single frame call.
+    precomputed_bbox = bbox_of_mask(mask)
+    start = time.perf_counter()
+    for t_frac in t_fracs:
+        generate_transformed_layer(
+            image,
+            mask,
+            motion,
+            panel_bbox,
+            page_shape,
+            t_frac,
+            loop_duration_s=4.0,
+            object_bbox_px=precomputed_bbox,
+        )
+    hoisted_elapsed_ms = (time.perf_counter() - start) * 1000.0
+
     x0, y0, x1, y1 = object_bbox
+    new_mean_ms = new_elapsed_ms / n_frames
+    bbox_mean_ms = bbox_elapsed_ms / n_frames
+    hoisted_mean_ms = hoisted_elapsed_ms / n_frames
     return TimingResult(
         label=label,
         page_shape=page_shape,
         object_px=(x1 - x0) * (y1 - y0),
         frames_measured=n_frames,
         old_mean_ms=old_elapsed_ms / n_frames,
-        new_mean_ms=new_elapsed_ms / n_frames,
+        new_mean_ms=new_mean_ms,
         speedup=(old_elapsed_ms / new_elapsed_ms) if new_elapsed_ms > 0 else float("inf"),
+        bbox_of_mask_mean_ms=bbox_mean_ms,
+        bbox_of_mask_share_of_new=(bbox_mean_ms / new_mean_ms) if new_mean_ms > 0 else 0.0,
+        new_hoisted_mean_ms=hoisted_mean_ms,
+        hoisted_speedup=(
+            (old_elapsed_ms / hoisted_elapsed_ms) if hoisted_elapsed_ms > 0 else float("inf")
+        ),
     )
 
 

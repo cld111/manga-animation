@@ -110,10 +110,13 @@ interpolation, not simple array arithmetic):
   vector).
 - **`opacity`**: never moves pixels; only the mask-scaling arithmetic is restricted to the
   mask's own bbox (it is `0` everywhere else already, so nothing outside that bbox can differ).
-- `bbox_of_mask` is computed exactly once per `generate_transformed_layer` call and threaded
+- `bbox_of_mask` is computed exactly once *per `generate_transformed_layer` call* and threaded
   into `_mesh_warp_frame`/`_opacity_frame` as a parameter, removing a redundant second
   full-page `np.where` scan the old code performed for `mesh_warp` (and computed, unused, for
-  `opacity`).
+  `opacity`). This closed the *intra-call* redundancy only — it did not address the *cross-frame*
+  redundancy of recomputing the same bbox on every one of a loop's per-frame calls for the same
+  (unchanged) original mask; see "Known limitations" below and its post-Phase-6 follow-up
+  correction for the fix that closes that gap.
 
 **`compositing/__init__.py`**: `composite_frame`'s hole-substitution and alpha blend, and
 `composite_frame_stack`'s equivalents, are restricted to their relevant masks' own bboxes.
@@ -155,12 +158,26 @@ all.
 
 - The full-page zero-initialized array `generate_transformed_layer` still allocates every frame
   (to place the ROI result into, matching `Layer.frames`' unchanged full-page contract) is an
-  **architecturally required, not eliminated** cost — see `docs/phase6-results.md`'s
-  performance evidence: the raw interpolation compute now scales cleanly with the ROI (25x-109x
-  faster in isolation, growing with page size, for a fixed small object), but the end-to-end
-  per-call speedup is smaller (~1.15x-2x) because it is bounded by that allocation floor.
-  Eliminating it would require `Layer`/`compositing` to stop consuming full-page arrays — an
-  architecture change explicitly out of this phase's scope.
+  **architecturally required, not eliminated** cost — measured directly at ~0.02-0.27ms across
+  the tested page sizes (two `np.zeros_like` calls), scaling with page size but small in
+  absolute terms. Eliminating it would require `Layer`/`compositing` to stop consuming full-page
+  arrays — an architecture change explicitly out of this phase's scope.
+  **Correction (post-Phase-6 follow-up)**: this bullet, and `docs/phase6-results.md`'s original
+  performance write-up, incorrectly attributed the *entire* gap between the raw-interpolation
+  speedup (25x-109x, isolated) and the smaller end-to-end `generate_transformed_layer` speedup
+  (~1.15x-2x, observed) to this allocation floor. Direct measurement found the allocation
+  accounts for well under 10% of that gap; the dominant cost (90.8%-97.0% of the "new" per-call
+  time, growing with page size — the signature of a full-page scan, not a fixed allocation) was
+  a separate, avoidable redundancy: `bbox_of_mask(mask)` being recomputed from scratch on
+  **every** `generate_transformed_layer` call, including once per frame from
+  `pipeline/orchestrator.py`'s per-frame animation loop, for the same original (untransformed)
+  object mask whose tight bbox never changes across those calls. Unlike the allocation floor,
+  this was not architecturally required: `generate_transformed_layer` now accepts an optional
+  `object_bbox_px` parameter, and the orchestrator passes `seg.bbox` — the same tight bbox
+  `segmentation/segment.py::_tight_bbox` already computes once, correctly, during segmentation —
+  instead of letting it be silently recomputed every frame. See `docs/phase6-results.md`'s
+  "Post-Phase-6 follow-up" section for the fix and corrected measurements; the allocation-floor
+  cost above remains real, small, and unchanged.
 - The `atol=1` floating-point tolerance for the affine path (see above) is scoped to the
   moving object's own footprint by construction (compositing never reads a layer's pixels where
   its own mask is `0`), but it does mean `generate_transformed_layer`'s returned layer array is
@@ -195,3 +212,6 @@ frame-dump retention policy) was left untouched, per that brief.
   limitations").
 - Phase 4's reconstruction hole-mask formula, Phase 5's identity-safety tests, and Phase 5.1's
   `panel_bbox_px` grounding contract are all unmodified and still pass.
+
+**Post-Phase-6 follow-up (bbox-hoisting fix, see "Known limitations" above)**: `uv run pytest`
+(429 tests, up from 422), `uv run ruff check .`, and `uv run mypy src` all still pass clean.

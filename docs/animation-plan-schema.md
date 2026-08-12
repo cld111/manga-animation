@@ -119,7 +119,7 @@ the last one are visually identical. Two `loop_mode`s are checked against that p
   `sin(2π·(speed·t/duration + phase))`); that curve only returns exactly to its start value
   at `t = duration` when `speed` is a **whole number** of cycles. So under a seamless loop,
   a `cycle` object's `speed` must be integer-valued (`1`, `2`, `3`, ...) — the schema
-  validates this and raises with a message explaining the two ways out (use an integer
+  validates this and raises with a message explaining the three ways out (use an integer
   speed, switch `loop_mode` to `ping_pong`, or set `loop.seamless = False`) rather than just
   rejecting the value.
 - **`once_hold`**: by construction (see `animation/curves.py::sample_motion_value`) this

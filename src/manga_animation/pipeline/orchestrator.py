@@ -417,6 +417,11 @@ def run_pipeline(
                     page_shape,
                     i / frame_count,
                     loop_duration_s=plan.loop.duration_s,
+                    # `seg.bbox` is the same tight bbox `generate_transformed_layer` would
+                    # otherwise recompute from `seg.mask` via a full-page np.where scan on every
+                    # single frame call -- segmentation already computed it once, correctly (see
+                    # `generate_transformed_layer`'s own docstring for why this is safe).
+                    object_bbox_px=seg.bbox,
                 )
                 for i in range(frame_count)
             )

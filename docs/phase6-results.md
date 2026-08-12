@@ -150,24 +150,63 @@ full-page zero-initialized placement array):
 
 | Page | Old mean | New mean | Speedup |
 |---|---|---|---|
-| 600x800 | 1.56 ms | 1.15 ms | 1.35x |
-| 720x5062 | 9.59 ms | 8.21 ms | 1.17x |
-| 1100x6613 | 18.95 ms | 16.25 ms | 1.17x |
+| 600x800 | 1.52 ms | 1.15 ms | 1.32x |
+| 720x5062 | 9.58 ms | 8.12 ms | 1.18x |
+| 1100x6613 | 19.04 ms | 16.29 ms | 1.17x |
 
-Smaller than the raw-warp numbers above, and honestly so: `Layer.frames`' unchanged full-page
-contract requires allocating a full-page zero-initialized array every frame to place the ROI
-result into (see ADR 0012's "Known limitations") — an architecturally required cost this phase
-did not eliminate, deliberately, to avoid changing `Layer`/`compositing`'s existing contract.
-`mesh_warp` shows a larger end-to-end speedup (2.07x, see the table below) than the affine
-kinds (~1.14x) because its old implementation additionally built two full-page float32
-meshgrid arrays before remapping — more baseline overhead to remove, same allocation floor
-remaining after.
+Smaller than the raw-warp numbers above — but **not**, as an earlier version of this section
+claimed, primarily because of the full-page zero-initialized placement array (that allocation
+is real but small, see below). The actual dominant cost in the "New mean" column above is
+`bbox_of_mask(mask)`, called once **every** `generate_transformed_layer` call — including from
+`pipeline/orchestrator.py`'s per-frame animation loop, which calls this function once per
+frame, per object, for the SAME original (untransformed) `mask`, whose tight bbox therefore
+never changes across those calls. Isolating that one call's own share of the "New mean" cost
+above, on the exact same runs:
 
-| Transform kind (720x5062 page) | Old mean | New mean | Speedup |
+| Page | `bbox_of_mask` mean | Share of "New mean" |
+|---|---|---|
+| 600x800 | 1.05 ms | 90.8% |
+| 720x5062 | 7.87 ms | 97.0% |
+| 1100x6613 | 15.74 ms | 96.6% |
+
+That the share *grows* with page size (not just stays large) is the direct evidence this is the
+dominant cost, not the (page-size-independent) allocation: `bbox_of_mask` does a full-page
+`np.where(mask > 0)` scan, so its cost scales with total page pixel count exactly like the
+old full-page `warpAffine` did, while the two `np.zeros_like` allocations below cost a
+near-constant ~0.2-0.3ms regardless of page size.
+
+**Fix (post-Phase-6 follow-up)**: `generate_transformed_layer` now accepts an optional
+`object_bbox_px` parameter; when a caller supplies it, the internal `bbox_of_mask(mask)` call is
+skipped entirely. `pipeline/orchestrator.py`'s per-frame loop now passes `seg.bbox` — the same
+tight bbox already computed once, correctly, during segmentation
+(`segmentation/segment.py::_tight_bbox`, `seg.bbox == bbox_of_mask(seg.mask)` always holds) —
+instead of letting it be silently recomputed on every frame. The script now also measures this
+"hoisted" usage directly (bbox computed once outside the per-frame timing loop, exactly mirroring
+the orchestrator):
+
+| Page | Old mean | New mean (hoisted bbox) | Speedup |
 |---|---|---|---|
-| rotate | 9.47 ms | 8.30 ms | 1.14x |
-| mesh_warp | 16.76 ms | 8.08 ms | 2.07x |
-| translate | 9.22 ms | 8.07 ms | 1.14x |
+| 600x800 | 1.52 ms | 0.078 ms | **19.5x** |
+| 720x5062 | 9.58 ms | 0.187 ms | **51.2x** |
+| 1100x6613 | 19.04 ms | 0.318 ms | **59.9x** |
+
+This is the real end-to-end speedup a rendered loop gets once the redundant per-frame bbox scan
+is hoisted out — now close to the raw-warp-only numbers above (the small remaining gap is the
+two `np.zeros_like` full-page placement-array allocations, still present and still
+architecturally required per `Layer.frames`' unchanged full-page contract; see ADR 0012's
+"Known limitations" for why that cost was deliberately not eliminated).
+
+`mesh_warp` shows a larger "New mean" (bbox-recomputed) end-to-end speedup (2.04x, see the table
+below) than the affine kinds (~1.16-1.18x) because its old implementation additionally built two
+full-page float32 meshgrid arrays before remapping — more baseline overhead to remove, same
+`bbox_of_mask` cost and allocation floor remaining after (the hoisted-bbox variant removes nearly
+all of it for every kind alike, as the table above shows).
+
+| Transform kind (720x5062 page) | Old mean | New mean | New mean (hoisted bbox) | Speedup (hoisted) |
+|---|---|---|---|---|
+| rotate | 9.58 ms | 8.12 ms | 0.215 ms | 44.6x |
+| mesh_warp | 16.64 ms | 8.14 ms | 0.199 ms | 83.5x |
+| translate | 9.26 ms | 8.01 ms | 0.152 ms | 60.8x |
 
 **Multiple simultaneously-animated objects** (1100x6613 page, `composite_frame_stack`):
 
@@ -203,7 +242,9 @@ docstring) — included as evidence against a non-linear regression, not as a ne
 - **Phase 5.1 grounding contract**: `panel_bbox_px` semantics untouched; Phase 6 did not touch
   `grounding`, `validation`, or `analysis`.
 - **Multi-object failure policy** (PRIMARY hard-fail, SECONDARY/MICRO silent drop): untouched;
-  Phase 6 made no change to `pipeline/orchestrator.py`.
+  Phase 6 step 2 made no change to `pipeline/orchestrator.py`. (The post-Phase-6 bbox-hoisting
+  follow-up below does touch it — one line, threading `seg.bbox` into an already-existing call —
+  but does not touch the failure-policy logic itself.)
 - **Deterministic First**: no randomness introduced; every new code path is a pure function of
   its inputs (confirmed by the existing `test_generate_transformed_layer_is_deterministic`
   parametrized test, still passing across all 6 transform kinds).
@@ -215,6 +256,50 @@ affine characteristic, the raw-layer-content contract change outside a mask's fo
 the 5-object/96-frame scope of the multi-object performance evidence). Restated briefly here:
 none of these are correctness regressions; all are disclosed, bounded, and either
 architecturally required or already covered by dedicated regression tests.
+
+**Correction (post-Phase-6 follow-up)**: this section and the "End-to-end
+`generate_transformed_layer`" performance table above originally attributed the gap between the
+raw-warp speedup (25x-109x) and the smaller end-to-end speedup (~1.15x-2x) entirely to the
+full-page zero-initialized placement-array allocation. That allocation is real (~0.02-0.27ms
+across the tested page sizes, confirmed by direct measurement) but was never the dominant term —
+measurement showed it was 90.8%-97.0% attributable to a separate, non-architectural cost:
+`bbox_of_mask(mask)` being recomputed via a full-page `np.where` scan on every single
+`generate_transformed_layer` call, including once per frame from `pipeline/orchestrator.py`'s
+per-frame animation loop, for the SAME object mask whose tight bbox never changes across those
+calls. See the "End-to-end `generate_transformed_layer`" section above for the corrected
+numbers and the fix (an optional `object_bbox_px` parameter, now populated from
+`SegmentationResult.bbox` by the orchestrator). Unlike the allocation floor, this was **not** an
+architecturally required cost — it is now hoisted out, closing nearly all of the gap (see the
+"hoisted bbox" tables above).
+
+## Post-Phase-6 follow-up: per-frame `bbox_of_mask` hoisting
+
+A closure audit of this phase (independent of the implementation above) verified the
+localization work itself was correct, but found the misattribution corrected above: the
+dominant remaining per-call cost was a redundant `bbox_of_mask(mask)` recomputation, not the
+allocation floor. Fix, scoped to exactly this gap:
+
+- `src/manga_animation/animation/transforms.py::generate_transformed_layer` gained an optional
+  `object_bbox_px: BBoxPx | None = None` parameter; when supplied, it is used directly instead
+  of calling `bbox_of_mask(mask)` internally. Omitting it reproduces the exact prior behavior —
+  fully backward compatible for any other caller.
+- `src/manga_animation/pipeline/orchestrator.py`'s per-frame animation loop now passes
+  `seg.bbox` (from `SegmentationResult`, itself computed once by `segmentation/segment.py::
+  _tight_bbox` — the same tight-bbox algorithm as `bbox_of_mask`, so the two always agree for
+  `mask == seg.mask`) — one line of wiring, no other orchestrator changes.
+- `scripts/phase6_local_rendering_performance.py`'s `_time_generate_transformed_layer` now also
+  measures `bbox_of_mask`'s own per-call cost and a "hoisted" variant (bbox computed once,
+  reused across the frame loop) — see the corrected tables above.
+- Regression tests added to `tests/test_animation.py`:
+  `test_generate_transformed_layer_precomputed_bbox_matches_recomputed` (bit-identical output to
+  the no-argument form, across all 6 transform kinds) and
+  `test_generate_transformed_layer_trusts_caller_supplied_bbox_without_revalidation` (documents,
+  deliberately, that a caller-supplied bbox is used as-is with no re-validation against
+  `bbox_of_mask(mask)` — re-validating it would require the exact full-page scan this parameter
+  exists to let callers skip, defeating its purpose; see that test's own docstring).
+
+`uv run pytest` (429 tests), `uv run ruff check .`, and `uv run mypy src` all pass clean after
+this follow-up. No other Phase 6 invariant, test, or contract was touched.
 
 ## Explicitly deferred / out of scope (unchanged from the brief)
 
@@ -243,17 +328,25 @@ failure that would justify touching it).
       reconstruction/timing evidence)
 - [x] no new batch/evaluation framework introduced
 - [x] no Phase 7 scope absorbed
-- [x] pytest fully green (422 tests)
+- [x] pytest fully green (429 tests, up from 422 at the original Phase 6 report — 7 added by the
+      post-Phase-6 bbox-hoisting follow-up)
 - [x] ruff clean
 - [x] mypy clean
 - [x] no tests weakened or removed (one test's invariant was corrected, not weakened — see
       "A real, bounded floating-point finding" above and that test's own docstring)
 - [x] documentation matches implementation (this file + ADR 0012 + updated
       `docs/animation-plan-schema.md` + updated `animation-planning` skill)
+- [x] independent closure audit performed (separate from the implementation above); one real
+      gap found — the "CV cost scales with the animated region" claim did not actually hold
+      end-to-end because of the per-frame `bbox_of_mask` redundancy — and fixed, re-verified,
+      and folded into this file's "Post-Phase-6 follow-up" section and ADR 0012's corrected
+      "Known limitations", rather than accepted on the original report's word
 - [x] git working tree clean at close (see commit list below)
 - [x] no unapproved push occurred
 
-**Verdict: PASS.**
+**Verdict: PASS** (post-follow-up; the original implementation's claims were independently
+audited rather than trusted, one real gap was found and fixed, and this file's numbers reflect
+the corrected, re-measured state).
 
 ## Git state
 
@@ -263,7 +356,10 @@ order:
 1. `Phase 6 step 1: reject once_hold under seamless=True, fix misleading error text`
 2. `Phase 6 step 2: localize CV transform/compositing/reconstruction to the animated region`
 3. `Phase 6 step 3: local-rendering performance evidence script`
-4. Documentation (this commit)
+4. `Phase 6 step 4: document the seamless-loop fix and local-rendering architecture`
+5. Post-Phase-6 follow-up: hoist the per-frame `bbox_of_mask` redundancy out of
+   `generate_transformed_layer`'s hot path, and correct this file's/ADR 0012's performance
+   narrative accordingly (this commit).
 
 Not pushed; no push performed without explicit request, per the Phase 6 brief and standing git
 discipline.

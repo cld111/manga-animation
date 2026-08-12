@@ -584,3 +584,101 @@ def test_localized_transform_multiple_objects_are_independent_and_identity_safe(
     _assert_localized_matches_reference(
         image, mask_b, motion_b, panel_bbox, page_shape, t_frac=0.4, loop_duration_s=4.0
     )
+
+
+# --- object_bbox_px: caller-supplied bbox skips the internal bbox_of_mask(mask) scan --------
+
+
+@pytest.mark.parametrize(
+    "kind,extra",
+    [
+        (TransformKind.ROTATE, dict(amplitude=25.0, direction=None)),
+        (TransformKind.SCALE, dict(amplitude=0.4, direction=None)),
+        (TransformKind.TRANSLATE, dict(amplitude=0.15, direction=Vector2(x=1.0, y=0.4))),
+        (TransformKind.SHEAR, dict(amplitude=0.35, direction=Vector2(x=0.0, y=1.0))),
+        (TransformKind.MESH_WARP, dict(amplitude=0.3, direction=Vector2(x=0.8, y=0.6))),
+        (TransformKind.OPACITY, dict(amplitude=0.6, direction=None)),
+    ],
+)
+def test_generate_transformed_layer_precomputed_bbox_matches_recomputed(kind, extra):
+    """A caller that passes `object_bbox_px=bbox_of_mask(mask)` explicitly (the orchestrator's
+    per-frame animation loop now does exactly this, using `SegmentationResult.bbox` instead of
+    a fresh `bbox_of_mask` call) must get bit-identical output to the default, no-argument form
+    that recomputes the bbox internally -- across every transform kind, since the bbox feeds
+    into the pivot/ROI/margin logic differently per kind.
+    """
+    page_shape, mask_slice = _EDGE_CASE_PAGES["small_object_normal_page"]
+    image, mask = _random_image_and_mask(page_shape, mask_slice, seed=hash(kind) % (2**31))
+    motion = make_motion(transform_kind=kind, phase=0.2, speed=1.0, **extra)
+    panel_bbox = BBoxPx(x0=0, y0=0, x1=page_shape[1], y1=page_shape[0])
+    precomputed_bbox = bbox_of_mask(mask)
+
+    layer_default, mask_default = generate_transformed_layer(
+        image, mask, motion, panel_bbox, page_shape, t_frac=0.6, loop_duration_s=4.0
+    )
+    layer_precomputed, mask_precomputed = generate_transformed_layer(
+        image,
+        mask,
+        motion,
+        panel_bbox,
+        page_shape,
+        t_frac=0.6,
+        loop_duration_s=4.0,
+        object_bbox_px=precomputed_bbox,
+    )
+
+    np.testing.assert_array_equal(layer_default, layer_precomputed)
+    np.testing.assert_array_equal(mask_default, mask_precomputed)
+
+
+def test_generate_transformed_layer_trusts_caller_supplied_bbox_without_revalidation():
+    """Deliberate design choice, not an oversight: `generate_transformed_layer` does NOT check
+    that a caller-supplied `object_bbox_px` actually matches `bbox_of_mask(mask)`. Revalidating
+    it would require running the exact full-page `np.where` scan this parameter exists to let
+    callers skip -- entirely defeating its purpose (see its docstring and
+    `docs/decisions/0012-phase6-seamless-loop-and-local-rendering.md`'s "Known limitations").
+    The contract is caller responsibility (mirroring `Layer`/`SegmentationResult`, which also
+    trust their own fields' internal consistency rather than cross-checking them at construction
+    for anything CPU-costly to re-derive) -- the orchestrator satisfies it by construction,
+    since `SegmentationResult.bbox` is always `_tight_bbox(SegmentationResult.mask)`
+    (`src/manga_animation/segmentation/segment.py`), the same algorithm as `bbox_of_mask`.
+
+    This test documents the resulting behavior when a caller violates that contract: a bbox
+    that does not match the mask's true tight extent is used as-is (no exception, no silent
+    correction) and visibly changes the output relative to the correctly-computed-bbox call --
+    proving the parameter really is used directly, not merely accepted and ignored.
+    """
+    image, mask = make_image_and_mask()
+    motion = make_motion(
+        transform_kind=TransformKind.ROTATE, amplitude=45.0, direction=None, phase=0.25
+    )
+    true_bbox = bbox_of_mask(mask)
+    # Deliberately wrong: shifted well away from the mask's real extent.
+    wrong_bbox = BBoxPx(
+        x0=true_bbox.x0 + 15, y0=true_bbox.y0, x1=true_bbox.x1 + 15, y1=true_bbox.y1
+    )
+
+    layer_correct, mask_correct = generate_transformed_layer(
+        image,
+        mask,
+        motion,
+        PANEL_BBOX,
+        PAGE_SHAPE,
+        t_frac=0.0,
+        loop_duration_s=4.0,
+        object_bbox_px=true_bbox,
+    )
+    layer_wrong, mask_wrong = generate_transformed_layer(
+        image,
+        mask,
+        motion,
+        PANEL_BBOX,
+        PAGE_SHAPE,
+        t_frac=0.0,
+        loop_duration_s=4.0,
+        object_bbox_px=wrong_bbox,
+    )
+
+    # No exception was raised -- the caller-supplied (wrong) bbox was accepted and used, and the
+    # rotation pivot it implies visibly moves the output relative to the correctly-computed one.
+    assert not np.array_equal(mask_correct, mask_wrong)

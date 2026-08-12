@@ -224,6 +224,7 @@ def generate_transformed_layer(
     t_frac: float,
     *,
     loop_duration_s: float,
+    object_bbox_px: BBoxPx | None = None,
 ) -> tuple[ImageArray, MaskArray]:
     """The transformed (layer, mask) for one frame at `t_frac` (`[0, 1)` of the loop).
 
@@ -231,11 +232,25 @@ def generate_transformed_layer(
     every frame is generated from this same source, never from a previously-transformed frame,
     which is what makes the compositing stage's static-region guarantee structural rather than
     cumulative-error-prone (see `src/manga_animation/compositing`).
+
+    `object_bbox_px`, if given, is used as `mask`'s tight bbox directly instead of recomputing it
+    via `bbox_of_mask(mask)`. This is a per-frame-call cost, not a per-object one: a caller (e.g.
+    the orchestrator's per-frame animation loop) that invokes this function once per frame for
+    the SAME original `mask` would otherwise pay a full-page `np.where` scan on every single
+    frame for a bbox that never changes across those calls, even though it was already computed
+    once, correctly, by `segmentation-agent` (`SegmentationResult.bbox`,
+    `src/manga_animation/segmentation/segment.py::_tight_bbox`, the same tight-bbox algorithm as
+    `bbox_of_mask` — the two are guaranteed to agree for `mask == SegmentationResult.mask`). The
+    caller is responsible for only passing a bbox that actually matches `mask`'s own tight
+    extent; this function does not re-validate it (see the docstring's caller-responsibility note
+    below and the accompanying test for why). Omit it (the default) for the old, self-contained
+    behavior — still exactly correct, just recomputed every call.
     """
     t_s = t_frac * loop_duration_s
     value = sample_motion_value(motion, t_s, loop_duration_s)
 
-    object_bbox_px = bbox_of_mask(mask)
+    if object_bbox_px is None:
+        object_bbox_px = bbox_of_mask(mask)
     kind = motion.transform_kind
 
     if kind == TransformKind.OPACITY:

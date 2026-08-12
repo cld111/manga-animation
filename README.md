@@ -181,12 +181,18 @@ region) against a kept-verbatim copy of the old full-page implementation, across
 edge/corner/extreme-aspect-ratio/off-page/distant-pivot/multi-object/overlapping-layer cases.
 Real measurements: the raw interpolation cost itself now scales cleanly with the animated
 region (25x-109x faster in isolation, growing with page size, for a fixed small object,
-completely decoupled from page pixel count); end-to-end per-call cost improves by a smaller,
-honestly-reported ~1.15x-2x, bounded by the full-page placement array `Layer`'s unchanged
-contract still requires allocating every frame. See
+completely decoupled from page pixel count). A post-Phase-6 closure audit independently
+verified this but found the initially-reported end-to-end speedup (~1.15x-2x) was bottlenecked
+almost entirely (91-97%) by an unrelated, avoidable redundancy — `generate_transformed_layer`
+recomputing the object's bbox via a full-page scan on every single frame instead of reusing the
+one segmentation already computed — not, as first reported, by the small full-page placement
+array `Layer`'s contract still requires allocating every frame. With that hoisted (an optional
+`object_bbox_px` parameter, now fed from `SegmentationResult.bbox`), end-to-end speedup reaches
+~20x-60x, close to the raw-interpolation numbers above. See
 [ADR 0012](docs/decisions/0012-phase6-seamless-loop-and-local-rendering.md) for the full design
-and [`docs/phase6-results.md`](docs/phase6-results.md) for the complete evidence, all captured
-locally (no GPU/remote work needed — both fixes are deterministic CPU/OpenCV/NumPy code).
+and [`docs/phase6-results.md`](docs/phase6-results.md) for the complete evidence — including the
+audit correction — all captured locally (no GPU/remote work needed — every fix here is
+deterministic CPU/OpenCV/NumPy code).
 
 Planned phases:
 
