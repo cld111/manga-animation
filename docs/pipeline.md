@@ -22,7 +22,9 @@ Structured Animation Plan       — src/manga_animation/schemas
     │  (see animation-plan-schema.md) — the contract point of the whole pipeline
     ▼
 Object grounding                — src/manga_animation/grounding
-    │  map each Animation Plan object to a region of the actual image
+    │  map each Animation Plan object to a region of the actual image; grounds against the
+    │  object's real panel crop when one is known, else the full page (Phase 5.1, see
+    │  docs/decisions/0011-panel-aware-grounding.md) — always returns full-page coordinates
     ▼
 Target validation                — src/manga_animation/validation
     │  ACCEPT/REJECT: does the grounded region actually depict the intended target?

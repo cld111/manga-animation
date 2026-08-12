@@ -142,6 +142,27 @@ rejected by target validation) — a real, pre-existing grounding limitation, no
 multi-object defect. See ADR 0010's "Revision (Phase 5 audit)" section for the full real-run
 table and honest gap characterization.
 
+**Phase 5.1 — panel-aware grounding: the `phase3_action_page.png` grounding failure above is
+root-caused and fixed; a real multi-object-eligible end-to-end render is now observed for the
+first time.** A follow-up live investigation found the failure was never weapon-specific: the
+full 720x5062 page produced 0 Grounding DINO candidates for *every* tested category (weapon,
+hair, person, character, face alike), while the same categories scored strongly (0.34-0.76) on
+real, already-computed panel crops from `analysis/panels.py::detect_panels` — a preprocessing/
+scale effect on this extreme-aspect-ratio page, not a model or lexical limitation. Grounding DINO
+now runs against an object's real panel crop when one is known (full-page fallback unchanged for
+pages with no real panel structure), translating detections back to full-page coordinates before
+anything downstream sees them — see [ADR 0011](docs/decisions/0011-panel-aware-grounding.md) for
+the full design, coordinate contract, and test coverage. Real GPU validation: the same PRIMARY
+`weapon`/`ROTATE` object that previously failed at grounding on `phase3_action_page.png` now
+grounds (score 0.43), passes real semantic validation (Qwen2.5-VL, confidence 0.95) and real
+transform-geometry validation, segments (real SAM 2.1, IoU 0.82), reconstructs, and renders a
+real, seamless-loop-verified `output.mp4` — the first real end-to-end render this project has
+produced for a page with genuine multi-object potential. `eval_weapon_effects.png`'s own
+PRIMARY failure is unaffected by this fix (its panel detector already returns a whole-page
+fallback panel, so its grounding crop is unchanged) and its existing semantic/geometric
+rejections were reconfirmed byte-identical under the new architecture — no validation was
+weakened to obtain the improvement above.
+
 Planned phases:
 
 | Phase | Scope |
@@ -152,7 +173,7 @@ Planned phases:
 | 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
 | 3.3 | Panel-aware analysis + reproducible evaluation framework |
 | 4 | Layer decomposition — **implemented**; hidden-region reconstruction hardening — **one real bug found and fixed** (`_compute_hole_mask`), other candidate failure modes audited and found already correct; real-model validation still pending |
-| 5 | Secondary/micro motion, multi-object plans — **software substantially delivered as part of Phase 4** (see above); real-page VLM evidence of genuine multi-object plans **now obtained** (2/5 real pages, 3/3 reproducible); a real end-to-end multi-object *render* has not yet been observed (both real multi-object pages share a PRIMARY object blocked by an unrelated, pre-existing grounding limitation) |
+| 5 | Secondary/micro motion, multi-object plans — **software substantially delivered as part of Phase 4** (see above); real-page VLM evidence of genuine multi-object plans **now obtained** (2/5 real pages, 3/3 reproducible); Phase 5.1 root-caused and fixed the grounding limitation blocking both real multi-object pages' PRIMARY object on `phase3_action_page.png` (panel-aware Grounding DINO cropping, ADR 0011) and observed a real, complete end-to-end render for the first time; `eval_weapon_effects.png`'s separate, unrelated PRIMARY rejection (candidate-correctness, not scale) is unaffected and unresolved |
 | 6 | Seamless-looping/rendering hardening at scale |
 | 7 | End-to-end QA, evaluation, regression testing |
 
