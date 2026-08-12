@@ -60,7 +60,10 @@ packages = ["src/manga_animation"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m \"not slow\""
+markers = [
+    "slow: opt-in wall-clock performance regression tests, excluded from the default run (see docs/phase7-results.md) -- run explicitly with `uv run pytest -m slow`.",
+]
 
 [tool.ruff]
 line-length = 100

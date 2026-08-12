@@ -30,10 +30,30 @@ def _grounding_region(image: ImageArray, panel_bbox_px: BBoxPx | None) -> BBoxPx
     Deliberately the *only* place that "no region given" gets turned into a concrete box, so
     every caller below this point (the crop, the local->page translation) works off one region,
     never a special-cased `None`.
+
+    Phase 7.1.4 (defensive regression, see docs/decisions/0011-panel-aware-grounding.md's
+    "Known limitations"): every real call site derives `panel_bbox_px` and `image` from the
+    same `page_shape`, so a `panel_bbox_px` that doesn't fit inside `image`'s actual bounds is
+    structurally unreachable in production -- but before this check, nothing here caught it
+    either; `image[region.y0:region.y1, region.x0:region.x1]` would have silently truncated an
+    out-of-range slice instead of surfacing the caller bug. Boundary-exact (`x1 == w`/`y1 == h`)
+    stays valid -- that's the ordinary full-page-equivalent case every existing caller relies on.
     """
-    if panel_bbox_px is not None:
-        return panel_bbox_px
     h, w = image.shape[0], image.shape[1]
+    if panel_bbox_px is not None:
+        if (
+            panel_bbox_px.x0 < 0
+            or panel_bbox_px.y0 < 0
+            or panel_bbox_px.x1 > w
+            or panel_bbox_px.y1 > h
+        ):
+            raise ValueError(
+                f"panel_bbox_px {panel_bbox_px.as_xyxy()} is inconsistent with the actual "
+                f"image dimensions ({w}x{h}) -- every real call site derives both from the "
+                "same page_shape, so this indicates a caller bug, not a valid crop request; "
+                "numpy's silent out-of-range slice truncation would otherwise hide it"
+            )
+        return panel_bbox_px
     return BBoxPx(x0=0, y0=0, x1=w, y1=h)
 
 

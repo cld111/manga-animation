@@ -1219,6 +1219,290 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
     )
 
 
+# --- Phase 7.1.1: multi-object E2E encode/decode regression --------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_multi_object_e2e_encode_decode_regression(config, tmp_path: Path):
+    """Phase 7.1.1: a deterministic multi-object scenario through the REAL render/encode path,
+    decoded back from the actual .mp4 on disk (not the intermediate frame PNGs, and not a
+    mocked render) -- extends
+    `test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loop`'s coverage
+    (which only checks the pre-encode frame PNGs) with a genuine decode-verification pass,
+    matching what a real evaluation/QA consumer would actually observe. Fake VLM/grounding/
+    segmentation/reconstruction clients; real animation/compositing/rendering/ffmpeg encode
+    and a real `cv2.VideoCapture` decode. No GPU needed.
+    """
+    import cv2
+
+    width, height = 200, 220
+    box_primary = (10, 10, 60, 90)  # "character_hair" -> TRANSLATE (_MOTION_HEURISTICS)
+    box_secondary = (110, 130, 160, 200)  # "raised_hand" -> ROTATE (_MOTION_HEURISTICS)
+    static_box = (10, 130, 60, 200)  # touched by neither object -- must stay unchanged
+    red = (200, 30, 30)
+    blue = (30, 30, 200)
+    green = (30, 180, 30)
+
+    image = np.full((height, width, 3), (240, 240, 245), dtype=np.uint8)
+    image[box_primary[1] : box_primary[3], box_primary[0] : box_primary[2]] = red
+    image[box_secondary[1] : box_secondary[3], box_secondary[0] : box_secondary[2]] = blue
+    image[static_box[1] : static_box[3], static_box[0] : static_box[2]] = green
+    page_path = tmp_path / "two_color_page.png"
+    Image.fromarray(image).save(page_path)
+
+    decisions = [_primary_decision("character_hair"), _secondary_decision("raised_hand")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "raised_hand": box_secondary}
+    )
+
+    out_dir = tmp_path / "out"
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    # -- successful render, expected frame count/resolution -----------------------------------
+    assert result.render.output_path.exists()
+    assert result.render.frame_count == result.plan.loop.frame_count
+    assert result.render.resolution == (width, height)
+
+    # -- seamless loop verification ------------------------------------------------------------
+    assert result.render.seamless_loop_verified is True
+
+    # -- object identity preservation ----------------------------------------------------------
+    assert result.primary_object.semantic_label == "character_hair"
+    assert len(result.secondary_objects) == 1
+    assert result.secondary_objects[0].object_plan.semantic_label == "raised_hand"
+    assert result.secondary_objects[0].object_plan.object_id != result.primary_object.object_id
+
+    # -- decode the ACTUAL encoded .mp4 for real, independent of render()'s own internal
+    # validation, to prove the file on disk really contains what's expected ------------------
+    cap = cv2.VideoCapture(str(result.render.output_path))
+    decoded_frames = []
+    ok, frame = cap.read()
+    while ok:
+        decoded_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        ok, frame = cap.read()
+    cap.release()
+    assert len(decoded_frames) == result.render.frame_count
+
+    pad = 15  # see test_run_pipeline_multi_object_no_color_bleed... for why this is generous
+    # but still leaves a clear gap between the two padded regions.
+
+    def _padded(box: tuple[int, int, int, int]) -> tuple[slice, slice]:
+        x0, y0, x1, y1 = box
+        return (
+            slice(max(0, y0 - pad), min(height, y1 + pad)),
+            slice(max(0, x0 - pad), min(width, x1 + pad)),
+        )
+
+    def _contains_color(region: np.ndarray, color: tuple[int, int, int], atol: int = 12) -> bool:
+        return bool(np.any(np.all(np.abs(region.astype(int) - np.array(color)) <= atol, axis=-1)))
+
+    a_region, b_region = _padded(box_primary), _padded(box_secondary)
+    sx0, sy0, sx1, sy1 = static_box
+    for i, frame in enumerate(decoded_frames):
+        # -- static-region preservation (H.264 is lossy -- a flat solid patch stays close to
+        # its source color, not bit-exact; a real compositing bug would show a gross drift,
+        # not a small quantization delta) ------------------------------------------------------
+        static_patch = frame[sy0:sy1, sx0:sx1].astype(int)
+        assert np.abs(static_patch - np.array(green)).mean() < 8, (
+            f"frame {i}: static region drifted from its source color -- possible "
+            "compositing/reconstruction leak into an untouched region"
+        )
+        # -- no cross-object color/mask contamination -------------------------------------------
+        assert not _contains_color(frame[a_region], blue), f"frame {i}: blue leaked into A's region"
+        assert not _contains_color(frame[b_region], red), f"frame {i}: red leaked into B's region"
+
+    # Sanity: both objects actually moved (this test would be vacuous otherwise).
+    assert any(
+        not np.array_equal(f[a_region], decoded_frames[0][a_region]) for f in decoded_frames[1:]
+    )
+    assert any(
+        not np.array_equal(f[b_region], decoded_frames[0][b_region]) for f in decoded_frames[1:]
+    )
+
+
+# --- Phase 7.1.2: whole-pipeline determinism regression -------------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_is_deterministic_for_identical_fake_inputs(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 7.1.2: identical deterministic/fake inputs through the WHOLE orchestration path
+    (analysis -> grounding -> validation -> segmentation -> animation -> reconstruction ->
+    compositing -> rendering) must produce byte-identical composited frames, run to run.
+
+    This tests DETERMINISTIC PIPELINE CODE ONLY -- every client here is a fake, deterministic
+    stand-in for a real model. It says nothing about, and does not attempt to claim, real VLM
+    determinism -- see docs/decisions/0009-evaluation-ground-truth-integrity.md's real,
+    opposite finding (Qwen2.5-VL is NOT reproducibly deterministic run to run on live GPU
+    hardware, even with forced-greedy decoding) -- that finding is untouched by this test.
+    """
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    boxes_by_label = {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+
+    def _run(out_dir: Path) -> PipelineRunResult:
+        return run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(list(decisions)),
+            grounding_client=MultiObjectFakeGroundingClient(dict(boxes_by_label)),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=out_dir,
+        )
+
+    result_a = _run(tmp_path / "run_a")
+    result_b = _run(tmp_path / "run_b")
+
+    # Plan-level determinism -- not just pixels.
+    assert result_a.primary_object.semantic_label == result_b.primary_object.semantic_label
+    assert result_a.primary_object.motion == result_b.primary_object.motion
+    assert result_a.grounding.bbox.as_xyxy() == result_b.grounding.bbox.as_xyxy()
+    assert len(result_a.secondary_objects) == len(result_b.secondary_objects) == 1
+    assert (
+        result_a.secondary_objects[0].object_plan.motion
+        == result_b.secondary_objects[0].object_plan.motion
+    )
+
+    # Pixel-level determinism -- the actual composited frame sequence written before encoding.
+    frames_a = sorted((tmp_path / "run_a" / "frames").glob("frame_*.png"))
+    frames_b = sorted((tmp_path / "run_b" / "frames").glob("frame_*.png"))
+    assert len(frames_a) == len(frames_b) == result_a.plan.loop.frame_count
+    for fa, fb in zip(frames_a, frames_b, strict=True):
+        arr_a = np.asarray(Image.open(fa).convert("RGB"))
+        arr_b = np.asarray(Image.open(fb).convert("RGB"))
+        np.testing.assert_array_equal(arr_a, arr_b)
+
+
+# --- Phase 7.1.3: panel-aware regression on real phase3_action_page.png geometry ------------
+
+_PHASE3_ACTION_PAGE = Path(__file__).resolve().parents[1] / "examples" / "phase3_action_page.png"
+
+requires_phase3_action_page = pytest.mark.skipif(
+    not _PHASE3_ACTION_PAGE.exists(),
+    reason=(
+        "examples/phase3_action_page.png is not present locally -- panel-aware real-geometry "
+        "regression skipped, not fabricated (see docs/decisions/0002-local-canonical-source.md)"
+    ),
+)
+
+
+@requires_ffmpeg
+@requires_phase3_action_page
+def test_run_pipeline_panel_aware_regression_on_real_action_page_geometry(config, tmp_path: Path):
+    """Phase 7.1.3: deterministic regression coverage using `phase3_action_page.png`'s REAL
+    720x5062 dimensions and REAL detected panel geometry (`analysis/panels.py::detect_panels`,
+    no VLM call) through the panel-aware grounding path (ADR 0011) -- fake VLM/grounding/
+    segmentation/reconstruction clients, but real panel detection and real localized CV
+    rendering against this project's real extreme-aspect-ratio evaluation page (the same page
+    ADR 0011's own live-GPU evidence used).
+    """
+    from manga_animation.analysis.panels import detect_panels
+    from manga_animation.pipeline.types import bbox_px_to_normalized
+    from manga_animation.schemas.animation_plan import (
+        AnimationPlan,
+        Easing,
+        LoopSpec,
+        MotionSpec,
+        MotionType,
+        ObjectPlan,
+        PanelPlan,
+        PivotSpec,
+        SourceImage,
+        TransformKind,
+    )
+
+    image = np.asarray(Image.open(_PHASE3_ACTION_PAGE).convert("RGB"))
+    height, width = image.shape[0], image.shape[1]
+    # Documents the real, known geometry this regression targets (see ADR 0011's evidence table).
+    assert (width, height) == (720, 5062)
+
+    real_panels = detect_panels(image)
+    assert len(real_panels) >= 1  # the real detector must find at least the whole-page fallback
+
+    # Prefer a real detected gutter panel over the degenerate whole-page fallback when one
+    # exists (matching ADR 0011's own real live-evidence panel, panel_01) -- falls back to
+    # whatever detect_panels actually returns if this page's real detector output ever changes.
+    gutter_panels = [p for p in real_panels if p.source == "gutter_xy_cut"]
+    target_panel = gutter_panels[1] if len(gutter_panels) > 1 else real_panels[0]
+    assert target_panel.bbox.width > 0 and target_panel.bbox.height > 0
+
+    panel_bbox_norm = bbox_px_to_normalized(
+        target_panel.bbox, page_width=width, page_height=height
+    )
+    plan = AnimationPlan(
+        source=SourceImage(path=str(_PHASE3_ACTION_PAGE), width=width, height=height),
+        panels=[PanelPlan(panel_id="real_panel", bbox=panel_bbox_norm)],
+        objects=[
+            ObjectPlan(
+                object_id="obj_weapon",
+                panel_id="real_panel",
+                semantic_label="weapon",
+                confidence=0.9,
+                motion_type=MotionType.PRIMARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.ROTATE,
+                    amplitude=8.0,
+                    speed=1.0,
+                    easing=Easing.SINE,
+                    pivot=PivotSpec(x=0.5, y=1.0, reference="object_bbox"),
+                ),
+            )
+        ],
+        loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+    )
+
+    # A small, in-bounds local box relative to the real panel's own real crop dimensions --
+    # exercises the real local-to-page coordinate translation (ADR 0011) against real panel
+    # geometry, not a synthetic placeholder. Sized/margined as fractions of the real panel so
+    # it clears validation/transform_geometry.py's ROTATE edge-margin and area-fraction checks
+    # regardless of which real panel detect_panels() happens to return.
+    panel_w, panel_h = target_panel.bbox.width, target_panel.bbox.height
+    margin_x, margin_y = panel_w // 4, panel_h // 4
+    box_w, box_h = panel_w // 4, panel_h // 6
+    local_box = (margin_x, margin_y, margin_x + box_w, margin_y + box_h)
+    grounding_client = RecordingGroundingClient({"weapon": local_box})
+
+    result = run_pipeline(
+        _PHASE3_ACTION_PAGE,
+        config,
+        vlm_client=FakeVLMClient([], verification_matches=True),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        plan=plan,
+    )
+
+    # Grounding must have seen the real panel's own real crop, not the real 720x5062 full page.
+    assert len(grounding_client.calls) == 1
+    called_shape, called_prompt = grounding_client.calls[0]
+    assert called_prompt == "weapon."
+    assert called_shape == (target_panel.bbox.height, target_panel.bbox.width, 3)
+    assert called_shape != (height, width, 3)
+
+    # Translated back to real full-page coordinates -- offset by the real panel's own origin.
+    expected_bbox = (
+        local_box[0] + target_panel.bbox.x0,
+        local_box[1] + target_panel.bbox.y0,
+        local_box[2] + target_panel.bbox.x0,
+        local_box[3] + target_panel.bbox.y0,
+    )
+    assert result.grounding.bbox.as_xyxy() == expected_bbox
+
+    assert result.render.output_path.exists()
+    assert result.render.resolution == (width, height)
+    assert result.render.seamless_loop_verified is True
+
+
 def test_select_primary_raises_when_plan_has_no_primary_object():
     from manga_animation.schemas.animation_plan import AnimationPlan, PanelPlan, SourceImage
 

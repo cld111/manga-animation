@@ -189,11 +189,15 @@ ADR implements explicitly required this: no weapon-specific or prompt-specific l
   correct and independently tested, but a future change to one's edge-case handling could drift
   from the other undetected. Worth consolidating into one shared `pipeline.types` helper in a
   future pass; not done here (no correctness bug to justify touching either module further).
-- No test exercises a caller passing `panel_bbox_px` that is inconsistent with the actual
-  `image` array's dimensions (e.g. computed against a different page). Every current production
-  call site derives both from the same `page_shape`, so this is structurally unreachable today,
-  not a live bug — but `ground_object_candidates` itself has no defensive check for it, only
-  numpy's silent-truncation behavior on an out-of-range slice.
+- ~~No test exercises a caller passing `panel_bbox_px` that is inconsistent with the actual
+  `image` array's dimensions...~~ **Closed (Phase 7.1.4)**: `grounding/ground.py::
+  _grounding_region` now raises `ValueError` when `panel_bbox_px` doesn't fit inside `image`'s
+  actual bounds, instead of relying on numpy's silent out-of-range slice truncation. Boundary-
+  exact panels (`x1 == width`/`y1 == height`, the ordinary full-page-equivalent case every real
+  caller already produces) remain valid — only a genuinely out-of-range box now raises. See
+  `tests/test_grounding.py`'s "Phase 7.1.4" section. This is a defensive check only; every real
+  production call site still derives both values from the same `page_shape` as before, so no
+  caller's actual behavior changes.
 
 ## Open questions
 
