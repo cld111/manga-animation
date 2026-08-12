@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from manga_animation.grounding.client import Detection
+from manga_animation.grounding.client import Detection, _detections_from_scores_boxes_labels
 from manga_animation.grounding.ground import (
     _prompt_from_label,
     ground_object,
@@ -164,6 +164,54 @@ def test_ground_object_candidates_raises_when_every_detection_is_degenerate():
     with pytest.raises(PipelineStageError) as exc_info:
         ground_object_candidates(make_image(h=100, w=100), make_object_plan(), client)
     assert exc_info.value.stage == "grounding"
+
+
+# --- _detections_from_scores_boxes_labels (real Phase 3.2 finding) -------------------------
+
+
+def test_detections_from_scores_boxes_labels_normal_aligned_case():
+    detections = _detections_from_scores_boxes_labels(
+        scores=[0.9, 0.5],
+        boxes=[[1, 2, 3, 4], [5, 6, 7, 8]],
+        text_labels=["hair", "face"],
+        fallback_label="fallback",
+    )
+    assert [d.label for d in detections] == ["hair", "face"]
+    assert [d.score for d in detections] == pytest.approx([0.9, 0.5])
+    assert detections[0].box == (1, 2, 3, 4)
+
+
+def test_detections_from_scores_boxes_labels_handles_zero_detections_with_placeholder_label():
+    """Real, reproduced Phase 3.2 finding: a zero-detection `post_process_grounded_object_
+
+    detection` result can still return `text_labels=['']` (length 1) while `scores`/`boxes`
+    are correctly length 0 -- must not raise, must return an empty list.
+    """
+    detections = _detections_from_scores_boxes_labels(
+        scores=[], boxes=[], text_labels=[""], fallback_label="weapon"
+    )
+    assert detections == []
+
+
+def test_detections_from_scores_boxes_labels_falls_back_when_labels_run_short():
+    detections = _detections_from_scores_boxes_labels(
+        scores=[0.9, 0.5],
+        boxes=[[1, 2, 3, 4], [5, 6, 7, 8]],
+        text_labels=["hair"],  # shorter than scores/boxes
+        fallback_label="fallback_prompt",
+    )
+    assert [d.label for d in detections] == ["hair", "fallback_prompt"]
+
+
+def test_detections_from_scores_boxes_labels_still_raises_when_scores_and_boxes_disagree():
+    """scores/boxes mismatching each other (unlike a labels mismatch) is not a known real
+
+    case -- keep failing loudly on it rather than silently truncating.
+    """
+    with pytest.raises(ValueError, match="zip"):
+        _detections_from_scores_boxes_labels(
+            scores=[0.9, 0.5], boxes=[[1, 2, 3, 4]], text_labels=["hair"], fallback_label="x"
+        )
 
 
 def test_ground_object_delegates_to_candidates_and_returns_the_top_one():

@@ -8,6 +8,7 @@ inside methods — this module must stay importable on a machine with no GPU sta
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -21,6 +22,30 @@ class Detection:
     label: str
     score: float
     box: tuple[int, int, int, int]  # (x0, y0, x1, y1), pixel coords in the input image
+
+
+def _detections_from_scores_boxes_labels(
+    scores: Sequence[float],
+    boxes: Sequence[Sequence[float]],
+    text_labels: Sequence[str],
+    fallback_label: str,
+) -> list[Detection]:
+    """Pure assembly logic, deliberately separated from `GroundingDinoClient.detect`'s
+
+    tensor/model handling so it's unit-testable without `torch` installed (see this module's
+    docstring). `scores`/`boxes` are the two fields confirmed, by direct reproduction on a real
+    Kaggle run (Phase 3.2's first real end-to-end run), to always be the same length as each
+    other. `text_labels` is NOT reliably the same length -- a real, reproduced zero-detection
+    case returned `scores`/`boxes` of length 0 but `text_labels=['']` (a length-1 placeholder).
+    Pull the label opportunistically by index rather than zipping a third, unreliably-aligned
+    sequence against the two that are actually guaranteed to match.
+    """
+    detections = []
+    for i, (score, box) in enumerate(zip(scores, boxes, strict=True)):
+        label = text_labels[i] if i < len(text_labels) else fallback_label
+        x0, y0, x1, y1 = (int(v) for v in box)
+        detections.append(Detection(label=str(label), score=float(score), box=(x0, y0, x1, y1)))
+    return detections
 
 
 class GroundingClient(Protocol):
@@ -73,13 +98,13 @@ class GroundingDinoClient:
             target_sizes=[(image.shape[0], image.shape[1])],
         )
         result = results[0]
-        detections = []
-        for label, score, box in zip(
-            result["labels"], result["scores"], result["boxes"], strict=True
-        ):
-            x0, y0, x1, y1 = (int(v) for v in box.tolist())
-            detections.append(Detection(label=str(label), score=float(score), box=(x0, y0, x1, y1)))
-        return detections
+        text_labels = result.get("text_labels", result.get("labels", []))
+        return _detections_from_scores_boxes_labels(
+            scores=result["scores"].tolist(),
+            boxes=result["boxes"].tolist(),
+            text_labels=[str(t) for t in text_labels],
+            fallback_label=text_prompt,
+        )
 
     def unload(self) -> None:
         import torch

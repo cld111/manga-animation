@@ -125,6 +125,15 @@ def _run_one_page(
         record["failure_detail"] = exc.detail
         record["validation_attempts"] = []
         return record
+    except Exception as exc:  # noqa: BLE001 -- one page's unexpected crash must not stop
+        # the rest of the aggregate run (or lose already-collected pages' data); recorded
+        # distinctly from a PipelineStageError so it's clear this was NOT one of the
+        # pipeline's own classified failure modes -- see `failing_stage: "unexpected"`.
+        record["status"] = "FAILED"
+        record["failing_stage"] = "unexpected"
+        record["failure_detail"] = f"{type(exc).__name__}: {exc}"
+        record["validation_attempts"] = []
+        return record
 
     record["status"] = "COMPLETED"
     record["primary_object"] = {
