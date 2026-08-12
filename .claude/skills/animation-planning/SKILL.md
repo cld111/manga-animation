@@ -46,10 +46,14 @@ Practical defaults:
 - `speed=1` for slow, single-sway motion across the whole loop (most hair/cloth sway).
 - `speed=2` or `3` for faster repeated motion (a flickering effect, a fast flag flap) within
   the same 3–5s loop — higher `speed` reads as faster motion without changing loop length.
-- If a motion should only happen once and hold (not repeat), use `loop_mode="once_hold"`
-  instead of forcing an integer `speed` onto a non-cyclic motion.
+- If a motion should only happen once and hold (not repeat), use `loop_mode="once_hold"` —
+  but only when `loop.seamless=False`. `once_hold` holds its end state indefinitely and
+  never returns to rest, so the schema rejects it outright under a seamless loop (it would
+  always produce a visible jump at the loop boundary); do not reach for it on a plan that
+  needs `loop.seamless=True`.
 - Use `loop_mode="ping_pong"` for a motion that should read as "there and back" without
-  necessarily being a clean sinusoid (arbitrary `speed` is fine here).
+  necessarily being a clean sinusoid (arbitrary `speed` is fine here) — this is the
+  seamless-safe replacement for a one-shot motion when the loop must stay seamless.
 
 ## `phase` for multiple related objects
 

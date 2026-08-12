@@ -315,7 +315,16 @@ class AnimationPlan(BaseModel):
                     f"object '{obj.object_id}' has non-integer speed={obj.motion.speed} with "
                     "loop_mode='cycle' under a seamless loop; a cyclic motion must complete a "
                     "whole number of cycles to return to its start state (use an integer speed, "
-                    "switch loop_mode to 'once_hold'/'ping_pong', or set loop.seamless=False)"
+                    "switch loop_mode to 'ping_pong', or set loop.seamless=False)"
+                )
+
+            if self.loop.seamless and timing.loop_mode == "once_hold":
+                raise ValueError(
+                    f"object '{obj.object_id}' uses loop_mode='once_hold' under a seamless "
+                    "loop; once_hold sweeps away from rest (0.0) and then holds its end state "
+                    "indefinitely, so it never returns to frame 0's rest state and always "
+                    "breaks the seamless-loop boundary (switch loop_mode to 'ping_pong', which "
+                    "returns to rest on its own, or set loop.seamless=False)"
                 )
         return self
 

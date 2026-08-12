@@ -107,18 +107,33 @@ generation step to declare children top-down.
 - **`easing`** — `linear` / `ease_in` / `ease_out` / `ease_in_out` / `sine`.
 - **`timing`** — `delay_s` (when motion starts within the loop), `duration_s` (`None` =
   spans the rest of the loop), and `loop_mode`: `cycle` (repeats), `once_hold` (plays once,
-  holds the end state), or `ping_pong` (plays forward then reverse).
+  holds the end state — only valid when `loop.seamless=False`, see below), or `ping_pong`
+  (plays forward then reverse).
 
-## The seamless-loop constraint on `speed`
+## The seamless-loop constraint on `speed` and `loop_mode`
 
 `LoopSpec.seamless` (default `True`) means the plan promises frame 0 and the frame after
-the last one are visually identical. For a `loop_mode="cycle"` object, the underlying
-motion curve is periodic (e.g. `sin(2π·(speed·t/duration + phase))`); that curve only
-returns exactly to its start value at `t = duration` when `speed` is a **whole number** of
-cycles. So: under a seamless loop, a `cycle` object's `speed` must be integer-valued
-(`1`, `2`, `3`, ...) — the schema validates this and raises with a message explaining the
-three ways out (use an integer speed, switch to `once_hold`/`ping_pong`, or set
-`loop.seamless = False`) rather than just rejecting the value.
+the last one are visually identical. Two `loop_mode`s are checked against that promise:
+
+- **`cycle`**: the underlying motion curve is periodic (e.g.
+  `sin(2π·(speed·t/duration + phase))`); that curve only returns exactly to its start value
+  at `t = duration` when `speed` is a **whole number** of cycles. So under a seamless loop,
+  a `cycle` object's `speed` must be integer-valued (`1`, `2`, `3`, ...) — the schema
+  validates this and raises with a message explaining the two ways out (use an integer
+  speed, switch `loop_mode` to `ping_pong`, or set `loop.seamless = False`) rather than just
+  rejecting the value.
+- **`once_hold`**: by construction (see `animation/curves.py::sample_motion_value`) this
+  mode sweeps away from rest (`0.0`) once and then holds its end state (`1.0`) for the rest
+  of the loop — it never returns to `0.0` on its own. Every fresh loop iteration restarts the
+  object at rest, so pairing `once_hold` with a seamless loop always produces a visible jump
+  at the boundary (held end state -> rest), regardless of `speed`, `easing`, or how long the
+  motion window is. The schema therefore rejects `once_hold` outright whenever
+  `loop.seamless=True`, for any object that carries motion. `once_hold` remains valid — and
+  is the correct choice for a genuinely one-shot, non-repeating motion — whenever
+  `loop.seamless=False`.
+- **`ping_pong`** returns to rest (`0.0`) on its own once its window closes (see the same
+  module), so it is compatible with a seamless loop at any `speed`, integer or not — it is
+  the recommended replacement for both of the cases above when the loop must stay seamless.
 
 `AnimationPlan` also validates that every object's `delay_s + duration_s` fits inside
 `loop.duration_s` — a motion window that runs past the end of the loop is rejected at plan

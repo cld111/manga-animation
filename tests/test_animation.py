@@ -167,6 +167,48 @@ def test_cycle_frame_pixels_match_at_loop_boundary():
     np.testing.assert_array_equal(mask_0, mask_1)
 
 
+def test_once_hold_frame_pixels_do_not_match_at_loop_boundary():
+    # Mechanical justification for AnimationPlan rejecting once_hold under seamless=True
+    # (schemas/animation_plan.py): once_hold holds its end state rather than returning to
+    # rest, so — unlike the cycle/integer-speed and ping_pong cases above — its frame at the
+    # loop boundary genuinely differs from frame 0.
+    image, mask = make_image_and_mask()
+    motion = make_motion(
+        transform_kind=TransformKind.ROTATE,
+        amplitude=20.0,
+        timing=TimingSpec(loop_mode="once_hold"),
+    )
+
+    frame_0, mask_0 = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    frame_1, mask_1 = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=1.0, loop_duration_s=4.0
+    )
+    assert not np.array_equal(frame_0, frame_1) or not np.array_equal(mask_0, mask_1)
+
+
+def test_ping_pong_frame_pixels_match_at_loop_boundary():
+    # Unlike once_hold, ping_pong returns to rest on its own — it stays a valid seamless
+    # replacement even at a non-integer speed (schemas/animation_plan.py allows it).
+    image, mask = make_image_and_mask()
+    motion = make_motion(
+        transform_kind=TransformKind.ROTATE,
+        amplitude=20.0,
+        speed=1.5,
+        timing=TimingSpec(loop_mode="ping_pong"),
+    )
+
+    frame_0, mask_0 = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    frame_1, mask_1 = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=1.0, loop_duration_s=4.0
+    )
+    np.testing.assert_array_equal(frame_0, frame_1)
+    np.testing.assert_array_equal(mask_0, mask_1)
+
+
 # --- loop_mode distinctness ----------------------------------------------------
 
 
