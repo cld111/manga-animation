@@ -65,16 +65,29 @@ class LamaClient:
 
 
 def _compute_hole_mask(original_mask: MaskArray, transformed_masks: list[MaskArray]) -> MaskArray:
-    """The region covered by the object's original mask but never covered by ANY frame's
+    """The region covered by the object's original mask that is left uncovered by AT LEAST ONE
 
-    transformed mask across the whole loop — i.e. background that is revealed at some point
-    during playback and therefore needs real replacement pixels, not just the original's
-    (never-drawn) content.
+    frame's transformed mask — i.e. every pixel that will show through to the background plate
+    at some point during playback and therefore needs a real replacement value available,
+    scoped per-frame by `compositing.composite_frame`/`composite_frame_stack`.
+
+    Phase 4 reconstruction-hardening fix: the previous formula was `original & ~UNION(frames)`
+    ("never covered by any frame") instead of the correct `original & ~INTERSECTION(frames)`
+    ("not covered by every frame"), equivalently `UNION over frames of (original &
+    ~transformed[i])` — the form used below. The old formula is mathematically guaranteed to
+    return an empty (or near-empty) hole whenever ANY single sampled frame fully reproduces the
+    original mask, which in practice is *always* true: frame index 0 (`t_frac=0`) is every
+    `loop_mode="cycle"` motion's rest pose (the schema's seamless-loop convention with the
+    default `phase=0`), so `transformed_masks[0]` is, up to interpolation rounding, bit-identical
+    to `original_mask` — silently making the old computation vacuous for this project's actual
+    motion model, confirmed empirically across every `TransformKind` except `OPACITY` (which
+    legitimately never moves the mask and correctly has no hole either way). Compositing blends
+    each frame from its OWN transformed mask independently — "the object eventually comes back
+    to cover this pixel later in the loop" does not help the specific frame where it doesn't.
     """
-    covered_ever = np.zeros(original_mask.shape, dtype=bool)
+    hole = np.zeros(original_mask.shape, dtype=bool)
     for transformed in transformed_masks:
-        covered_ever |= transformed > 0
-    hole = (original_mask > 0) & ~covered_ever
+        hole |= (original_mask > 0) & (transformed == 0)
     return (hole.astype(np.uint8) * 255)
 
 

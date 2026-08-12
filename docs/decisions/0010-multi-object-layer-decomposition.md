@@ -93,9 +93,11 @@ generalizes exactly: every pixel not covered by *any* layer's current-frame mask
 source image exactly, at every frame — still a fresh copy of the original per frame, never a
 patched running buffer.
 
-**6. Reconstruction stays per-object** (`reconstruct_hidden_region`'s signature and
-`_compute_hole_mask` are unchanged, called once per animated object exactly as before). The
-multi-object awareness lives entirely in `composite_frame_stack`: an object's reconstructed hole
+**6. Reconstruction stays per-object** (`reconstruct_hidden_region`'s signature is unchanged,
+called once per animated object exactly as before — see the "Revision" section below for a real
+bug found and fixed in `_compute_hole_mask`'s own formula, independent of this multi-object
+change). The multi-object awareness lives entirely in `composite_frame_stack`: an object's
+reconstructed hole
 pixels are only used at a given frame where (a) that object's own current mask doesn't cover the
 pixel, (b) its `hole_mask` says its original position did cover it, and (c) *no other layer's
 current-frame mask covers it either* — if a different animated layer is already sitting on top
@@ -139,3 +141,84 @@ reconstruction fill must not fight with it.
   SECONDARY/MICRO) plan in a real, observed VLM run — this capability is built and deterministically
   tested, but has not yet been exercised by a real page in this project's own evidence base.
   Flagged, not hidden.
+
+## Revision (reconstruction hardening): `_compute_hole_mask` formula was wrong
+
+Auditing `src/manga_animation/reconstruction/__init__.py` as the second, explicitly-named half
+of Phase 4 ("hidden-region reconstruction hardening") found a real, serious, previously-silent
+bug in `_compute_hole_mask`, confirmed on real data (not just synthetic fixtures) before being
+fixed.
+
+**The bug**: the formula was `original_mask & ~UNION(transformed_masks)` — "the region never
+covered by any frame across the whole loop." This is mathematically guaranteed to return an
+empty (or near-empty) hole whenever any single sampled frame fully reproduces `original_mask`.
+In practice, that condition is *always* true for this project's actual motion model: frame
+index 0 (`t_frac=0`) is every `loop_mode="cycle"` motion's rest pose (`analysis/curves.py`,
+the seamless-loop convention with the default `phase=0`), and every `TransformKind`'s affine
+matrix reduces to an exact identity at `value=0` — confirmed by direct inspection of
+`animation/transforms.py::_affine_matrix`/`_mesh_warp_frame`. Frame 0 is always part of the
+`transformed_masks` list `pipeline/orchestrator.py` passes in, so the union it contributes to
+already reproduces the full original mask almost exactly, making the hole computation vacuous
+for every rigid/warp transform kind (confirmed empirically across TRANSLATE, ROTATE, SCALE,
+SHEAR, MESH_WARP — only `OPACITY`, which legitimately never moves the mask, correctly has no
+hole either way).
+
+**Real-data confirmation**: run against `examples/sample_page_01.png`'s actual hair region (a
+~112,000px mask, the project's own real `hair`/`TRANSLATE` heuristic motion) — the buggy
+formula computed **zero** hole pixels; the corrected formula computed **70,343** (62% of the
+mask). Rendering a mid-swing frame without any reconstruction fill (i.e. exactly what the
+buggy `None` result produced in every real run to date) shows a severe, real visual defect: a
+hard duplicate-looking seam in the sky where the hair vacated, and corrupted line-art fragments
+near the eye/eyebrow where loose hair strands used to be — the exact "ghosting" hidden-region
+reconstruction exists to prevent. Filling the corrected hole region (even with an
+obvious placeholder color, since no live GPU worker was available to run real LaMa inference)
+exactly covers the defect and nothing else — background stars, the face, and the ear outside the
+hole are untouched, confirming the hole's shape and the compositing boundary are both correct.
+Debug crops are saved locally under `outputs/debug/reconstruction_validation/` (git-ignored,
+not canonical, regenerable by re-running the same script against the same real example image).
+
+**Fix**: `_compute_hole_mask` now computes `UNION over frames of (original_mask &
+~transformed_masks[i])` (equivalently, `original_mask & ~INTERSECTION(transformed_masks)`) —
+a pixel needs a real fill value if *any* frame leaves it uncovered, regardless of whether a
+*different* frame re-covers it, because `compositing.composite_frame`/`composite_frame_stack`
+blend each frame from its own mask independently. See
+`tests/test_reconstruction.py`'s new "Phase 4 reconstruction-hardening" section for the
+regression coverage, including the exact case (a region covered by one frame but not another)
+that the old formula got wrong.
+
+**What was investigated and found NOT to be a real, separate bug** (per this ADR's own
+"prefer the smallest change that closes real correctness gaps" — not fixing what isn't
+broken):
+- Empty/degenerate (down to 1px) masks: already handled correctly, `np.any(hole_mask)` gates
+  the `None` return regardless of mask size; regression-tested.
+- Masks touching the image boundary: the hole mask is always exactly the source image's own
+  `(H, W)` array — there is no separate geometry that could exceed it; regression-tested.
+- Multiple disconnected hole regions: boolean array operations don't assume connectivity, and
+  a single `client.inpaint()` call naturally receives and handles a multi-region mask (LaMa and
+  similar inpainting models operate on the whole masked image, not per-connected-component);
+  regression-tested.
+- Thin (down to 1px-wide) hole regions: computed exactly, with no morphological
+  erosion/dilation cleanup applied — deliberately; this project has no calibration evidence a
+  cleanup step would help more than it would risk shrinking or growing a real hole boundary.
+- Reconstruction of one object erasing another visible object's pixels: already prevented by
+  `compositing.composite_frame_stack`'s per-pixel "does another layer currently cover this"
+  check (cv-agent's original Phase 4 work) — extended with one additional regression test for
+  the *partial*-coverage case (only part of a hole covered by another layer), which the
+  existing full-coverage-only test didn't exercise.
+- Panel-boundary coordinate contracts: not applicable — `reconstruct_hidden_region` operates
+  entirely in full-page pixel space and never receives or converts panel-relative coordinates.
+
+**What remains a real, documented, NOT-fixed limitation**: whether the actual inpainting
+*content* respects text/line art/speech bubbles it wasn't meant to touch is a model-quality
+question this project's deterministic code cannot guarantee or test — the hole is scoped
+correctly (see above), but what a real inpainting model paints inside that hole, when the hole
+happens to abut fine line art, is not something a unit test can verify without running the real
+model. Not observed as broken in this pass's real-data check (the one artifact resembling
+damaged line art there was traced to this validation script's own rough color-threshold test
+mask bleeding slightly into the face region, not a pipeline defect), but not claimed as
+verified either — real LaMa output quality against real, tightly-segmented masks remains
+future, live-model validation work.
+
+Corrects the previous "Open questions" bullet above about `reconstruct_hidden_region` returning
+`None`: that gating logic (`if not np.any(hole_mask): return None`) is unchanged, but what
+feeds it (`_compute_hole_mask`) was wrong until this revision.

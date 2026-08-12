@@ -332,3 +332,39 @@ def test_composite_frame_stack_reconstruction_skipped_when_another_layer_covers_
     assert not np.array_equal(frame[10:25, 15:20], filled_pixels[10:25, 15:20])
     expected_b_color = np.full((15, 5, 3), (0, 200, 0), dtype=np.uint8)
     np.testing.assert_array_equal(frame[10:25, 15:20], expected_b_color)
+
+
+def test_composite_frame_stack_reconstruction_partially_covered_by_another_layer():
+    """Phase 4 reconstruction-hardening: the "other layer covers it" check in
+
+    `composite_frame_stack` is per-pixel, not all-or-nothing -- when a second object's layer
+    only covers HALF of what would be object "a"'s revealed hole, the covered half must show
+    "b"'s pixels and the UNCOVERED half must still get "a"'s reconstruction fill, not be left
+    showing raw (wrong) original-page content.
+    """
+    image, _ = make_image_and_mask()
+
+    hole_mask = np.zeros(PAGE_SHAPE, dtype=np.uint8)
+    hole_mask[10:25, 15:25] = 255  # a's full potential hole: columns 15-25
+    filled_pixels = image.copy()
+    filled_pixels[10:25, 15:25] = (9, 9, 9)
+    reconstruction = ReconstructionResult(
+        object_id="a", hole_mask=hole_mask, filled_pixels=filled_pixels, model_id="fake-lama"
+    )
+
+    layer_a = _make_layer(
+        image, (slice(10, 25), slice(30, 35)), (200, 0, 0), object_id="a", z_order=0
+    )
+    # "b" only covers the LEFT half (columns 15-20) of what would be "a"'s hole -- the right
+    # half (columns 20-25) is not covered by anything and must still get "a"'s fill.
+    layer_b = _make_layer(
+        image, (slice(10, 25), slice(15, 20)), (0, 200, 0), object_id="b", z_order=1
+    )
+
+    frame = composite_frame_stack(
+        image, [layer_a, layer_b], frame_index=0, reconstructions={"a": reconstruction}
+    )
+
+    expected_b_color = np.full((15, 5, 3), (0, 200, 0), dtype=np.uint8)
+    np.testing.assert_array_equal(frame[10:25, 15:20], expected_b_color)  # "b" wins here
+    np.testing.assert_array_equal(frame[10:25, 20:25], filled_pixels[10:25, 20:25])  # "a"'s fill

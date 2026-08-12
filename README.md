@@ -100,12 +100,27 @@ compositing to N simultaneously-animated layers in a deterministic z-order (PRIM
 See [ADR 0010](docs/decisions/0010-multi-object-layer-decomposition.md) for the full design,
 including why this necessarily absorbed most of what the phase table below used to list
 separately under "Phase 5" — a layer decomposition that only ever handles one object isn't
-really decomposing anything; the two were never separable in practice. Hidden-region
-reconstruction's own per-object logic is unchanged (its multi-object *integration*, inside
-compositing, is new; further robustness hardening of `reconstruct_hidden_region` itself is not
-part of this pass — see the ADR's "Open questions"). No live Kaggle/Jupyter worker was available
-during this phase, so this has been validated with deterministic fake-client tests only, exactly
-like every other pipeline stage's test suite — real-model validation is real, disclosed future
+really decomposing anything; the two were never separable in practice.
+
+**Hidden-region reconstruction hardening — one real, confirmed bug found and fixed.**
+`reconstruction._compute_hole_mask` was computing the complement of the wrong set (`original &
+~UNION(frames)`, "never covered by any frame" — instead of `original & ~INTERSECTION(frames)`,
+"not covered by every frame"), which is mathematically guaranteed to return an empty hole
+whenever any single sampled frame fully reproduces the original mask — which frame index 0
+always does, for every `cycle`-mode motion's rest pose. Confirmed on real data: run against
+`examples/sample_page_01.png`'s actual hair region, the old formula found **zero** hole pixels;
+the fix finds **70,343** (62% of the mask), and rendering a mid-swing frame without the fix
+shows a real, visible ghosting defect the fix's hole exactly covers. See ADR 0010's "Revision"
+section for the full audit, the real-data comparison, and which other candidate failure modes
+(degenerate/empty masks, boundary-touching masks, disconnected holes, thin regions,
+cross-object hole safety) were checked and found already correct. Text/line-art-safe inpainting
+*content* remains a real-model-quality question outside deterministic code's reach — documented,
+not claimed as verified.
+
+No live Kaggle/Jupyter worker was available during this phase, so the pipeline logic above has
+been validated with deterministic fake-client tests (plus the one real-image hole/compositing
+check above, using a placeholder fill in place of real LaMa inference) — real-model validation is
+real, disclosed future
 work, not claimed here.
 
 Planned phases:
@@ -117,7 +132,7 @@ Planned phases:
 | 3.1 | First end-to-end vertical slice: one real page through every stage |
 | 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
 | 3.3 | Panel-aware analysis + reproducible evaluation framework |
-| 4 | Layer decomposition — **implemented**, real-model validation still pending |
+| 4 | Layer decomposition — **implemented**; hidden-region reconstruction hardening — **one real bug found and fixed** (`_compute_hole_mask`), other candidate failure modes audited and found already correct; real-model validation still pending |
 | 5 | Secondary/micro motion, multi-object plans — **substantially delivered as part of Phase 4** (see above); real-page evidence that the VLM actually proposes genuine multi-object plans is still outstanding |
 | 6 | Seamless-looping/rendering hardening at scale |
 | 7 | End-to-end QA, evaluation, regression testing |
