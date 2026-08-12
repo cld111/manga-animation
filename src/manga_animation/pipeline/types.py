@@ -35,6 +35,19 @@ ImageArray = np.ndarray
 MaskArray = np.ndarray
 """uint8 array, shape (H, W), values 0-255 (an alpha channel, not a boolean mask)."""
 
+# Coverage-fraction bounds a grounded region must fall within to be plausibly "a specific
+# object" rather than noise or a false-positive "select everything" region, as a fraction of
+# the full source image's pixel count. Originally `segmentation/segment.py`'s mask-coverage
+# check (see its own comment: deliberately permissive rather than tuned per-object-class,
+# since no real mask data exists yet to tune against — ADR 0005's "no visual QA done yet").
+# Shared here so `validation/validate.py`'s pre-segmentation bbox-plausibility check reuses the
+# exact same reasoning/values on a grounding bbox instead of inventing a second, uncalibrated
+# number — a bbox is always >= its eventual tight mask, so the same bounds are, if anything,
+# more permissive than the segmentation check that already uses them (see the Phase 3.2 brief's
+# "do not make arbitrary confidence thresholds without calibration/evidence").
+MIN_OBJECT_COVERAGE_FRACTION = 0.0001
+MAX_OBJECT_COVERAGE_FRACTION = 0.90
+
 
 @dataclass(frozen=True, slots=True)
 class BBoxPx:
@@ -73,6 +86,33 @@ class GroundingResult:
 
     object_id: str
     bbox: BBoxPx
+    model_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResult:
+    """Explicit ACCEPT/REJECT diagnostics for one grounding candidate, produced by
+    `src/manga_animation/validation` between grounding and segmentation (Phase 3.2).
+
+    A technically valid detection (clears the grounding model's own score threshold, lands
+    inside the image) is not the same thing as a semantically correct one — this is the
+    structured record of *why* a candidate was accepted or rejected, so a rejection is always
+    explainable and never a silent drop. See docs/decisions/0006-grounding-target-validation.md.
+    """
+
+    object_id: str
+    candidate_rank: int
+    """0-based position of this candidate within its object's ranked grounding candidates."""
+    accepted: bool
+    grounding_score: float | None
+    bbox_area_fraction: float
+    bbox_plausible: bool
+    semantic_match: bool | None
+    """VLM's yes/no read on whether the cropped region depicts the target. `None` when the
+    bbox-plausibility pre-filter rejected the candidate before the (more expensive) VLM crop
+    check ran — see `bbox_plausible`/`reason` for why."""
+    semantic_confidence: float | None
+    reason: str
     model_id: str
 
 
@@ -152,6 +192,7 @@ class RenderResult:
 Stage = Literal[
     "analysis",
     "grounding",
+    "validation",
     "segmentation",
     "reconstruction",
     "animation",

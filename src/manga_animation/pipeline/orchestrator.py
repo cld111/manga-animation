@@ -1,19 +1,26 @@
 """End-to-end pipeline orchestration: real manga page -> playable seamless-loop MP4.
 
-Wires the six stage packages together in the order `docs/pipeline.md` documents:
+Wires the stage packages together in the order `docs/pipeline.md` documents:
 
-    analysis -> grounding -> segmentation -> reconstruction -> animation -> compositing
-    -> rendering
+    analysis -> grounding -> validation -> segmentation -> reconstruction -> animation
+    -> compositing -> rendering
 
-Per Phase 3.1's scope, this orchestrates exactly ONE animated (`PRIMARY`) object end to end —
-`STATIC` objects the analysis stage identified are recorded in the plan but never grounded,
-segmented, or animated (see `.claude/agents/segmentation-agent.md`: "STATIC objects generally
-don't need grounding/segmentation at all"). Every stage function this module calls already
-raises `PipelineStageError` on failure; this module does not swallow or convert those into a
-false success — a failed run surfaces exactly which stage failed and why (see the Phase 3.1
-brief's "Failure policy").
+`validation` (Phase 3.2, `src/manga_animation/validation`) sits between grounding and
+segmentation: a grounding candidate that clears the grounding model's own detection threshold
+is not automatically trusted as semantically correct — see
+`docs/decisions/0006-grounding-target-validation.md`. If every ranked grounding candidate for
+the plan's object fails validation, the run fails outright (`PipelineStageError`, stage=
+`"validation"`) rather than animating an unvalidated best guess.
 
-This is orchestration code, not a stage itself — it owns none of the six stages' internal
+This orchestrates exactly ONE animated (`PRIMARY`) object end to end — `STATIC` objects the
+analysis stage identified are recorded in the plan but never grounded, segmented, or animated
+(see `.claude/agents/segmentation-agent.md`: "STATIC objects generally don't need
+grounding/segmentation at all"). Every stage function this module calls already raises
+`PipelineStageError` on failure; this module does not swallow or convert those into a false
+success — a failed run surfaces exactly which stage failed and why (see the Phase 3.1 brief's
+"Failure policy", preserved unchanged in Phase 3.2).
+
+This is orchestration code, not a stage itself — it owns none of the stages' internal
 decisions, only the wiring between their already-defined public entry points.
 """
 
@@ -31,7 +38,11 @@ from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame
 from manga_animation.core.config import PipelineConfig
 from manga_animation.core.logging import StageTimer, get_logger
-from manga_animation.grounding import GroundingClient, GroundingDinoClient, ground_object
+from manga_animation.grounding import (
+    GroundingClient,
+    GroundingDinoClient,
+    ground_object_candidates,
+)
 from manga_animation.pipeline.types import (
     BBoxPx,
     FrameSequence,
@@ -40,6 +51,7 @@ from manga_animation.pipeline.types import (
     ReconstructionResult,
     RenderResult,
     SegmentationResult,
+    ValidationResult,
 )
 from manga_animation.reconstruction import (
     LamaClient,
@@ -49,6 +61,7 @@ from manga_animation.reconstruction import (
 from manga_animation.rendering import render
 from manga_animation.schemas.animation_plan import AnimationPlan, MotionType, ObjectPlan
 from manga_animation.segmentation import Sam21Client, SegmentationClient, segment_object
+from manga_animation.validation import validate_target
 
 logger = get_logger(__name__)
 
@@ -61,6 +74,7 @@ class PipelineRunResult:
     plan: AnimationPlan
     primary_object: ObjectPlan
     grounding: GroundingResult
+    validation_attempts: list[ValidationResult]
     segmentation: SegmentationResult
     reconstruction: ReconstructionResult | None
     render: RenderResult
@@ -131,8 +145,8 @@ def _select_primary(plan: AnimationPlan, image_path: str) -> ObjectPlan:
     primaries = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
     if not primaries:
         # analyze_page() already guarantees exactly one PRIMARY object for a successfully
-        # built plan (see plan_builder._select_single_primary) -- reaching this means a plan
-        # was constructed by something else (e.g. a test fixture), not that analysis is buggy.
+        # built plan (see plan_builder._rank_candidates) -- reaching this means a plan was
+        # constructed by something else (e.g. a test fixture), not that analysis is buggy.
         raise PipelineStageError(
             stage="analysis",
             input_ref=image_path,
@@ -163,7 +177,8 @@ def run_pipeline(
     out_dir: Path,
     plan: AnimationPlan | None = None,
 ) -> PipelineRunResult:
-    """Run the complete Phase 3.1 vertical slice on one real manga page.
+    """Run the complete pipeline (analysis through rendering, with Phase 3.2's grounding-
+    validation gate) on one real manga page.
 
     Raises `PipelineStageError` (never a silent partial/false success) the moment any stage
     fails. `out_dir` receives the rendered MP4 and the intermediate frame sequence (kept, per
@@ -209,9 +224,45 @@ def run_pipeline(
     ):
         grounding_client.load()
         try:
-            grounding = ground_object(image, primary, grounding_client)
+            grounding_candidates = ground_object_candidates(image, primary, grounding_client)
         finally:
             grounding_client.unload()
+
+    with StageTimer("validation", logger, device=device, model=config.model_variants.get("vlm")):
+        validation_attempts: list[ValidationResult] = []
+        grounding: GroundingResult | None = None
+        for rank, candidate in enumerate(grounding_candidates):
+            result = validate_target(image, primary, candidate, vlm_client, candidate_rank=rank)
+            validation_attempts.append(result)
+            if result.accepted:
+                grounding = candidate
+                break
+
+    if grounding is None:
+        # Per the Phase 3.2 failure policy: a candidate that clears grounding's own detection
+        # threshold is NOT the same as one that's semantically correct (see
+        # docs/decisions/0006-grounding-target-validation.md) -- every ranked grounding
+        # candidate was tried and none was accepted, so this run fails outright rather than
+        # silently animating the best-scoring-but-unvalidated one. The caller decides whether
+        # to retry with a human-verified `plan=` override (the existing controlled fallback).
+        raise PipelineStageError(
+            stage="validation",
+            input_ref=primary.object_id,
+            detail=(
+                f"all {len(validation_attempts)} grounding candidate(s) for "
+                f"semantic_label={primary.semantic_label!r} failed target validation: "
+                + "; ".join(f"rank={r.candidate_rank} {r.reason}" for r in validation_attempts)
+            ),
+            root_cause=(
+                "no grounding candidate plausibly matched the intended semantic target -- a "
+                "technically valid detection is not the same as a correct one"
+            ),
+            architectural=False,
+            proposed_fix=(
+                "retry with a different page/object, or supply a controlled-fallback "
+                "AnimationPlan (run_pipeline(..., plan=...)) for a human-verified target"
+            ),
+        )
 
     with StageTimer(
         "segmentation", logger, device=device, model=config.model_variants.get("segmentation")
@@ -273,6 +324,7 @@ def run_pipeline(
         plan=plan,
         primary_object=primary,
         grounding=grounding,
+        validation_attempts=validation_attempts,
         segmentation=segmentation,
         reconstruction=reconstruction,
         render=render_result,

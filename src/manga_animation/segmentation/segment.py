@@ -10,6 +10,8 @@ from __future__ import annotations
 import numpy as np
 
 from manga_animation.pipeline.types import (
+    MAX_OBJECT_COVERAGE_FRACTION,
+    MIN_OBJECT_COVERAGE_FRACTION,
     BBoxPx,
     GroundingResult,
     ImageArray,
@@ -24,8 +26,9 @@ from manga_animation.segmentation.client import SegmentationClient
 # object — a real grounded object (hair, a hand, a banner) practically never covers this much of
 # a full manga page. Both bounds are deliberately permissive rather than tuned per-object-class,
 # since no real mask data exists yet to tune against (see ADR 0005's "no visual QA done yet").
-_MIN_COVERAGE_FRACTION = 0.0001
-_MAX_COVERAGE_FRACTION = 0.90
+# Shared with validation/validate.py's pre-segmentation bbox check — see pipeline/types.py.
+_MIN_COVERAGE_FRACTION = MIN_OBJECT_COVERAGE_FRACTION
+_MAX_COVERAGE_FRACTION = MAX_OBJECT_COVERAGE_FRACTION
 
 
 def segment_object(

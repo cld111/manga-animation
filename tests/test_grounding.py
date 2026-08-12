@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from manga_animation.grounding.client import Detection
-from manga_animation.grounding.ground import _prompt_from_label, ground_object
+from manga_animation.grounding.ground import (
+    _prompt_from_label,
+    ground_object,
+    ground_object_candidates,
+)
 from manga_animation.pipeline.types import PipelineStageError
 from manga_animation.schemas.animation_plan import MotionType, ObjectPlan
 
@@ -107,3 +111,68 @@ def test_ground_object_clips_negative_coordinates():
     client = FakeGroundingClient([Detection(label="hair", score=0.9, box=(-10, -10, 50, 50))])
     result = ground_object(make_image(h=100, w=100), make_object_plan(), client)
     assert result.bbox.as_xyxy() == (0, 0, 50, 50)
+
+
+# --- ground_object_candidates (Phase 3.2: ranked, not just best-of) ------------------------
+
+
+def test_ground_object_candidates_returns_every_detection_ranked_by_score():
+    detections = [
+        Detection(label="flag cloth", score=0.31, box=(5, 5, 20, 20)),
+        Detection(label="flag cloth", score=0.82, box=(10, 10, 60, 60)),
+        Detection(label="flag cloth", score=0.55, box=(15, 15, 40, 40)),
+    ]
+    client = FakeGroundingClient(detections)
+
+    candidates = ground_object_candidates(make_image(), make_object_plan(), client)
+
+    assert [c.bbox.score for c in candidates] == pytest.approx([0.82, 0.55, 0.31])
+    assert all(c.object_id == "obj_1" for c in candidates)
+
+
+def test_ground_object_candidates_caps_at_max_candidates():
+    detections = [
+        Detection(label="hair", score=0.9 - 0.1 * i, box=(i, i, i + 10, i + 10)) for i in range(6)
+    ]
+    client = FakeGroundingClient(detections)
+
+    candidates = ground_object_candidates(
+        make_image(), make_object_plan(), client, max_candidates=3
+    )
+
+    assert len(candidates) == 3
+    assert [c.bbox.score for c in candidates] == pytest.approx([0.9, 0.8, 0.7])
+
+
+def test_ground_object_candidates_skips_degenerate_boxes_but_keeps_usable_ones():
+    detections = [
+        Detection(label="hair", score=0.9, box=(200, 200, 250, 250)),  # entirely outside
+        Detection(label="hair", score=0.5, box=(10, 10, 40, 40)),  # usable
+    ]
+    client = FakeGroundingClient(detections)
+
+    candidates = ground_object_candidates(make_image(h=100, w=100), make_object_plan(), client)
+
+    assert len(candidates) == 1
+    assert candidates[0].bbox.as_xyxy() == (10, 10, 40, 40)
+
+
+def test_ground_object_candidates_raises_when_every_detection_is_degenerate():
+    detections = [Detection(label="hair", score=0.9, box=(200, 200, 250, 250))]
+    client = FakeGroundingClient(detections)
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        ground_object_candidates(make_image(h=100, w=100), make_object_plan(), client)
+    assert exc_info.value.stage == "grounding"
+
+
+def test_ground_object_delegates_to_candidates_and_returns_the_top_one():
+    detections = [
+        Detection(label="hair", score=0.31, box=(5, 5, 20, 20)),
+        Detection(label="hair", score=0.82, box=(10, 10, 60, 60)),
+    ]
+    client = FakeGroundingClient(detections)
+
+    result = ground_object(make_image(), make_object_plan(), client)
+
+    assert result.bbox.score == pytest.approx(0.82)
