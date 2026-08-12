@@ -281,10 +281,13 @@ def run_pipeline(
         for obj in plan.objects
         if obj.motion_type != MotionType.STATIC and obj.object_id != primary.object_id
     ]
-    # Computed here (not just before the animation stage, as in Phase 3.1/3.2) so validation's
-    # transform-geometry check (Phase 3.3.1) can measure a candidate bbox against its REAL
-    # panel region, not just the full page -- see validation/transform_geometry.py. Each object
-    # may live in a different panel (panel-aware analysis mode), so this is per-object.
+    # Computed here (not just before the animation stage, as in Phase 3.1/3.2) so it's ready for
+    # both consumers that need an object's real panel region: grounding itself (Phase 5.1, see
+    # docs/decisions/0011-panel-aware-grounding.md -- Grounding DINO runs on this crop instead
+    # of the full page) and validation's transform-geometry check (Phase 3.3.1, see
+    # validation/transform_geometry.py), which still uses the same region as its reference
+    # region. Each object may live in a different panel (panel-aware analysis mode), so this is
+    # per-object.
     panel_bbox_px_by_object = {
         obj.object_id: _panel_bbox_px(plan, obj.panel_id, page_shape) for obj in objects_to_animate
     }
@@ -301,7 +304,10 @@ def run_pipeline(
             for obj in objects_to_animate:
                 try:
                     candidates_by_object[obj.object_id] = ground_object_candidates(
-                        image, obj, grounding_client
+                        image,
+                        obj,
+                        grounding_client,
+                        panel_bbox_px=panel_bbox_px_by_object[obj.object_id],
                     )
                 except PipelineStageError:
                     if _is_primary(obj.object_id):

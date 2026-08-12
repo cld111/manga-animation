@@ -9,7 +9,7 @@ from manga_animation.grounding.ground import (
     ground_object,
     ground_object_candidates,
 )
-from manga_animation.pipeline.types import PipelineStageError
+from manga_animation.pipeline.types import BBoxPx, PipelineStageError
 from manga_animation.schemas.animation_plan import MotionType, ObjectPlan
 
 
@@ -224,3 +224,132 @@ def test_ground_object_delegates_to_candidates_and_returns_the_top_one():
     result = ground_object(make_image(), make_object_plan(), client)
 
     assert result.bbox.score == pytest.approx(0.82)
+
+
+# --- Phase 5.1: panel-aware grounding (docs/decisions/0011-panel-aware-grounding.md) --------
+
+
+class SpyGroundingClient:
+    """Like `FakeGroundingClient`, but also records the actual image array it was handed --
+
+    lets a test assert exactly what region (full page or panel crop) grounding ran against,
+    not just what candidates came back. `detections` are given in CROP-LOCAL coordinates (i.e.
+    relative to whatever image `detect()` actually receives), matching the real
+    `GroundingDinoClient.detect`'s contract of returning boxes relative to its input.
+    """
+
+    model_id = "spy-grounding"
+
+    def __init__(self, detections: list[Detection]):
+        self.detections = detections
+        self.last_prompt: str | None = None
+        self.last_image_shape: tuple[int, ...] | None = None
+
+    def load(self) -> None:
+        pass
+
+    def detect(self, image, text_prompt: str) -> list[Detection]:
+        self.last_prompt = text_prompt
+        self.last_image_shape = image.shape
+        return self.detections
+
+    def unload(self) -> None:
+        pass
+
+
+def test_ground_object_candidates_crops_to_the_given_panel_bbox_px():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=20, y0=30, x1=80, y1=90)  # 60x60 region, offset (20, 30)
+
+    ground_object_candidates(
+        make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+    )
+
+    assert client.last_image_shape == (60, 60, 3)
+
+
+def test_ground_object_candidates_translates_local_box_to_page_coordinates():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=20, y0=30, x1=80, y1=90)
+
+    candidates = ground_object_candidates(
+        make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+    )
+
+    assert candidates[0].bbox.as_xyxy() == (25, 35, 35, 45)
+
+
+def test_ground_object_candidates_clips_translated_box_to_the_page_not_just_the_crop():
+    """A crop flush against the page's own edge, with a local box that overshoots the crop's
+
+    own bounds (a real, observed Grounding DINO behavior near resized-image edges) -- the
+    translated box must be clipped against the FULL PAGE, exactly like the pre-Phase-5.1
+    full-page case already had to handle, not silently left oversized.
+    """
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(40, 40, 70, 70))])
+    panel = BBoxPx(x0=150, y0=150, x1=200, y1=200)  # 50x50 crop flush against the page edge
+
+    candidates = ground_object_candidates(
+        make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+    )
+
+    # local (40,40)-(70,70) + offset (150,150) = (190,190)-(220,220), clipped to the 200x200 page
+    assert candidates[0].bbox.as_xyxy() == (190, 190, 200, 200)
+
+
+def test_ground_object_candidates_with_panel_bbox_px_none_grounds_the_full_page_unchanged():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    page = make_image(h=100, w=120)
+
+    candidates = ground_object_candidates(page, make_object_plan(), client, panel_bbox_px=None)
+
+    assert client.last_image_shape == page.shape
+    assert candidates[0].bbox.as_xyxy() == (5, 5, 15, 15)  # offset (0, 0) -- unchanged
+
+
+def test_ground_object_candidates_full_page_panel_bbox_is_equivalent_to_none():
+    """A `panel_bbox_px` that already covers the whole page (page-mode's synthetic (0,0,1,1)
+
+    panel, or panel-detection's `fallback_full_page` candidate -- see ADR 0011's "Fallback
+    behavior") must produce byte-identical results to omitting `panel_bbox_px` entirely.
+    """
+    page = make_image(h=100, w=120)
+    detections = [Detection(label="hair", score=0.9, box=(5, 5, 15, 15))]
+
+    client_none = SpyGroundingClient(list(detections))
+    result_none = ground_object_candidates(
+        page, make_object_plan(), client_none, panel_bbox_px=None
+    )
+
+    client_full = SpyGroundingClient(list(detections))
+    full_page_region = BBoxPx(x0=0, y0=0, x1=120, y1=100)
+    result_full = ground_object_candidates(
+        page, make_object_plan(), client_full, panel_bbox_px=full_page_region
+    )
+
+    assert result_none[0].bbox.as_xyxy() == result_full[0].bbox.as_xyxy()
+    assert client_none.last_image_shape == client_full.last_image_shape
+
+
+def test_ground_object_passes_panel_bbox_px_through_to_candidates():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=10, y0=10, x1=50, y1=50)
+
+    result = ground_object(
+        make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+    )
+
+    assert result.bbox.as_xyxy() == (15, 15, 25, 25)
+
+
+def test_ground_object_candidates_raises_with_the_region_in_the_error_detail():
+    client = SpyGroundingClient([])
+    panel = BBoxPx(x0=10, y0=10, x1=50, y1=50)
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        ground_object_candidates(
+            make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+        )
+
+    assert exc_info.value.stage == "grounding"
+    assert "(10, 10, 50, 50)" in exc_info.value.detail

@@ -219,6 +219,39 @@ class MultiObjectFakeGroundingClient:
         self.unloaded = True
 
 
+class RecordingGroundingClient:
+    """Like `MultiObjectFakeGroundingClient`, but also records the actual `(image.shape,
+
+    prompt)` of every `detect()` call it received -- lets a Phase 5.1 test assert exactly what
+    region (full page vs. a specific panel's crop) grounding ran against per object, not just
+    that the final render succeeded. `boxes_by_label` values are CROP-LOCAL coordinates,
+    matching the real `GroundingDinoClient.detect`'s contract.
+    """
+
+    model_id = "fake-grounding-dino"
+
+    def __init__(self, boxes_by_label: dict[str, tuple[int, int, int, int]]):
+        self._boxes_by_label = {
+            label.replace("_", " "): box for label, box in boxes_by_label.items()
+        }
+        self.calls: list[tuple[tuple[int, ...], str]] = []
+        self.loaded = False
+        self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def detect(self, image, text_prompt: str) -> list[Detection]:
+        self.calls.append((image.shape, text_prompt))
+        for label, box in self._boxes_by_label.items():
+            if label in text_prompt:
+                return [Detection(label=label, score=0.9, box=box)]
+        return []
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+
 class FakeSegmentationClient:
     model_id = "fake-sam2.1"
 
@@ -1225,3 +1258,189 @@ def test_build_default_clients_does_not_require_torch_installed():
     assert grounding.model_id == "grounding-dino-swin-l"
     assert segmentation.model_id == "sam2.1-hiera-base"
     assert reconstruction is not None
+
+
+# --- Phase 5.1: panel-aware grounding (docs/decisions/0011-panel-aware-grounding.md) --------
+
+
+@requires_ffmpeg
+def test_run_pipeline_analysis_mode_panel_grounds_the_object_on_its_own_panel_crop(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    """Step 7-E: a panel-associated object's grounding call must receive that panel's real
+
+    crop, not the full page -- verified via a spy on the actual image shape Grounding DINO was
+    given, not just on the final render succeeding. `two_panel_page_path` is a real 900x300
+    page whose top panel (via real, unmocked `detect_panels()`) is exactly (0,0)-(300,408) --
+    a 408x300 crop, strictly smaller than the 900x300 full page.
+    """
+    grounding_client = RecordingGroundingClient({"hanging_banner": (30, 30, 80, 80)})
+
+    result = run_pipeline(
+        two_panel_page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision("hanging_banner"), _static_decision()]),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        analysis_mode="panel",
+    )
+
+    full_page_shape = (900, 300, 3)
+    assert len(grounding_client.calls) == 1  # the STATIC "background" object is never grounded
+    called_shape, called_prompt = grounding_client.calls[0]
+    assert called_prompt == "hanging banner."
+    assert called_shape != full_page_shape
+    assert called_shape == (408, 300, 3)  # the real top panel's own crop, not the full page
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert result.render.output_path.exists()
+
+
+@requires_ffmpeg
+def test_run_pipeline_page_mode_still_grounds_the_full_page(
+    page_path: Path, config, tmp_path: Path
+):
+    """Step 7-D regression guard: default (page-level) analysis must keep grounding the whole
+
+    page exactly as before Phase 5.1 -- page-level's synthetic (0,0,1,1) panel resolves to a
+    region covering the entire image (see ADR 0011's "Fallback behavior"), so the crop Grounding
+    DINO sees, and the returned bbox, must be pixel-identical to the pre-Phase-5.1 behavior.
+    """
+    grounding_client = RecordingGroundingClient({"hanging_banner": (10, 10, 60, 90)})
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision("hanging_banner"), _static_decision()]),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    full_page_shape = (160, 120, 3)  # page_path is a PIL (120, 160) WxH image -> array (H, W, 3)
+    assert len(grounding_client.calls) == 1
+    assert grounding_client.calls[0][0] == full_page_shape
+    assert result.grounding.bbox.as_xyxy() == (10, 10, 60, 90)  # offset (0, 0) -- unchanged
+
+
+@requires_ffmpeg
+def test_run_pipeline_analysis_mode_panel_falls_back_to_full_page_when_no_real_panels_exist(
+    page_path: Path, config, tmp_path: Path
+):
+    """Step 7-C: when real panel detection itself falls back to a single `fallback_full_page`
+
+    candidate (no internal gutters on this simple synthetic page -- confirmed directly via
+    `detect_panels()`), grounding must still see the whole page, not some degenerate crop.
+    """
+    grounding_client = RecordingGroundingClient({"hanging_banner": (10, 10, 60, 90)})
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision("hanging_banner"), _static_decision()]),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        analysis_mode="panel",
+    )
+
+    full_page_shape = (160, 120, 3)
+    assert grounding_client.calls[0][0] == full_page_shape
+    assert result.plan.panels[0].bbox.x == 0.0
+    assert result.plan.panels[0].bbox.width == 1.0
+
+
+@requires_ffmpeg
+def test_run_pipeline_grounds_two_panel_objects_on_distinct_crops_without_identity_leakage(
+    page_path: Path, config, tmp_path: Path
+):
+    """Steps 7-B/F/G combined: two objects on two different panels must (B) each keep their
+
+    own `object_id`/bbox association, (F) never leak crop-local coordinates downstream -- both
+    final bboxes are only sensible as PAGE coordinates, and (G) never swap crops/boxes with each
+    other, even though the fake grounding client is given the IDENTICAL local box for both
+    labels -- only their different panel offsets can explain their different final positions.
+    """
+    from manga_animation.schemas.animation_plan import (
+        AnimationPlan,
+        BBox,
+        LoopSpec,
+        MotionSpec,
+        MotionType,
+        ObjectPlan,
+        PanelPlan,
+        SourceImage,
+        TransformKind,
+        Vector2,
+    )
+
+    w, h = Image.open(page_path).size  # (120, 160)
+    plan = AnimationPlan(
+        source=SourceImage(path=str(page_path), width=w, height=h),
+        panels=[
+            PanelPlan(panel_id="panel_top", bbox=BBox(x=0.0, y=0.0, width=1.0, height=0.5)),
+            PanelPlan(panel_id="panel_bottom", bbox=BBox(x=0.0, y=0.5, width=1.0, height=0.5)),
+        ],
+        objects=[
+            ObjectPlan(
+                object_id="obj_banner",
+                panel_id="panel_top",
+                semantic_label="hanging_banner",
+                confidence=0.9,
+                motion_type=MotionType.PRIMARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.TRANSLATE,
+                    direction=Vector2(x=0.0, y=1.0),
+                    amplitude=0.05,
+                ),
+            ),
+            ObjectPlan(
+                object_id="obj_cloth",
+                panel_id="panel_bottom",
+                semantic_label="trailing_cloth",
+                confidence=0.8,
+                motion_type=MotionType.SECONDARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.TRANSLATE,
+                    direction=Vector2(x=0.0, y=1.0),
+                    amplitude=0.05,
+                ),
+            ),
+        ],
+        loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+    )
+    # Identical local box for BOTH objects -- only the panel offset can explain different
+    # final page positions; a swap or a leaked local coordinate would be immediately visible.
+    grounding_client = RecordingGroundingClient(
+        {"hanging_banner": (5, 5, 25, 25), "trailing_cloth": (5, 5, 25, 25)}
+    )
+    vlm_client = FakeVLMClient([], verification_matches=True)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=vlm_client,
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        plan=plan,
+    )
+
+    # (E, incidentally) two distinct 80x120 crops (h/2=80 tall each), not the 160x120 full page.
+    assert {call[0] for call in grounding_client.calls} == {(80, 120, 3)}
+    assert len(grounding_client.calls) == 2
+
+    # (B) identity: PRIMARY stayed obj_banner, SECONDARY stayed obj_cloth.
+    assert result.primary_object.object_id == "obj_banner"
+    assert len(result.secondary_objects) == 1
+    secondary = result.secondary_objects[0]
+    assert secondary.object_plan.object_id == "obj_cloth"
+
+    # (F, G) each bbox is the identical local box translated by ITS OWN panel's page offset --
+    # top panel offset (0, 0), bottom panel offset (0, 80) -- never crop-local, never swapped.
+    assert result.grounding.bbox.as_xyxy() == (5, 5, 25, 25)
+    assert secondary.grounding.bbox.as_xyxy() == (5, 85, 25, 105)
