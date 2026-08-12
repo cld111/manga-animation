@@ -100,10 +100,13 @@ outputs/debug/*
 
 # --- Sample manga pages (copyrighted third-party content, fetched on demand) ---
 # See scripts/fetch_sample_pages.py; never commit fetched pages, just the fetch script.
-examples/*.png
-examples/*.jpg
-examples/*.jpeg
-examples/*.webp
+# `**/` covers nested subdirectories too (e.g. examples/verified_action/) -- manually-provided
+# evaluation images are exactly as non-canonical as fetched ones (ADR 0002): present locally,
+# never committed, referenced by path from configs/phase3_3_eval_dataset.yaml.
+examples/**/*.png
+examples/**/*.jpg
+examples/**/*.jpeg
+examples/**/*.webp
 
 # --- Kaggle / Jupyter remote artifacts ---
 kaggle.json

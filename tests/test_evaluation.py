@@ -605,3 +605,131 @@ def test_compute_metrics_is_a_pure_deterministic_function_of_its_inputs():
 
     reports = [compute_metrics(outcomes, samples) for _ in range(5)]
     assert all(r == reports[0] for r in reports)
+
+
+# --- verified-action dataset integration (Pre-Phase-3.4) --------------------------------------
+
+
+def test_verified_action_samples_are_real_frozen_immutable_positive_controls():
+    """The two real `examples/verified_action/` samples load as ordinary, frozen `EvalSample`s
+
+    with a resolved, non-uncertain positive label -- verified positive controls are ground
+    truth like any other, not a second parallel representation.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    for sample_id in ("verified_action_1", "verified_action_2"):
+        sample = samples[sample_id]
+        assert sample.animation_possible == "yes"
+        assert sample.ground_truth_uncertain is False
+        with pytest.raises(ValidationError):
+            sample.animation_possible = "no"  # type: ignore[misc]
+
+
+def test_verified_action_provenance_is_independent_human_verification_not_vlm():
+    """Provenance is recorded structurally, and is never the VLM/pipeline's own output --
+
+    `PageRunOutcome` (a prediction) has no `annotation_provenance`-shaped field at all, so there
+    is no code path through which a pipeline run could even resemble writing one.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    for sample_id in ("verified_action_1", "verified_action_2"):
+        assert samples[sample_id].annotation_provenance == "independent_human_verification"
+    assert not hasattr(PageRunOutcome, "annotation_provenance")
+
+
+def test_verified_action_provenance_is_unaffected_by_any_prediction():
+    """Mirrors `test_compute_metrics_result_depends_only_on_stored_ground_truth_not_on_predictions`
+
+    specifically for the new provenance field: wildly different predictions for the same
+    verified sample must never change its stored provenance or resolved status.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    sample = samples["verified_action_1"]
+
+    compute_metrics([_completed("verified_action_1")], samples)
+    compute_metrics(
+        [_failed("verified_action_1", stage="analysis", detail="VLM marked every object STATIC")],
+        samples,
+    )
+    assert sample.annotation_provenance == "independent_human_verification"
+    assert sample.animation_possible == "yes"
+    assert sample.ground_truth_uncertain is False
+
+
+def test_real_dataset_ground_truth_split_is_visible_and_sums_to_sample_count():
+    """The 3-way split Pre-Phase-3.4 requires (verified positive / verified negative /
+
+    unresolved) is derivable from the existing `EvaluationReport` fields without a second
+    parallel metric system, and covers every sample exactly once.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    outcomes = [_completed(sample_id) for sample_id in samples]
+    report = compute_metrics(outcomes, samples)
+
+    positive_controls = report.semantic_false_negative_rate.denominator
+    negative_controls = report.semantic_false_positive_rate.denominator
+    unresolved = report.unresolved_ground_truth_count
+    assert positive_controls + negative_controls + unresolved == report.sample_count == len(
+        samples
+    )
+    # verified_action_1/2 count as resolved positive controls, not unresolved.
+    assert positive_controls >= 2
+
+
+def test_adding_verified_action_samples_did_not_mutate_the_pre_existing_annotations():
+    """Regression guard: the two new manifest entries must not have altered any of the
+
+    5 pre-existing samples' stored ground truth -- an addition, not a rewrite.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    assert samples["sample_page_01"].animation_possible == "uncertain"
+    assert samples["sample_page_01"].ground_truth_uncertain is True
+    assert samples["sample_page_01"].annotation_version == 1
+    assert samples["sample_page_02"].animation_possible == "uncertain"
+    assert samples["sample_page_02"].ground_truth_uncertain is True
+    assert samples["sample_page_02"].annotation_version == 2
+    assert samples["phase3_action_page"].animation_possible == "yes"
+    assert samples["eval_static_dialogue"].animation_possible == "no"
+    assert samples["eval_weapon_effects"].animation_possible == "yes"
+
+
+def test_load_eval_dataset_rejects_duplicate_image_path(tmp_path):
+    """The same image must never carry two conflicting ground-truth identities -- a copy-pasted
+
+    manifest entry pointing at an already-used image_path is rejected at load time, not
+    silently accepted with two disagreeing sample_ids for one picture.
+    """
+    manifest = tmp_path / "dupes.yaml"
+    manifest.write_text(
+        """
+samples:
+  - sample_id: first
+    image_path: examples/shared.png
+    source_citation: test
+    diversity_tag: test
+    acceptable_outcome: anything
+    animation_possible: "yes"
+  - sample_id: second
+    image_path: examples/shared.png
+    source_citation: test
+    diversity_tag: test
+    acceptable_outcome: anything
+    animation_possible: "no"
+"""
+    )
+    with pytest.raises(ValueError, match="duplicate image_path"):
+        load_eval_dataset(manifest)
+
+
+def test_verified_action_samples_do_not_invent_target_or_region_ground_truth():
+    """Independent verification of action presence establishes ONLY animation_possible="yes" --
+
+    it must not be treated as if it also established a specific target/region/transform, which
+    would require separate independent evidence this integration never had.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    for sample_id in ("verified_action_1", "verified_action_2"):
+        sample = samples[sample_id]
+        assert sample.expected_target_category is None
+        assert sample.expected_motion_category is None
+        assert sample.expected_region_note is None

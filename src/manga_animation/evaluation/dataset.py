@@ -6,6 +6,10 @@ schema and the loader. Per the Phase 3.3 brief: "Do NOT fabricate ground truth."
 below is optional (`None`) except `sample_id`/`image_path`/`diversity_tag`/`source_citation` --
 a sample with genuinely uncertain ground truth leaves the uncertain fields `None` rather than
 guessing, and `ground_truth_uncertain=True` makes that explicit instead of silently omitting it.
+`fetch_script` is also optional (Pre-Phase-3.4 "verified action" integration): some samples are
+manually provided by the project owner with no reproducible fetch mechanism at all, which is a
+distinct, honestly-recorded state from "has a fetch script that happens not to be
+deterministic" (`sample_page_01`/`sample_page_02`'s pre-existing, different gap).
 
 **Ground truth vs. prediction (Phase 3.3.2, see ADR 0009)**: `EvalSample` is this project's
 ONLY representation of evaluation ground truth, and it is real evidence, established by direct
@@ -45,6 +49,20 @@ inspection against the `manga-analysis` skill's STATIC vs. ANIMATED checklist --
 a first-class value, not a missing one, for pages where this project's own real evidence (see
 docs/phase3.2-results.md's VLM nondeterminism finding) shows the honest answer varies."""
 
+AnnotationProvenance = Literal["independent_human_verification"]
+"""How a sample's ground truth was actually established, when that provenance is structured
+
+enough to be worth recording as data rather than only prose in `notes` (Pre-Phase-3.4 "verified
+action" integration, see docs/decisions/0009-evaluation-ground-truth-integrity.md's revision).
+`None` (the default) means no structured provenance was recorded -- most pre-existing samples
+predate this field and are not retroactively assigned a value here, since doing so would assert
+a historical claim about how confidently their labels were established that this project cannot
+actually verify after the fact; their real provenance remains in `notes`' free text instead.
+The one real value that exists so far: `"independent_human_verification"` -- the project owner
+directly confirmed action/animation presence, independent of any VLM inference or of inspecting
+a pipeline's own downstream render (the exact failure `sample_page_02`'s original, since-revised
+annotation did not avoid -- see this module's top-level docstring)."""
+
 
 class EvalSample(BaseModel):
     """One evaluation sample: a real page plus only the ground truth that can actually be
@@ -70,8 +88,12 @@ class EvalSample(BaseModel):
         description='e.g. "static", "hair", "weapon_action_effects" -- see the Phase 3.3 '
         "brief's requested diversity categories.",
     )
-    fetch_script: str = Field(
-        min_length=1, description="The scripts/fetch_*.py that reproduces image_path on demand."
+    fetch_script: str | None = Field(
+        default=None,
+        description="The scripts/fetch_*.py that reproduces image_path on demand. `None` means "
+        "no such mechanism exists at all -- the file was manually provided (see "
+        "source_citation/notes for how to obtain it) rather than fetched -- distinct from a "
+        "recorded-but-not-actually-reproducible fetch_script value.",
     )
 
     animation_possible: AnimationPossible = "uncertain"
@@ -102,23 +124,47 @@ class EvalSample(BaseModel):
         "one -- e.g. sample_page_01.png's real, evidenced VLM nondeterminism.",
     )
     notes: str = Field(default="", description="Free-text reasoning behind the labels above.")
+    annotation_provenance: AnnotationProvenance | None = Field(
+        default=None,
+        description="Structured provenance for how ground truth was established, when known -- "
+        "see the AnnotationProvenance docstring above. Never set by any code path; only by a "
+        "human editing configs/phase3_3_eval_dataset.yaml.",
+    )
     annotation_version: int = Field(
         default=1,
         ge=1,
         description="Bumped whenever this sample's ground-truth fields (animation_possible, "
         "expected_target_category, expected_motion_category, expected_region_note, "
-        "acceptable_outcome, regression_reference, ground_truth_uncertain) change intentionally "
-        "-- an explicit, auditable signal that this specific annotation was reviewed and "
-        "revised, on top of (not instead of) git's own commit history. Never bumped by any "
-        "code path in this project; only by a human editing configs/phase3_3_eval_dataset.yaml.",
+        "acceptable_outcome, regression_reference, ground_truth_uncertain, "
+        "annotation_provenance) change intentionally -- an explicit, auditable signal that this "
+        "specific annotation was reviewed and revised, on top of (not instead of) git's own "
+        "commit history. Never bumped by any code path in this project; only by a human editing "
+        "configs/phase3_3_eval_dataset.yaml.",
     )
 
 
 def load_eval_dataset(path: Path = DEFAULT_DATASET_PATH) -> list[EvalSample]:
     """Load and validate the evaluation dataset manifest. Raises `pydantic.ValidationError` on
 
-    a malformed entry -- never silently drops or invents a sample.
+    a malformed entry -- never silently drops or invents a sample. Also raises `ValueError` if
+    two samples declare the same `image_path` (Pre-Phase-3.4 "verified action" integration): the
+    same image must never carry two conflicting ground-truth identities, and this is a cheap,
+    filesystem-independent check (it does not require the images themselves to exist on disk,
+    unlike a byte-content check would) that still catches the literal, structural form of that
+    mistake -- a copy-pasted manifest entry pointing at an already-used path.
     """
     data = yaml.safe_load(path.read_text()) or {}
-    samples = data.get("samples", [])
-    return [EvalSample.model_validate(entry) for entry in samples]
+    samples = [EvalSample.model_validate(entry) for entry in data.get("samples", [])]
+
+    seen_paths: dict[str, str] = {}
+    for sample in samples:
+        if sample.image_path in seen_paths:
+            raise ValueError(
+                f"duplicate image_path {sample.image_path!r} declared under both "
+                f"sample_id={seen_paths[sample.image_path]!r} and "
+                f"sample_id={sample.sample_id!r} -- the same image must not carry two "
+                "conflicting ground-truth identities"
+            )
+        seen_paths[sample.image_path] = sample.sample_id
+
+    return samples

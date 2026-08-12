@@ -29,6 +29,20 @@
 # read) was revised to `"uncertain"` after two further independent real sessions read the same
 # page as all-STATIC -- see that sample's `notes` for the full account. This file's own
 # `EvalSample` Python type is frozen; this YAML is the only place ground truth may change.
+#
+# `examples/verified_action/` (Pre-Phase-3.4, see ADR 0009's revision section): a small set of
+# images the project owner manually placed and personally, independently confirmed contain real
+# animation/action -- NOT derived from any VLM run, not even indirectly via a rendered output
+# (the exact provenance gap `sample_page_02`'s original annotation had). These samples carry
+# `fetch_script: null` (no field value, not merely empty) -- there is no script that can
+# reproduce them; obtaining them means asking the project owner directly, an honestly-recorded
+# permanent gap, not a temporary one like sample_page_01/02's live-query non-reproducibility.
+# Independent verification establishes ONLY `animation_possible: "yes"` -- it does NOT establish
+# which object is the target, which panel/region it's in, or which transform is appropriate, so
+# `expected_target_category`/`expected_motion_category`/`expected_region_note` stay null on these
+# samples, exactly like `phase3_action_page`'s already-established "yes, but target genuinely
+# open" pattern -- not a new kind of gap, the same one this dataset already has real precedent
+# for.
 
 samples:
   - sample_id: sample_page_01
@@ -197,4 +211,70 @@ samples:
       false-positive/false-negative measurement more than one series' worth of real evidence
       (docs/decisions/0006-grounding-target-validation.md's own flagged "untested on a second,
       visually distinct series" open question).
+    annotation_version: 1
+
+  - sample_id: verified_action_1
+    image_path: examples/verified_action/action_sample_1.png
+    source_citation: >
+      Manually provided by the project owner directly into examples/verified_action/ (not
+      fetched via a scripts/fetch_*.py query) -- no series/chapter/MangaDex id recorded, exact
+      source undisclosed. Action/animation presence is independently confirmed by the project
+      owner's own direct judgment, not derived from a citable third-party record or from any
+      model inference.
+    diversity_tag: verified_action
+    fetch_script: null
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      An honest all-STATIC analysis result is a semantic false negative here -- independently
+      verified real action exists on this page. Beyond that, this sample does not assert which
+      specific object/region is the correct target (no independent evidence establishes that,
+      same open-target status as phase3_action_page): any completed, validated ACCEPT on a
+      real, visually-plausible actionable region is consistent with this sample's ground truth;
+      an ACCEPT on an unrelated background/dialogue region is not.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Objective file metadata only (no VLM/visual-content inspection performed as part of this
+      integration): 1100x6613px, RGB, PNG, sha256
+      d69ae2ef956854987d2425870b42d478fb18dc3ab7a2f1dd129f74575ce24b3e (recorded for
+      duplicate-detection/auditability, not as a semantic claim -- confirmed distinct from
+      every other sample's checksum in this file). Very tall aspect ratio (~6:1), similar in
+      shape to the original Phase 3.1 motivating page.
+    annotation_provenance: independent_human_verification
+    annotation_version: 1
+
+  - sample_id: verified_action_2
+    image_path: examples/verified_action/anction_sample_2.png
+    source_citation: >
+      Manually provided by the project owner directly into examples/verified_action/ (not
+      fetched via a scripts/fetch_*.py query) -- no series/chapter/MangaDex id recorded, exact
+      source undisclosed. Action/animation presence is independently confirmed by the project
+      owner's own direct judgment, not derived from a citable third-party record or from any
+      model inference. Filename ("anction_sample_2.png") reproduced exactly as provided on
+      disk, typo included -- not corrected here since it is the file's real, on-disk name.
+    diversity_tag: verified_action
+    fetch_script: null
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      An honest all-STATIC analysis result is a semantic false negative here -- independently
+      verified real action exists on this page. Beyond that, this sample does not assert which
+      specific object/region is the correct target (no independent evidence establishes that,
+      same open-target status as phase3_action_page): any completed, validated ACCEPT on a
+      real, visually-plausible actionable region is consistent with this sample's ground truth;
+      an ACCEPT on an unrelated background/dialogue region is not.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Objective file metadata only (no VLM/visual-content inspection performed as part of this
+      integration): 1350x1920px, RGB, PNG, sha256
+      711f136f55b7c3305316f1fa6b7fe1512437617f50d4e9cec8fe4d0b8499bbbc (recorded for
+      duplicate-detection/auditability, not as a semantic claim -- confirmed distinct from
+      every other sample's checksum in this file). Standard portrait-page aspect ratio.
+    annotation_provenance: independent_human_verification
     annotation_version: 1

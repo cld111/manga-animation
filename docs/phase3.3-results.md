@@ -943,3 +943,147 @@ smaller-than-`sample_count` denominators.
    re-runs, not tested the same way.
 6. **Tests**: 280 passed (276 → 280, +4 new, 1 renamed/re-scoped).
 7. **Static analysis**: ruff and mypy both clean.
+
+---
+
+# Pre-Phase 3.4 (continued): verified-action dataset integration
+
+Follow-up to the cleanup above, same overall pre-Phase-3.4 effort: the project owner manually
+provided two real images with independently verified action/animation content, to be integrated
+as this dataset's first genuinely uncontaminated positive controls. See
+[ADR 0009's revision section](decisions/0009-evaluation-ground-truth-integrity.md#revision-pre-phase-34-annotation_provenance-field--verified-action-samples)
+for the architectural decision; this section is the integration record.
+
+## What was inspected
+
+`examples/verified_action/action_sample_1.png` (1100×6613px, RGB, PNG, sha256
+`d69ae2ef956854987d2425870b42d478fb18dc3ab7a2f1dd129f74575ce24b3e`) and
+`examples/verified_action/anction_sample_2.png` (1350×1920px, RGB, PNG, sha256
+`711f136f55b7c3305316f1fa6b7fe1512437617f50d4e9cec8fe4d0b8499bbbc`, filename typo preserved
+exactly as provided). Both load and verify as valid PNGs. Neither checksum matches any of this
+dataset's other 5 samples — confirmed distinct content, not a re-tagged duplicate. No VLM
+inference and no visual-content inspection was performed on these files as part of this
+integration — only the objective, filesystem-level metadata above.
+
+## What `examples/verified_action/` represents
+
+Images the project owner manually selected and personally, independently confirmed contain real
+animation/action — independent of any VLM inference, and independent of inspecting any
+pipeline's own downstream render (the exact provenance gap `sample_page_02`'s original,
+since-revised annotation had — see the Pre-Phase-3.4 cleanup section above and ADR 0009).
+
+**What this verification actually establishes**: exactly `animation_possible: "yes"`. **What it
+does NOT establish**: which object is the target, which panel/region contains it, or which
+transform is appropriate. `expected_target_category`/`expected_motion_category`/
+`expected_region_note` are left `null` on both new samples — not overstated, and not a new kind
+of gap: `phase3_action_page` already established this exact "yes, target genuinely open" pattern
+for a different reason (multiple plausible real candidates, not asserting one). No bbox, panel,
+or transform-kind ground truth was invented for these samples.
+
+## Dataset integration decision
+
+Extended the existing single manifest (`configs/phase3_3_eval_dataset.yaml`, same `EvalSample`
+schema) with two new entries, `verified_action_1`/`verified_action_2` — not a separate parallel
+dataset/loader, not a replacement for `sample_page_01`/`sample_page_02`. Reusing the existing
+architecture was preferred per the brief's own instruction ("reuse it rather than creating a
+second parallel metric system") and because nothing about these samples needs a structurally
+different representation — they are ordinary `EvalSample`s with `animation_possible: "yes"`,
+`ground_truth_uncertain: false`, and (new) `annotation_provenance:
+independent_human_verification`.
+
+`sample_page_01`/`sample_page_02` were **not** touched, replaced, or silently relabeled. Their
+historical annotations remain exactly as Phase 3.3.2 left them
+(`tests/test_evaluation.py::test_adding_verified_action_samples_did_not_mutate_the_pre_existing_annotations`
+asserts this directly). They remain valuable for a different reason than "positive control" —
+they are this dataset's two real, evidenced cross-session-instability case studies — and continue
+to be correctly excluded from binary metrics via `ground_truth_uncertain`.
+
+## Ground-truth provenance
+
+`annotation_provenance: independent_human_verification` is set only on the two new samples — not
+backfilled onto any pre-existing sample, since asserting a specific provenance category for them
+retroactively would be a new historical claim this project cannot actually verify after the fact.
+`PageRunOutcome`/`RepeatedRunRecord` (the prediction types real pipeline runs produce) have no
+`annotation_provenance`-shaped field at all, so there is no code path through which a pipeline
+run could resemble writing one — verified directly by
+`test_verified_action_provenance_is_independent_human_verification_not_vlm`.
+
+## New invariant: no duplicate `image_path`
+
+`load_eval_dataset()` now raises `ValueError` if two samples declare the same `image_path` — a
+cheap, filesystem-independent check (does not require image bytes to exist on disk) guarding
+against "the same image under multiple semantic identities." Does not hash image content, so a
+byte-identical file under a different path/name would not be caught — a real, narrower scope
+than a full content-duplicate check, chosen to avoid coupling manifest-schema validation to the
+filesystem.
+
+## Evaluation reporting
+
+No new `EvaluationReport` field. The 3-way split (verified positive controls / verified negative
+controls / unresolved samples) this integration asks for is already fully derivable from
+existing fields: `semantic_false_negative_rate.denominator` (resolved "yes"),
+`semantic_false_positive_rate.denominator` (resolved "no"), `unresolved_ground_truth_count`.
+`scripts/run_phase3_3_evaluation.py`'s report output now prints this split by name, reusing
+those three numbers.
+
+## Dataset composition after integration
+
+| Sample | `animation_possible` | `ground_truth_uncertain` | `annotation_provenance` |
+| --- | --- | --- | --- |
+| `sample_page_01` | uncertain | true | — |
+| `sample_page_02` | uncertain | true | — |
+| `phase3_action_page` | yes | false | — |
+| `eval_static_dialogue` | no | false | — |
+| `eval_weapon_effects` | yes | false | — |
+| `verified_action_1` | yes | false | independent_human_verification |
+| `verified_action_2` | yes | false | independent_human_verification |
+
+Resolved-ground-truth subset for binary metrics: 5 of 7 (4 positive controls, 1 negative
+control); 2 of 7 remain unresolved.
+
+## Tests
+
+7 new tests added to `tests/test_evaluation.py`:
+`test_verified_action_samples_are_real_frozen_immutable_positive_controls`,
+`test_verified_action_provenance_is_independent_human_verification_not_vlm`,
+`test_verified_action_provenance_is_unaffected_by_any_prediction`,
+`test_real_dataset_ground_truth_split_is_visible_and_sums_to_sample_count`,
+`test_adding_verified_action_samples_did_not_mutate_the_pre_existing_annotations`,
+`test_load_eval_dataset_rejects_duplicate_image_path`,
+`test_verified_action_samples_do_not_invent_target_or_region_ground_truth`.
+
+```
+uv run pytest -q      -> 287 passed
+uv run ruff check .   -> All checks passed!
+uv run mypy src       -> Success: no issues found in 41 source files
+```
+
+## Files changed
+
+`.gitignore` (nested `examples/**/*.png` etc. — the two new binaries were not previously
+covered by the single-level `examples/*.png` rule and must never be committed, same policy as
+every other sample image), `src/manga_animation/evaluation/dataset.py`
+(`AnnotationProvenance`, `annotation_provenance` field, `fetch_script` now optional, duplicate-
+`image_path` check), `configs/phase3_3_eval_dataset.yaml` (2 new entries + header note),
+`scripts/run_phase3_3_evaluation.py` (missing-file message distinguishes fetchable vs.
+inherently unfetchable samples; report prints the 3-way ground-truth split),
+`tests/test_evaluation.py` (+7), `docs/decisions/0009-evaluation-ground-truth-integrity.md`
+(revision section).
+
+## Verdict against this integration's acceptance criteria
+
+1. All `examples/verified_action/` files inspected (objective metadata only). PASS.
+2. Their evaluation role is explicit: ordinary `EvalSample`s in the existing manifest, resolved
+   positive controls. PASS.
+3. Positive ground truth is independent of VLM inference (structurally, via provenance +
+   frozen model + no writable path from `PageRunOutcome`). PASS.
+4. No semantic target/grounding/transform information invented — verified directly by test.
+   PASS.
+5. `sample_page_01`/`sample_page_02` not silently relabeled — verified directly by test. PASS.
+6. Binary metrics contain only resolved-ground-truth samples (5 of 7; unchanged exclusion
+   mechanism from the cleanup above). PASS.
+7. Tests pass: 287/287. PASS.
+8. ruff clean. PASS.
+9. mypy clean. PASS.
+10. Documentation (this section + ADR 0009's revision) describes the new role accurately,
+    without overstating what verification established. PASS.

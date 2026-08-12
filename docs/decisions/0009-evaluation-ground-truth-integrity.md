@@ -143,3 +143,54 @@ once, by hand, treating a lucky single VLM read as if it were independent eviden
 - Whether `sample_page_02` should be re-adjudicated by an actual human reviewer, or retired in
   favor of a different, unambiguous positive-control sample, is left to the user — flagged, per
   this phase's explicit operational rule, not resolved unilaterally.
+
+## Revision (Pre-Phase-3.4): `annotation_provenance` field + verified-action samples
+
+This ADR's own "Open questions" originally left a stronger provenance model deliberately
+unbuilt: "generalizing to a provenance taxonomy from a single real data point would be
+speculative schema growth." A second, real, independent case has since arrived: the project
+owner manually placed and personally verified two real images
+(`examples/verified_action/action_sample_1.png`, `.../anction_sample_2.png`) as genuinely
+containing action/animation, explicitly *not* via VLM inference or by inspecting a pipeline's
+own rendered output — the exact failure mode `sample_page_02`'s original annotation fell into.
+Two distinct, real provenance stories (one contaminated, one clean) is enough evidence to justify
+a minimal structural field, not a taxonomy built ahead of need.
+
+**Decision**: `EvalSample` gains `annotation_provenance: Literal["independent_human_verification"]
+| None = None`. `None` (the default, and the value every pre-existing sample keeps) means "no
+structured provenance recorded" — it is deliberately **not** backfilled onto
+`sample_page_01`/`sample_page_02`/`phase3_action_page`/`eval_static_dialogue`/
+`eval_weapon_effects`, since asserting a specific provenance category for them now would be a new
+historical claim this project cannot actually verify after the fact; their real provenance
+remains exactly where Phase 3.3.2 already put it — free text in `notes`. Only the two new samples,
+whose provenance is genuinely known with this level of confidence right now, get the field set.
+
+`EvalSample.fetch_script` also becomes `str | None` (was required, `min_length=1`): the verified
+samples have no reproducible fetch mechanism at all — a different, permanent kind of gap from
+`sample_page_01`/`sample_page_02`'s "has a fetch script, but the underlying query isn't
+reproducible" gap — and `None` represents that honestly instead of inventing a placeholder script
+path.
+
+**`load_eval_dataset` gains one new invariant**: two samples may never declare the same
+`image_path` (raises `ValueError`) — a cheap, filesystem-independent check that directly guards
+the "do not duplicate the same image under multiple semantic identities" requirement this
+integration was built under. It does not hash image bytes (that would require every referenced
+image to exist on disk just to load the manifest schema, breaking the existing image-free
+manifest-validation path), so a byte-identical file under a different path and a different
+`image_path` string would not be caught — a real, narrower scope than a full content-duplicate
+check, chosen deliberately over adding a filesystem dependency to schema loading.
+
+**What independent verification does and does not establish**: exactly `animation_possible:
+"yes"` — nothing else. `expected_target_category`/`expected_motion_category`/
+`expected_region_note` stay `null` on both new samples, the same "yes, but target genuinely
+open" pattern `phase3_action_page` already established — not a new kind of gap. No new field was
+added to represent a target/bbox/transform expectation for these samples; none of that was
+independently verified, so none of it is recorded.
+
+**Evaluation reporting**: no new `EvaluationReport` field. The 3-way split Pre-Phase-3.4 asks for
+(verified positive controls / verified negative controls / unresolved) is already fully derivable
+from existing fields — `semantic_false_negative_rate.denominator` (resolved "yes" samples),
+`semantic_false_positive_rate.denominator` (resolved "no" samples), and
+`unresolved_ground_truth_count` — so `scripts/run_phase3_3_evaluation.py`'s report output was
+extended to print this split explicitly, reusing those three numbers rather than building a
+second parallel metric system.
