@@ -82,7 +82,31 @@ page, but showed **no measurable end-to-end reliability improvement** over page-
 on this small dataset — reported honestly as a null result, not reframed as a win. See
 [`docs/phase3.3-results.md`](docs/phase3.3-results.md) for the full real results, including a
 newly-found real visual defect (an oversized grounding box on a `rotate` transform) and a
-significant new VLM cross-session nondeterminism finding.
+significant new VLM cross-session nondeterminism finding. Two focused follow-ups before Phase 4
+started: an evaluation-oracle-integrity fix (ground truth made immutable/versioned/independent
+of VLM predictions — see [ADR 0009](docs/decisions/0009-evaluation-ground-truth-integrity.md))
+and a baseline-cleanup pass (`_check_regression` corrected, uncertain samples explicitly
+excluded from binary metrics, two independently-verified positive controls added) — both
+documented in [`docs/phase3.3-results.md`](docs/phase3.3-results.md)'s later sections.
+
+**Phase 4 — Layer decomposition — implemented (deterministic, unit-tested; not yet run against
+real models on a live GPU worker).** `analysis/plan_builder.py` no longer forces every object
+except the chosen PRIMARY to STATIC — a decision the VLM itself marks SECONDARY/MICRO now keeps
+real motion, and `pipeline/orchestrator.py` grounds/validates/segments/animates every non-STATIC
+object, not just one (PRIMARY keeps its exact pre-Phase-4 hard-fail policy; a SECONDARY/MICRO
+object that fails just drops out of the render). A new `Layer` type
+(`pipeline/types.py`) and `compositing.composite_frame_stack` generalize single-object alpha
+compositing to N simultaneously-animated layers in a deterministic z-order (PRIMARY on top).
+See [ADR 0010](docs/decisions/0010-multi-object-layer-decomposition.md) for the full design,
+including why this necessarily absorbed most of what the phase table below used to list
+separately under "Phase 5" — a layer decomposition that only ever handles one object isn't
+really decomposing anything; the two were never separable in practice. Hidden-region
+reconstruction's own per-object logic is unchanged (its multi-object *integration*, inside
+compositing, is new; further robustness hardening of `reconstruct_hidden_region` itself is not
+part of this pass — see the ADR's "Open questions"). No live Kaggle/Jupyter worker was available
+during this phase, so this has been validated with deterministic fake-client tests only, exactly
+like every other pipeline stage's test suite — real-model validation is real, disclosed future
+work, not claimed here.
 
 Planned phases:
 
@@ -93,8 +117,8 @@ Planned phases:
 | 3.1 | First end-to-end vertical slice: one real page through every stage |
 | 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
 | 3.3 | Panel-aware analysis + reproducible evaluation framework |
-| 4 | Layer decomposition refinement, hidden-region reconstruction hardening |
-| 5 | Secondary/micro motion, multi-object plans |
+| 4 | Layer decomposition — **implemented**, real-model validation still pending |
+| 5 | Secondary/micro motion, multi-object plans — **substantially delivered as part of Phase 4** (see above); real-page evidence that the VLM actually proposes genuine multi-object plans is still outstanding |
 | 6 | Seamless-looping/rendering hardening at scale |
 | 7 | End-to-end QA, evaluation, regression testing |
 

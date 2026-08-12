@@ -81,7 +81,17 @@ def test_valid_json_single_primary_produces_valid_plan(sample_image_path, config
     assert plan.loop.duration_s == config.duration_s
 
 
-def test_multiple_primaries_keeps_highest_confidence_forces_rest_static(sample_image_path, config):
+def test_multiple_primaries_forces_the_losing_one_static_but_keeps_a_real_secondary(
+    sample_image_path, config
+):
+    """Phase 4 (docs/decisions/0010-multi-object-layer-decomposition.md): the losing extra
+
+    "primary" candidate is still forced to STATIC -- unchanged, `_rank_candidates`'
+    single-object-among-primaries policy isn't being generalized here -- but a real
+    "secondary" read is no longer collapsed to STATIC just because it wasn't chosen as
+    PRIMARY; it keeps its own motion_type and gets a real MotionSpec (the pipeline can now
+    animate more than one object per page).
+    """
     decisions = [
         _decision("hair", "primary", confidence=0.6, motion_description="blows sideways"),
         _decision("cape", "primary", confidence=0.95, motion_description="flutters behind"),
@@ -95,11 +105,13 @@ def test_multiple_primaries_keeps_highest_confidence_forces_rest_static(sample_i
     assert len(primary_objects) == 1
     assert primary_objects[0].semantic_label == "cape"
 
-    non_primary = [o for o in plan.objects if o.semantic_label != "cape"]
-    assert len(non_primary) == 2
-    for obj in non_primary:
-        assert obj.motion_type == MotionType.STATIC
-        assert obj.motion is None
+    hair = next(o for o in plan.objects if o.semantic_label == "hair")
+    assert hair.motion_type == MotionType.STATIC
+    assert hair.motion is None
+
+    sword = next(o for o in plan.objects if o.semantic_label == "sword")
+    assert sword.motion_type == MotionType.SECONDARY
+    assert sword.motion is not None
 
 
 def test_all_static_raises_pipeline_stage_error_not_a_fabricated_plan(sample_image_path, config):
@@ -242,6 +254,37 @@ def test_only_a_micro_candidate_also_produces_a_usable_plan(sample_image_path, c
     primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
     assert len(primary_objects) == 1
     assert primary_objects[0].semantic_label == "eye"
+
+
+def test_primary_secondary_and_micro_all_get_real_motion_in_one_plan(sample_image_path, config):
+    """Phase 4's core new capability: a plan can carry more than one animated object at once --
+
+    PRIMARY, SECONDARY, and MICRO decisions each keep their own real MotionSpec, not just the
+    single chosen PRIMARY. `object_id`s stay distinct so downstream stages can address each
+    object independently.
+    """
+    decisions = [
+        _decision("cape", "primary", confidence=0.9, motion_description="flutters behind"),
+        _decision("hair", "secondary", confidence=0.7, motion_description="sways"),
+        _decision("eye", "micro", confidence=0.5, motion_description="blinks"),
+        _decision("background", "static"),
+    ]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(sample_image_path, client, config=config)
+
+    by_label = {o.semantic_label: o for o in plan.objects}
+    assert by_label["cape"].motion_type == MotionType.PRIMARY
+    assert by_label["cape"].motion is not None
+    assert by_label["hair"].motion_type == MotionType.SECONDARY
+    assert by_label["hair"].motion is not None
+    assert by_label["eye"].motion_type == MotionType.MICRO
+    assert by_label["eye"].motion is not None
+    assert by_label["background"].motion_type == MotionType.STATIC
+    assert by_label["background"].motion is None
+
+    animated = [o for o in plan.objects if o.motion is not None]
+    assert len({o.object_id for o in animated}) == len(animated)  # distinct object_ids
 
 
 def test_a_real_primary_still_outranks_a_more_confident_secondary(sample_image_path, config):

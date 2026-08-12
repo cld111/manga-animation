@@ -244,6 +244,40 @@ class ReconstructionResult:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class Layer:
+    """One independently-transformable animated object's full per-frame footprint across the
+
+    loop -- the formalized "layer" `docs/pipeline.md`'s "Layer decomposition" stage names
+    (Phase 4, see docs/decisions/0010-multi-object-layer-decomposition.md). Before this type
+    existed, `animation.generate_transformed_layer` returned a raw `(ImageArray, MaskArray)`
+    tuple per frame and `compositing.composite_frame` only ever consumed exactly one such pair
+    per frame -- `run_pipeline` never animated more than one `ObjectPlan` at a time (Phase
+    3.1-3.3.x's documented, deliberate scope limit; see docs/phase3.2-results.md's "kept, by
+    design" note). This type and `compositing.composite_frame_stack` are the minimal
+    formalization needed to composite more than one simultaneously-animated object correctly.
+    """
+
+    object_id: str
+    frames: tuple[tuple[ImageArray, MaskArray], ...]
+    """One `(transformed_image, transformed_mask)` pair per frame index, same order/count as
+
+    the plan's `LoopSpec.frame_count` -- `generate_transformed_layer`'s per-frame output,
+    collected across the whole loop rather than consumed one frame at a time."""
+    z_order: int
+    """Compositing order: lower is drawn first (further back), higher drawn last (on top).
+
+    Ties are broken by `object_id` (lexicographic) for full determinism. Populated from each
+    object's `MotionType` -- PRIMARY on top (the reader's intended focus, per the analysis
+    prompt's own definition of "primary"), then SECONDARY, then MICRO -- a simple, documented
+    rule, not a depth/occlusion inference this project has no real evidence to support (see
+    ADR 0010's "Open questions")."""
+
+    def __post_init__(self) -> None:
+        if not self.frames:
+            raise ValueError(f"Layer {self.object_id!r} has zero frames")
+
+
 @dataclass(slots=True)
 class FrameSequence:
     """A rendered, loop-ready sequence of composited frames, not yet encoded."""

@@ -355,6 +355,58 @@ def _checksum(image_path: Path) -> str:
     return "sha256:" + hashlib.sha256(image_path.read_bytes()).hexdigest()
 
 
+def _non_primary_object_plan(
+    decision: _RawObjectDecision, index: int, panel_id: str, image_path: Path
+) -> ObjectPlan:
+    """Build the `ObjectPlan` for one decision that isn't this plan's chosen PRIMARY.
+
+    Phase 4 (see `docs/decisions/0010-multi-object-layer-decomposition.md`): a decision the VLM
+    itself marked SECONDARY or MICRO keeps that real motion_type and gets a real `MotionSpec` --
+    the pipeline can now animate more than one object per page (`pipeline/orchestrator.py` loops
+    grounding/validation/segmentation/animation over every non-STATIC `ObjectPlan`, not just the
+    PRIMARY). Before this phase, EVERY non-chosen decision was forced to STATIC regardless of
+    its own label -- a deliberate, documented Phase 3.1-3.3.x scope limit (see
+    docs/phase3.2-results.md's "kept, by design" note), not a bug being fixed here.
+
+    Two cases still fall back to STATIC, unchanged from before: a decision the VLM itself
+    labeled STATIC (obviously), and a decision labeled PRIMARY that lost to a
+    higher-confidence PRIMARY (`_rank_candidates`'s existing "keeping highest-confidence...
+    deferring the rest to STATIC" policy for that specific edge case) -- this function does not
+    invent a new policy for demoting an unchosen PRIMARY to SECONDARY; it only stops
+    overriding an already-real SECONDARY/MICRO read.
+    """
+    if decision.motion_type in (MotionType.SECONDARY, MotionType.MICRO):
+        try:
+            return ObjectPlan(
+                object_id=_slugify(decision.semantic_label, index),
+                panel_id=panel_id,
+                semantic_label=decision.semantic_label,
+                confidence=decision.confidence,
+                motion_type=decision.motion_type,
+                motion=_motion_spec_for(decision),
+            )
+        except ValueError as exc:
+            raise PipelineStageError(
+                stage="analysis",
+                input_ref=str(image_path),
+                detail=(
+                    f"internal MotionSpec heuristic produced a schema-invalid "
+                    f"{decision.motion_type.value} object: {exc}"
+                ),
+                root_cause="the built-in transform_kind/amplitude/speed heuristic table",
+                architectural=True,
+                proposed_fix="fix the offending entry in _MOTION_HEURISTICS/_DEFAULT_MOTION",
+            ) from exc
+    return ObjectPlan(
+        object_id=_slugify(decision.semantic_label, index),
+        panel_id=panel_id,
+        semantic_label=decision.semantic_label,
+        confidence=decision.confidence,
+        motion_type=MotionType.STATIC,
+        motion=None,
+    )
+
+
 def build_plan(
     decisions: list[_RawObjectDecision],
     image: Image.Image,
@@ -363,28 +415,19 @@ def build_plan(
 ) -> AnimationPlan:
     """Assemble the final schema-valid `AnimationPlan` from validated VLM decisions.
 
-    Every object other than the chosen single PRIMARY is forced to STATIC with no motion
-    spec, even if the VLM proposed SECONDARY/MICRO motion for it -- Phase 3.1's pipeline only
-    grounds/segments/animates the one PRIMARY object (see `.claude/agents/segmentation-agent.md`
-    task scope for this phase), so leaving other objects marked as animated in the plan would
-    make the plan lie about what the rendered video will actually contain.
+    The chosen PRIMARY always gets a real `MotionSpec`; every other decision the VLM itself
+    marked SECONDARY/MICRO also keeps its real motion (Phase 4 -- see
+    `_non_primary_object_plan`'s docstring). Only a decision the VLM marked STATIC, or an extra
+    PRIMARY that lost to a higher-confidence one, still becomes STATIC in the emitted plan.
     """
     ranked = _rank_candidates(decisions, str(image_path))
     chosen = ranked[0]
     rest = [d for d in decisions if d is not chosen]
 
-    objects: list[ObjectPlan] = []
-    for index, decision in enumerate(rest):
-        objects.append(
-            ObjectPlan(
-                object_id=_slugify(decision.semantic_label, index),
-                panel_id=_PANEL_ID,
-                semantic_label=decision.semantic_label,
-                confidence=decision.confidence,
-                motion_type=MotionType.STATIC,
-                motion=None,
-            )
-        )
+    objects: list[ObjectPlan] = [
+        _non_primary_object_plan(decision, index, _PANEL_ID, image_path)
+        for index, decision in enumerate(rest)
+    ]
 
     primary_object_id = _slugify(chosen.semantic_label, len(rest))
     try:
@@ -523,18 +566,10 @@ def _build_plan_from_panels(
     chosen_panel_id, chosen = ranked[0]
     rest = [(pid, d) for pid, d in decisions if d is not chosen]
 
-    objects: list[ObjectPlan] = []
-    for index, (panel_id, decision) in enumerate(rest):
-        objects.append(
-            ObjectPlan(
-                object_id=_slugify(decision.semantic_label, index),
-                panel_id=panel_id,
-                semantic_label=decision.semantic_label,
-                confidence=decision.confidence,
-                motion_type=MotionType.STATIC,
-                motion=None,
-            )
-        )
+    objects: list[ObjectPlan] = [
+        _non_primary_object_plan(decision, index, panel_id, image_path)
+        for index, (panel_id, decision) in enumerate(rest)
+    ]
 
     primary_object_id = _slugify(chosen.semantic_label, len(rest))
     try:

@@ -32,21 +32,27 @@ Target validation                — src/manga_animation/validation
 Precise segmentation            — src/manga_animation/segmentation
     │  pixel-accurate masks per grounded object (e.g. SAM-family model)
     ▼
-Layer decomposition             — src/manga_animation/layers
-    │  separate each animated object into an independently transformable layer
+Deterministic / kinematic       — src/manga_animation/animation
+animation                       │  apply each animated object's MotionSpec: translate/rotate/
+    │                             scale/shear/mesh_warp/opacity, via OpenCV/NumPy transforms.
+    │                             Runs for every non-STATIC object in the plan, not only the
+    │                             PRIMARY one — a real PRIMARY + SECONDARY/MICRO plan animates
+    │                             all of them (Phase 4, see
+    │                             docs/decisions/0010-multi-object-layer-decomposition.md).
+    ▼
+Layer decomposition             — src/manga_animation/pipeline/types.py (the `Layer` type)
+    │  wrap each animated object's per-frame (image, mask) output into a `Layer` with a
+    │  compositing z_order — thinner than a standalone stage; see
+    │  src/manga_animation/layers/__init__.py for why it isn't its own module
     ▼
 Optional hidden-region          — src/manga_animation/reconstruction
-reconstruction                  │  fill in areas a layer's motion will reveal, only where needed
-    ▼
-Deterministic / kinematic       — src/manga_animation/animation
-animation                       │  apply each object's MotionSpec: translate/rotate/scale/
-    │                             shear/mesh_warp/opacity, via OpenCV/NumPy transforms
-    ▼
-Secondary motion                — src/manga_animation/animation
-    │  motion that follows from a primary mover (cloth, hair) — SECONDARY/MICRO objects
+reconstruction                  │  fill in areas a layer's motion will reveal, only where
+    │                             needed — computed per object, after animation (not before —
+    │                             it needs to know what each object's motion actually reveals)
     ▼
 Original-image compositing      — src/manga_animation/compositing
-    │  alpha-composite animated layers back over the untouched original page
+    │  alpha-composite every animated layer back over the untouched original page, in
+    │  deterministic z_order (Phase 4: N layers via `composite_frame_stack`, not just one)
     ▼
 Seamless loop                   — src/manga_animation/rendering
     │  ensure frame N+1 after the last frame matches frame 0
@@ -55,9 +61,10 @@ H.264 video                     — src/manga_animation/rendering
        encode the frame sequence via FFmpeg
 ```
 
-`src/manga_animation/pipeline` will hold the orchestration that wires these stages
-together end-to-end once enough of them exist to connect (see the phases table in
-[README.md](../README.md)).
+`src/manga_animation/pipeline` holds the orchestration that wires these stages together
+end-to-end (`pipeline/orchestrator.py::run_pipeline`), plus the shared cross-stage type
+contracts every stage converts to/from at its boundary (`pipeline/types.py`, including the
+`Layer` type — see below).
 
 ## Stage ownership
 
@@ -70,7 +77,13 @@ package each owns (`vision-agent` → `analysis`/`schemas`; `segmentation-agent`
 (`compositing`) stages it already implements — it is not a separate specialist, since
 reconstruction exists specifically to prepare pixels that `cv-agent`'s own compositing
 step then consumes. See `.claude/agents/cv-agent.md` for the full ownership boundary
-(input/output/downstream consumer).
+(input/output/downstream consumer). **Layer decomposition** (Phase 4, `pipeline.types.Layer`
+plus `compositing.composite_frame_stack`) follows the same ownership: it's `cv-agent`'s
+territory too, not a separate specialist — see
+[ADR 0010](decisions/0010-multi-object-layer-decomposition.md). Multi-object orchestration
+itself (looping grounding/validation/segmentation over every non-STATIC object, not just
+PRIMARY) lives in `pipeline/orchestrator.py`, owned by the orchestrating session per this
+project's general pipeline-wiring convention, not any single stage specialist.
 
 The **target validation** stage (`src/manga_animation/validation`, Phase 3.2 — see
 [ADR 0006](decisions/0006-grounding-target-validation.md)) is owned by `segmentation-agent`:

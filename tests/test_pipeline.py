@@ -114,6 +114,34 @@ class ValidationSequenceVLMClient:
         return json.dumps(self._decisions)
 
 
+class RejectFromNthValidationVLMClient:
+    """Like `ValidationSequenceVLMClient`, but rejects starting from the `reject_from_call`'th
+
+    validation call onward (1-based) instead of the first N -- lets a Phase 4 multi-object test
+    make an EARLIER object's (e.g. PRIMARY's) validation succeed while a LATER object's (e.g. a
+    SECONDARY's) fails, deterministically, by call order (`objects_to_animate` always processes
+    PRIMARY first).
+    """
+
+    def __init__(self, decisions: list[dict], *, reject_from_call: int):
+        self._decisions = decisions
+        self._reject_from_call = reject_from_call
+        self._validation_calls = 0
+
+    def generate(self, image, prompt: str) -> str:
+        if _VALIDATION_PROMPT_MARKER in prompt:
+            self._validation_calls += 1
+            matches = self._validation_calls < self._reject_from_call
+            return json.dumps(
+                {
+                    "matches": matches,
+                    "confidence": 0.9 if matches else 0.1,
+                    "reason": f"fake validation response #{self._validation_calls}",
+                }
+            )
+        return json.dumps(self._decisions)
+
+
 class FailingGroundingClient:
     model_id = "fake-grounding-dino"
 
@@ -154,6 +182,38 @@ class FakeGroundingClient:
             Detection(label="banner", score=0.9 - 0.1 * i, box=b)
             for i, b in enumerate(self.boxes)
         ]
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+
+class MultiObjectFakeGroundingClient:
+    """Returns a different box per semantic_label -- matched by substring against the
+
+    grounding prompt `grounding/ground.py::_prompt_from_label` builds (`"hanging banner."` for
+    `semantic_label="hanging_banner"`) -- lets a Phase 4 multi-object test give PRIMARY and
+    SECONDARY/MICRO objects distinct, non-overlapping regions instead of
+    `FakeGroundingClient`'s single shared box. A label with no entry in `boxes_by_label`
+    detects nothing (mirrors `FailingGroundingClient`, for that one object only).
+    """
+
+    model_id = "fake-grounding-dino"
+
+    def __init__(self, boxes_by_label: dict[str, tuple[int, int, int, int]]):
+        self._boxes_by_label = {
+            label.replace("_", " "): box for label, box in boxes_by_label.items()
+        }
+        self.loaded = False
+        self.unloaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def detect(self, image, text_prompt: str) -> list[Detection]:
+        for label, box in self._boxes_by_label.items():
+            if label in text_prompt:
+                return [Detection(label=label, score=0.9, box=box)]
+        return []
 
     def unload(self) -> None:
         self.unloaded = True
@@ -202,6 +262,16 @@ def _static_decision(label: str = "background") -> dict:
         "motion_type": "static",
         "confidence": 0.9,
         "reason": "test fixture",
+    }
+
+
+def _secondary_decision(label: str = "trailing_cloth") -> dict:
+    return {
+        "semantic_label": label,
+        "motion_type": "secondary",
+        "confidence": 0.8,
+        "reason": "test fixture",
+        "motion_description": "trails behind",
     }
 
 
@@ -786,6 +856,116 @@ def test_run_pipeline_propagates_analysis_all_static_failure(
             out_dir=tmp_path / "out",
         )
     assert excinfo.value.stage == "analysis"
+
+
+# --- Phase 4: multi-object layer decomposition --------------------------------------------
+
+
+def test_run_pipeline_animates_primary_and_a_successful_secondary_object(
+    page_path: Path, config, tmp_path: Path
+):
+    """The core new Phase 4 capability: a plan with a real SECONDARY candidate alongside the
+
+    PRIMARY animates both, not just the PRIMARY -- see
+    docs/decisions/0010-multi-object-layer-decomposition.md.
+    """
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert len(result.secondary_objects) == 1
+    secondary = result.secondary_objects[0]
+    assert secondary.object_plan.semantic_label == "trailing_cloth"
+    assert secondary.object_plan.motion_type == MotionType.SECONDARY
+    assert secondary.segmentation.mask.any()
+    assert secondary.object_plan.object_id != result.primary_object.object_id
+
+
+def test_run_pipeline_drops_a_secondary_that_fails_grounding_without_failing_the_run(
+    page_path: Path, config, tmp_path: Path
+):
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("ghost_object")]
+    # only "hanging_banner" has a real box -- "ghost_object" detects nothing, like
+    # FailingGroundingClient, but only for that one object.
+    grounding_client = MultiObjectFakeGroundingClient({"hanging_banner": (10, 10, 60, 90)})
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert result.secondary_objects == []
+    assert (tmp_path / "out" / "output.mp4").exists()  # the run still completed
+
+
+def test_run_pipeline_drops_a_secondary_that_fails_validation_without_failing_the_run(
+    page_path: Path, config, tmp_path: Path
+):
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+    # call #1 = PRIMARY's validation (accepted); call #2 = SECONDARY's (rejected, and every
+    # later call would be too, but there's only one candidate here).
+    vlm_client = RejectFromNthValidationVLMClient(decisions, reject_from_call=2)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=vlm_client,
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert result.secondary_objects == []
+    assert (tmp_path / "out" / "output.mp4").exists()
+
+
+def test_run_pipeline_still_raises_for_primary_failure_even_with_a_secondary_present(
+    page_path: Path, config, tmp_path: Path
+):
+    """A SECONDARY object succeeding must never mask a PRIMARY failure -- PRIMARY keeps its
+
+    exact pre-Phase-4 failure policy regardless of what else is in the plan.
+    """
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    # only the secondary's box exists -- PRIMARY's own grounding finds nothing.
+    grounding_client = MultiObjectFakeGroundingClient({"trailing_cloth": (70, 100, 110, 150)})
+
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(decisions),
+            grounding_client=grounding_client,
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert excinfo.value.stage == "grounding"
+    assert "hanging banner" in excinfo.value.detail  # PRIMARY's own prompt, not the secondary's
+    assert not (tmp_path / "out" / "output.mp4").exists()
 
 
 def test_select_primary_raises_when_plan_has_no_primary_object():
