@@ -123,6 +123,25 @@ check above, using a placeholder fill in place of real LaMa inference) — real-
 real, disclosed future
 work, not claimed here.
 
+**Phase 5 — Secondary/micro motion, multi-object plans — software substantially delivered as
+part of Phase 4; real-page VLM evidence now obtained, real end-to-end render still not
+observed.** A repository-level scope audit confirmed Phase 5's own defined scope (this row)
+was already implemented by ADR 0010's Phase 4 work — no new production code was needed. Added
+three regression tests (`tests/test_pipeline.py`) proving object identity survives grounding →
+segmentation → animation → reconstruction without cross-associating two simultaneously-animated
+objects, verified against a deliberately introduced mask/motion-swap bug to confirm they'd
+actually catch it. Separately, with the project owner's live Kaggle T4 session, `analyze_page`
+was run against 5 real pages (3 attempts each, real `qwen2.5-vl-7b-instruct`): 2/5 pages
+reproducibly (3/3 attempts) produced a genuine simultaneous PRIMARY + SECONDARY/MICRO plan —
+resolving ADR 0010's "no real page has ever produced one" open question. Running the full
+pipeline against both of those pages, however, failed before any SECONDARY/MICRO object was
+reached: both share a PRIMARY `weapon` object that Grounding DINO fails to localize correctly
+in this art style (one page: 0 detections above threshold, reproducing
+`docs/phase3.2-results.md`'s original finding on the same page; the other: 3 candidates, all
+rejected by target validation) — a real, pre-existing grounding limitation, not a Phase 4/5
+multi-object defect. See ADR 0010's "Revision (Phase 5 audit)" section for the full real-run
+table and honest gap characterization.
+
 Planned phases:
 
 | Phase | Scope |
@@ -133,7 +152,7 @@ Planned phases:
 | 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
 | 3.3 | Panel-aware analysis + reproducible evaluation framework |
 | 4 | Layer decomposition — **implemented**; hidden-region reconstruction hardening — **one real bug found and fixed** (`_compute_hole_mask`), other candidate failure modes audited and found already correct; real-model validation still pending |
-| 5 | Secondary/micro motion, multi-object plans — **substantially delivered as part of Phase 4** (see above); real-page evidence that the VLM actually proposes genuine multi-object plans is still outstanding |
+| 5 | Secondary/micro motion, multi-object plans — **software substantially delivered as part of Phase 4** (see above); real-page VLM evidence of genuine multi-object plans **now obtained** (2/5 real pages, 3/3 reproducible); a real end-to-end multi-object *render* has not yet been observed (both real multi-object pages share a PRIMARY object blocked by an unrelated, pre-existing grounding limitation) |
 | 6 | Seamless-looping/rendering hardening at scale |
 | 7 | End-to-end QA, evaluation, regression testing |
 

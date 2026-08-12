@@ -137,10 +137,12 @@ reconstruction fill must not fight with it.
   deferred to whichever layer currently covers it) when its own transform never meaningfully
   reveals new background is already handled by `reconstruct_hidden_region` returning `None` in
   that case (unchanged, pre-existing behavior) — not a new question this ADR introduces.
-- No real evaluation dataset sample has yet produced a genuine multi-object (PRIMARY +
-  SECONDARY/MICRO) plan in a real, observed VLM run — this capability is built and deterministically
-  tested, but has not yet been exercised by a real page in this project's own evidence base.
-  Flagged, not hidden.
+- ~~No real evaluation dataset sample has yet produced a genuine multi-object (PRIMARY +
+  SECONDARY/MICRO) plan in a real, observed VLM run~~ — resolved, see the "Revision (Phase 5
+  audit)" section below: real multi-object VLM plans are now observed. A related, still-open
+  question that section leaves open: no real page has yet produced a *successfully rendered*
+  multi-object output (both real multi-object plans found so far share a PRIMARY object whose
+  grounding fails for an unrelated reason, before any SECONDARY/MICRO object is reached).
 
 ## Revision (reconstruction hardening): `_compute_hole_mask` formula was wrong
 
@@ -222,3 +224,68 @@ future, live-model validation work.
 Corrects the previous "Open questions" bullet above about `reconstruct_hidden_region` returning
 `None`: that gating logic (`if not np.any(hole_mask): return None`) is unchanged, but what
 feeds it (`_compute_hole_mask`) was wrong until this revision.
+
+## Revision (Phase 5 audit): real multi-object VLM evidence obtained, full render still not observed
+
+A repository-level Phase 5 scope audit (this ADR plus `README.md`'s phase table are the
+canonical, agreeing definition — no discrepancy found against `docs/pipeline.md` or the
+implementation) confirmed the software described above was already complete and added
+regression coverage the existing tests didn't have: `tests/test_pipeline.py` gained three
+tests proving `object_id` identity survives grounding → segmentation → animation →
+reconstruction without ever cross-associating two objects (`mask(A) -> animation(B)`,
+`reconstruction(A) -> layer(B)`) — including one call-argument-level test verified against a
+deliberately introduced swap bug (reverted) to confirm it actually fails when that bug is
+present, not just when everything already works.
+
+That left exactly one genuinely open item from this ADR's own "Open questions": real evidence
+that the VLM proposes a genuine simultaneous PRIMARY + SECONDARY/MICRO plan on an actual page,
+not only in deterministic fake-client tests. With the project owner's live Kaggle T4 session
+(reached the same way as `docs/phase3.2-results.md`'s "How this run was executed" — Jupyter
+REST/kernel-WebSocket API, no browser, no `claude-in-chrome`), `analyze_page` was run 3 times
+each against 5 real pages (`examples/sample_page_01.png`, `sample_page_02.png`,
+`phase3_action_page.png`, `eval_weapon_effects.png`, `eval_static_dialogue.png`) using the
+real `qwen2.5-vl-7b-instruct` client, no fallback plan.
+
+**Result: 6/15 runs across 2/5 pages produced a genuine multi-object plan, reproducibly (3/3
+attempts each):**
+
+| Page | Result (3/3 attempts identical) |
+| --- | --- |
+| `sample_page_01.png` | single-object: PRIMARY `character_hair` only |
+| `sample_page_02.png` | all-STATIC |
+| `phase3_action_page.png` | **multi-object**: PRIMARY `weapon` (rotate) + SECONDARY `character_clothing` + SECONDARY `flag_banner` + MICRO `character_hair` + MICRO `character_eye` (5 objects, 4 of them real motion) |
+| `eval_weapon_effects.png` | **multi-object**: PRIMARY `weapon` (rotate) + SECONDARY `cloth` |
+| `eval_static_dialogue.png` | all-STATIC |
+
+This resolves the "Open questions" bullet above: the VLM genuinely does propose real,
+simultaneous PRIMARY + SECONDARY/MICRO plans on real pages, not only in synthetic test
+fixtures — observed directly, not inferred.
+
+**A further, real, honest limitation found by then running the full pipeline
+(`run_pipeline` with real grounding/segmentation/reconstruction clients, not just
+`analyze_page`) against both multi-object pages**: both attempts failed before any
+SECONDARY/MICRO object was reached, because their shared PRIMARY object (`weapon`) failed at
+grounding/validation —
+
+- `eval_weapon_effects.png`: 3 grounding candidates found, all rejected by Phase 3.2's target
+  validation (two semantically wrong crops, one geometrically too large to `rotate` safely) —
+  `PipelineStageError(stage="validation", ...)`, exactly the strict PRIMARY failure policy
+  working as designed.
+- `phase3_action_page.png`: 0 grounding candidates above threshold for the prompt `"weapon."`
+  — `PipelineStageError(stage="grounding", ...)`, reproducing `docs/phase3.2-results.md`'s
+  original finding on this exact page (`0 candidates above threshold`) again, on a fresh
+  session.
+
+Both failures are real and pre-existing Grounding DINO limitations with the phrase `"weapon"`
+against this manga art style, not a Phase 4/5 multi-object defect — the SECONDARY/MICRO
+objects were never even attempted, since the PRIMARY-first ordering (`objects_to_animate`,
+`pipeline/orchestrator.py`) correctly fails the whole run before reaching them, per this ADR's
+own PRIMARY safety policy. But it does mean **no real page has yet produced a successfully
+rendered multi-object output** — every real multi-object plan observed so far shares this same
+grounding-blocked PRIMARY. This is new, real, honest evidence, not the same gap as before: the
+question is no longer "does the VLM propose multi-object plans" (yes, confirmed), it's "has a
+multi-object plan ever rendered end-to-end on a real page" (not yet, blocked by an unrelated,
+already-documented grounding limitation, not by anything this ADR's design got wrong). Real
+future work — either a different real page whose PRIMARY isn't `"weapon"`-labeled, or
+grounding-side improvement for that specific phrase — not attempted here (out of this audit's
+scope; `analysis`/`grounding` prompt tuning wasn't this pass's mandate).
