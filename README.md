@@ -163,6 +163,31 @@ fallback panel, so its grounding crop is unchanged) and its existing semantic/ge
 rejections were reconfirmed byte-identical under the new architecture — no validation was
 weakened to obtain the improvement above.
 
+**Phase 6 — seamless-loop hardening + local-region rendering at scale — implemented, locally
+verified.** Two independent fixes. First: `AnimationPlan` previously accepted
+`loop_mode="once_hold"` under `loop.seamless=True`, a combination that always produces a
+visible jump at the loop boundary (`once_hold` holds its end state rather than returning to
+rest); the schema now rejects it, and the pre-existing `cycle`/non-integer-speed error message
+no longer misleadingly suggests `once_hold` as an equivalent fix to `ping_pong`. Second (the
+higher-risk half): `animation/transforms.py`, `compositing/__init__.py`, and
+`reconstruction/__init__.py`'s `_compute_hole_mask` previously ran their actual CV work
+(`cv2.warpAffine`/`cv2.remap`, alpha blending, hole-mask accumulation) over the **whole page**
+every frame regardless of how small the animated object was — a real gap against
+`docs/architecture.md`'s "Local Modification" principle. All three now restrict that work to
+the relevant region, verified bit-exact (mesh_warp/opacity/reconstruction/compositing) or
+within an explicitly justified, bounded `±1`-uint8 floating-point tolerance (the affine
+`warpAffine` path only, confined to inside the moving object's own footprint, never the static
+region) against a kept-verbatim copy of the old full-page implementation, across small/large/
+edge/corner/extreme-aspect-ratio/off-page/distant-pivot/multi-object/overlapping-layer cases.
+Real measurements: the raw interpolation cost itself now scales cleanly with the animated
+region (25x-109x faster in isolation, growing with page size, for a fixed small object,
+completely decoupled from page pixel count); end-to-end per-call cost improves by a smaller,
+honestly-reported ~1.15x-2x, bounded by the full-page placement array `Layer`'s unchanged
+contract still requires allocating every frame. See
+[ADR 0012](docs/decisions/0012-phase6-seamless-loop-and-local-rendering.md) for the full design
+and [`docs/phase6-results.md`](docs/phase6-results.md) for the complete evidence, all captured
+locally (no GPU/remote work needed — both fixes are deterministic CPU/OpenCV/NumPy code).
+
 Planned phases:
 
 | Phase | Scope |
@@ -174,7 +199,7 @@ Planned phases:
 | 3.3 | Panel-aware analysis + reproducible evaluation framework |
 | 4 | Layer decomposition — **implemented**; hidden-region reconstruction hardening — **one real bug found and fixed** (`_compute_hole_mask`), other candidate failure modes audited and found already correct; real-model validation still pending |
 | 5 | Secondary/micro motion, multi-object plans — **software substantially delivered as part of Phase 4** (see above); real-page VLM evidence of genuine multi-object plans **now obtained** (2/5 real pages, 3/3 reproducible); Phase 5.1 root-caused and fixed the grounding limitation blocking both real multi-object pages' PRIMARY object on `phase3_action_page.png` (panel-aware Grounding DINO cropping, ADR 0011) and observed a real, complete end-to-end render for the first time; `eval_weapon_effects.png`'s separate, unrelated PRIMARY rejection (candidate-correctness, not scale) is unaffected and unresolved |
-| 6 | Seamless-looping/rendering hardening at scale |
+| 6 | Seamless-looping/rendering hardening at scale — **implemented**: once_hold+seamless schema gap closed (ADR 0012); animation/compositing/reconstruction localized to the animated region, verified bit-exact/bounded-tolerance against the old full-page implementation, with real local performance evidence |
 | 7 | End-to-end QA, evaluation, regression testing |
 
 ## Architecture overview
