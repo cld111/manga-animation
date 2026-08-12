@@ -266,9 +266,7 @@ class TestSeamlessLoopTiming:
         with pytest.raises(ValidationError, match="always breaks the seamless-loop boundary"):
             self._plan_with_speed(base_plan_kwargs, speed=1.0, loop_mode="once_hold")
 
-    def test_once_hold_with_non_integer_speed_and_seamless_loop_is_rejected(
-        self, base_plan_kwargs
-    ):
+    def test_once_hold_with_non_integer_speed_and_seamless_loop_is_rejected(self, base_plan_kwargs):
         # The once_hold rejection is independent of the (cycle-only) integer-speed rule —
         # it must trigger even when speed alone would have been fine.
         with pytest.raises(ValidationError, match="always breaks the seamless-loop boundary"):

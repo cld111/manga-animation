@@ -368,3 +368,222 @@ def test_composite_frame_stack_reconstruction_partially_covered_by_another_layer
     expected_b_color = np.full((15, 5, 3), (0, 200, 0), dtype=np.uint8)
     np.testing.assert_array_equal(frame[10:25, 15:20], expected_b_color)  # "b" wins here
     np.testing.assert_array_equal(frame[10:25, 20:25], filled_pixels[10:25, 20:25])  # "a"'s fill
+
+
+def test_composite_frame_stack_five_objects_respect_z_order_and_static_region():
+    """Deterministic, human-checkable companion to the 2-layer z-order test above, at the
+    5-object scale this project has actually observed in a real plan (Phase 5/5.1 audits;
+    see docs/decisions/0010-multi-object-layer-decomposition.md).
+    """
+    image, _ = make_image_and_mask()
+    colors = [(200, 0, 0), (0, 200, 0), (0, 0, 200), (200, 200, 0), (0, 200, 200)]
+    # Each region overlaps the next by a few columns, forming a staircase where every higher
+    # z_order object must win exactly in its overlap band.
+    regions = [
+        (slice(2, 12), slice(0, 10)),
+        (slice(2, 12), slice(8, 18)),
+        (slice(2, 12), slice(16, 26)),
+        (slice(2, 12), slice(24, 34)),
+        (slice(2, 12), slice(32, 42)),
+    ]
+    layers = [
+        _make_layer(image, regions[i], colors[i], object_id=f"obj_{i}", z_order=i) for i in range(5)
+    ]
+
+    frame = composite_frame_stack(image, layers, frame_index=0)
+
+    # Each object's own non-overlapping band still shows its own color.
+    assert np.all(frame[2:12, 0:8] == colors[0])
+    assert np.all(frame[2:12, 34:42] == colors[4])
+    # Every overlap band is won by the higher z_order (later-drawn) object.
+    assert np.all(frame[2:12, 8:10] == colors[1])
+    assert np.all(frame[2:12, 16:18] == colors[2])
+    assert np.all(frame[2:12, 24:26] == colors[3])
+    assert np.all(frame[2:12, 32:34] == colors[4])
+    # Static region (untouched by any of the 5 objects) stays bit-exact.
+    covered = np.zeros(image.shape[:2], dtype=bool)
+    for region in regions:
+        covered[region] = True
+    np.testing.assert_array_equal(frame[~covered], image[~covered])
+
+
+# --- Phase 6: local-region blending must match the old full-page formula ------------------
+
+
+def _composite_frame_full_page_reference(
+    original: np.ndarray,
+    layer: np.ndarray,
+    layer_mask: np.ndarray,
+    *,
+    reconstruction: ReconstructionResult | None = None,
+) -> np.ndarray:
+    """Pre-Phase-6 `composite_frame`: identical math, evaluated over the whole page every call
+    instead of each mask's own local bbox — kept verbatim as the deterministic reference the
+    localized version must reproduce exactly.
+    """
+    if reconstruction is not None:
+        revealed_this_frame = (layer_mask == 0) & (reconstruction.hole_mask != 0)
+        plate = original.copy()
+        plate[revealed_this_frame] = reconstruction.filled_pixels[revealed_this_frame]
+    else:
+        plate = original.copy()
+
+    alpha = (layer_mask.astype(np.float32) / 255.0)[..., None]
+    frame = layer.astype(np.float32) * alpha + plate.astype(np.float32) * (1.0 - alpha)
+    return frame.astype(np.uint8)
+
+
+def _composite_frame_stack_full_page_reference(
+    original: np.ndarray,
+    layers: list[Layer],
+    frame_index: int,
+    *,
+    reconstructions: dict[str, ReconstructionResult] | None = None,
+) -> np.ndarray:
+    """Pre-Phase-6 `composite_frame_stack`: identical math, evaluated over the whole page
+    instead of each mask's local bbox — kept verbatim as the reference the localized version
+    must reproduce exactly.
+    """
+    if not layers:
+        return original.copy()
+
+    ordered = sorted(layers, key=lambda layer: (layer.z_order, layer.object_id))
+    current_frames = {layer.object_id: layer.frames[frame_index] for layer in ordered}
+
+    plate = original.copy()
+    if reconstructions:
+        for object_id, recon in reconstructions.items():
+            own_frame = current_frames.get(object_id)
+            if own_frame is None:
+                continue
+            own_mask = own_frame[1]
+            other_covered = np.zeros(original.shape[:2], dtype=bool)
+            for other_id, (_, other_mask) in current_frames.items():
+                if other_id == object_id:
+                    continue
+                other_covered |= other_mask > 0
+            revealed_this_frame = (own_mask == 0) & (recon.hole_mask != 0) & ~other_covered
+            plate[revealed_this_frame] = recon.filled_pixels[revealed_this_frame]
+
+    frame = plate.astype(np.float32)
+    for layer in ordered:
+        layer_image, layer_mask = current_frames[layer.object_id]
+        alpha = (layer_mask.astype(np.float32) / 255.0)[..., None]
+        frame = layer_image.astype(np.float32) * alpha + frame * (1.0 - alpha)
+
+    return frame.astype(np.uint8)
+
+
+@pytest.mark.parametrize(
+    "page_shape,mask_slice",
+    [
+        ((60, 80), (slice(20, 40), slice(30, 50))),  # small object, normal page
+        ((60, 80), (slice(0, 12), slice(30, 50))),  # touching the top edge
+        ((60, 80), (slice(48, 60), slice(30, 50))),  # touching the bottom edge
+        ((60, 80), (slice(20, 40), slice(0, 12))),  # touching the left edge
+        ((60, 80), (slice(20, 40), slice(68, 80))),  # touching the right edge
+        ((60, 80), (slice(0, 10), slice(70, 80))),  # touching the top-right corner
+        ((60, 80), (slice(2, 58), slice(2, 78))),  # large object, near-full-page
+        ((60, 80), (slice(30, 31), slice(40, 41))),  # 1x1 pixel object
+        ((720, 90), (slice(50, 690), slice(5, 85))),  # extreme-aspect-ratio page
+    ],
+)
+def test_composite_frame_matches_full_page_reference_with_partial_alpha_and_hole(
+    page_shape, mask_slice
+):
+    rng = np.random.default_rng(42)
+    h, w = page_shape
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    image[:, :] = (5, 5, 5)
+    image[mask_slice] = (200, 100, 50)
+
+    layer = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    layer_mask = np.zeros((h, w), dtype=np.uint8)
+    layer_mask[mask_slice] = rng.integers(1, 256, size=layer_mask[mask_slice].shape, dtype=np.uint8)
+
+    hole_mask = np.zeros((h, w), dtype=np.uint8)
+    hole_mask[mask_slice] = 255
+    filled_pixels = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    reconstruction = ReconstructionResult(
+        object_id="obj", hole_mask=hole_mask, filled_pixels=filled_pixels, model_id="fake-lama"
+    )
+
+    actual = composite_frame(image, layer, layer_mask, reconstruction=reconstruction)
+    expected = _composite_frame_full_page_reference(
+        image, layer, layer_mask, reconstruction=reconstruction
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_composite_frame_stack_matches_full_page_reference_at_five_object_scale():
+    # Realistic upper bound observed in this project's own multi-object evidence (Phase 5/5.1
+    # audits) — see docs/decisions/0010-multi-object-layer-decomposition.md.
+    rng = np.random.default_rng(7)
+    h, w = 100, 140
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    image[:, :] = (5, 5, 5)
+
+    regions = [
+        (slice(0, 15), slice(0, 15)),
+        (slice(0, 15), slice(120, 140)),
+        (slice(85, 100), slice(0, 20)),
+        (slice(40, 60), slice(60, 90)),  # overlaps region below
+        (slice(50, 70), slice(70, 100)),  # overlaps region above
+    ]
+    layers = []
+    reconstructions = {}
+    for i, region in enumerate(regions):
+        object_id = f"obj_{i}"
+        layer_image = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        # Partial alpha (not a hard 0/255 mask) to exercise real float accumulation, especially
+        # in the two overlapping regions above.
+        mask[region] = rng.integers(1, 256, size=mask[region].shape, dtype=np.uint8)
+        layers.append(Layer(object_id=object_id, frames=((layer_image, mask),), z_order=i))
+
+        hole_mask = np.zeros((h, w), dtype=np.uint8)
+        hole_mask[region] = 255
+        filled_pixels = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        reconstructions[object_id] = ReconstructionResult(
+            object_id=object_id, hole_mask=hole_mask, filled_pixels=filled_pixels, model_id="fake"
+        )
+
+    actual = composite_frame_stack(image, layers, frame_index=0, reconstructions=reconstructions)
+    expected = _composite_frame_stack_full_page_reference(
+        image, layers, frame_index=0, reconstructions=reconstructions
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_composite_frame_stack_matches_full_page_reference_with_larger_frame_count():
+    rng = np.random.default_rng(11)
+    h, w = 50, 70
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    image[:, :] = (5, 5, 5)
+
+    region_a = (slice(5, 30), slice(5, 30))
+    region_b = (slice(15, 40), slice(15, 45))  # overlaps region_a
+
+    n_frames = 96  # a 4s loop at 24fps -- the schema's real default duration/fps
+    frames_a = []
+    frames_b = []
+    for _ in range(n_frames):
+        img_a = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        mask_a = np.zeros((h, w), dtype=np.uint8)
+        mask_a[region_a] = rng.integers(1, 256, size=mask_a[region_a].shape, dtype=np.uint8)
+        frames_a.append((img_a, mask_a))
+
+        img_b = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        mask_b = np.zeros((h, w), dtype=np.uint8)
+        mask_b[region_b] = rng.integers(1, 256, size=mask_b[region_b].shape, dtype=np.uint8)
+        frames_b.append((img_b, mask_b))
+
+    layer_a = Layer(object_id="a", frames=tuple(frames_a), z_order=0)
+    layer_b = Layer(object_id="b", frames=tuple(frames_b), z_order=1)
+
+    for frame_index in (0, n_frames // 2, n_frames - 1):
+        actual = composite_frame_stack(image, [layer_a, layer_b], frame_index=frame_index)
+        expected = _composite_frame_stack_full_page_reference(
+            image, [layer_a, layer_b], frame_index=frame_index
+        )
+        np.testing.assert_array_equal(actual, expected)

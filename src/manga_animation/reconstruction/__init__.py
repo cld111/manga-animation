@@ -18,6 +18,7 @@ from typing import Protocol
 import numpy as np
 from PIL import Image
 
+from manga_animation.animation import bbox_of_mask
 from manga_animation.pipeline.types import ImageArray, MaskArray, ReconstructionResult
 
 
@@ -84,11 +85,25 @@ def _compute_hole_mask(original_mask: MaskArray, transformed_masks: list[MaskArr
     legitimately never moves the mask and correctly has no hole either way). Compositing blends
     each frame from its OWN transformed mask independently — "the object eventually comes back
     to cover this pixel later in the loop" does not help the specific frame where it doesn't.
+
+    Phase 6 local-rendering hardening: `original_mask > 0` can only ever be `True` within
+    `original_mask`'s own tight bbox, so every OR-accumulation step outside that bbox is
+    guaranteed a no-op — the loop over `transformed_masks` (one boolean full-page comparison
+    per frame) is restricted to that bbox slice instead of the whole page, which is what makes
+    this scale with the animated region rather than `frame_count * page_pixels`. An empty mask
+    (no object ever drawn) has no bbox to compute and trivially has no hole either way.
     """
     hole = np.zeros(original_mask.shape, dtype=bool)
+    if not np.any(original_mask):
+        return hole.astype(np.uint8) * 255
+
+    x0, y0, x1, y1 = bbox_of_mask(original_mask).as_xyxy()
+    original_local = original_mask[y0:y1, x0:x1] > 0
+    hole_local = np.zeros(original_local.shape, dtype=bool)
     for transformed in transformed_masks:
-        hole |= (original_mask > 0) & (transformed == 0)
-    return (hole.astype(np.uint8) * 255)
+        hole_local |= original_local & (transformed[y0:y1, x0:x1] == 0)
+    hole[y0:y1, x0:x1] = hole_local
+    return hole.astype(np.uint8) * 255
 
 
 def _normalize_to_source_geometry(raw: Image.Image, source_shape: tuple[int, int]) -> ImageArray:

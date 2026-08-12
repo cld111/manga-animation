@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from manga_animation.reconstruction import reconstruct_hidden_region
+from manga_animation.reconstruction import _compute_hole_mask, reconstruct_hidden_region
 
 PAGE_SHAPE = (30, 40)  # (h, w)
 
@@ -259,6 +259,77 @@ def test_multiple_disconnected_holes_are_all_included_in_one_pass():
     assert len(client.received_masks) == 1  # one inpainting call handles both regions at once
 
 
+# --- Phase 6: local-region hole computation must match the old full-page formula ----------
+
+
+def _compute_hole_mask_full_page_reference(
+    original_mask: np.ndarray, transformed_masks: list[np.ndarray]
+) -> np.ndarray:
+    """Pre-Phase-6 `_compute_hole_mask`: the same UNION-of-per-frame-exposures formula, but
+    evaluated over the whole page every frame instead of `original_mask`'s local bbox — kept
+    here, verbatim, as the deterministic reference the localized version must reproduce exactly.
+    """
+    hole = np.zeros(original_mask.shape, dtype=bool)
+    for transformed in transformed_masks:
+        hole |= (original_mask > 0) & (transformed == 0)
+    return hole.astype(np.uint8) * 255
+
+
+@pytest.mark.parametrize(
+    "page_shape,mask_slice",
+    [
+        ((40, 60), (slice(10, 20), slice(10, 25))),  # small object, normal page
+        ((40, 60), (slice(0, 10), slice(20, 30))),  # touching the top edge
+        ((40, 60), (slice(30, 40), slice(20, 30))),  # touching the bottom edge
+        ((40, 60), (slice(10, 20), slice(0, 10))),  # touching the left edge
+        ((40, 60), (slice(10, 20), slice(50, 60))),  # touching the right edge
+        ((40, 60), (slice(0, 8), slice(0, 8))),  # touching the top-left corner
+        ((40, 60), (slice(32, 40), slice(52, 60))),  # touching the bottom-right corner
+        ((40, 60), (slice(2, 38), slice(2, 58))),  # large object, near-full-page
+        ((40, 60), (slice(15, 16), slice(25, 26))),  # 1x1 pixel object
+        ((720, 90), (slice(100, 640), slice(10, 80))),  # extreme-aspect-ratio page
+    ],
+)
+def test_compute_hole_mask_matches_full_page_reference(page_shape, mask_slice):
+    rng = np.random.default_rng(1234)
+    original_mask = np.zeros(page_shape, dtype=np.uint8)
+    original_mask[mask_slice] = 255
+
+    # Several frames with varying random sub-coverage of the object's own region, so the hole
+    # has real (non-trivial, non-rectangular) structure to exercise the bbox-local accumulation.
+    transformed_masks = []
+    for _ in range(6):
+        frame = original_mask.copy()
+        keep = rng.random(frame[mask_slice].shape) > 0.5
+        frame[mask_slice] = np.where(keep, frame[mask_slice], 0)
+        transformed_masks.append(frame)
+
+    localized = _compute_hole_mask(original_mask, transformed_masks)
+    reference = _compute_hole_mask_full_page_reference(original_mask, transformed_masks)
+    np.testing.assert_array_equal(localized, reference)
+
+
+def test_compute_hole_mask_matches_full_page_reference_with_many_frames():
+    # A materially larger frame count than the rest of the suite exercises, to make sure the
+    # bbox-local loop scales the same way (correctness-wise) regardless of frame_count.
+    page_shape = (50, 70)
+    mask_slice = (slice(5, 45), slice(5, 65))
+    rng = np.random.default_rng(99)
+    original_mask = np.zeros(page_shape, dtype=np.uint8)
+    original_mask[mask_slice] = 255
+
+    transformed_masks = []
+    for _ in range(240):  # e.g. a 10s loop at 24fps
+        frame = original_mask.copy()
+        keep = rng.random(frame[mask_slice].shape) > 0.5
+        frame[mask_slice] = np.where(keep, frame[mask_slice], 0)
+        transformed_masks.append(frame)
+
+    localized = _compute_hole_mask(original_mask, transformed_masks)
+    reference = _compute_hole_mask_full_page_reference(original_mask, transformed_masks)
+    np.testing.assert_array_equal(localized, reference)
+
+
 def test_thin_one_pixel_wide_hole_is_computed_correctly():
     """A genuinely thin (1px-wide) revealed sliver -- plausible at a mask's interpolated edge
 
@@ -273,8 +344,6 @@ def test_thin_one_pixel_wide_hole_is_computed_correctly():
     frame_a[10:20, 19] = 0  # exactly one column (10 pixels tall, 1 pixel wide) left uncovered
 
     client = FakeLamaClient(output=Image.fromarray(image))
-    result = reconstruct_hidden_region(
-        image, original_mask, [frame_a], client, object_id="obj_1"
-    )
+    result = reconstruct_hidden_region(image, original_mask, [frame_a], client, object_id="obj_1")
     assert result is not None
     assert int(np.sum(result.hole_mask > 0)) == 10  # exactly the thin column, nothing more
