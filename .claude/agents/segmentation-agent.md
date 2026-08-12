@@ -37,10 +37,19 @@ should move.
   consistent with its parent's (e.g. hair should ground to a region attached to the head's
   region, not floating free of it).
 
+- Target validation (Phase 3.2, `src/manga_animation/validation`): deciding whether a
+  grounding candidate is a plausible match for its `ObjectPlan` before segmentation ever
+  runs on it — a technically valid detection (clears the grounding model's own threshold,
+  lands inside the image) is not the same thing as a semantically correct one. See
+  `docs/decisions/0006-grounding-target-validation.md`. This stage calls into the VLM via
+  the existing `VLMClient` protocol (`analysis/client.py`) for a cheap crop-verification
+  check — mechanically your territory (it gates grounding output before segmentation),
+  even though the model it calls is the one `vision-agent` otherwise owns.
+
 ## Engineering constraints
 
-- Segmentation code belongs in `src/manga_animation/grounding` and
-  `src/manga_animation/segmentation`.
+- Segmentation code belongs in `src/manga_animation/grounding`,
+  `src/manga_animation/validation`, and `src/manga_animation/segmentation`.
 - Load models on demand and release them when the stage is done — don't hold segmentation
   models resident in VRAM/unified memory across unrelated pipeline stages (see "GPU
   Awareness" in `docs/architecture.md`).

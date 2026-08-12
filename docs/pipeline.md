@@ -24,6 +24,11 @@ Structured Animation Plan       — src/manga_animation/schemas
 Object grounding                — src/manga_animation/grounding
     │  map each Animation Plan object to a region of the actual image
     ▼
+Target validation                — src/manga_animation/validation
+    │  ACCEPT/REJECT: does the grounded region actually depict the intended target?
+    │  (Phase 3.2 — see docs/decisions/0006-grounding-target-validation.md; a
+    │  technically valid detection is not automatically a semantically correct one)
+    ▼
 Precise segmentation            — src/manga_animation/segmentation
     │  pixel-accurate masks per grounded object (e.g. SAM-family model)
     ▼
@@ -66,6 +71,17 @@ package each owns (`vision-agent` → `analysis`/`schemas`; `segmentation-agent`
 reconstruction exists specifically to prepare pixels that `cv-agent`'s own compositing
 step then consumes. See `.claude/agents/cv-agent.md` for the full ownership boundary
 (input/output/downstream consumer).
+
+The **target validation** stage (`src/manga_animation/validation`, Phase 3.2 — see
+[ADR 0006](decisions/0006-grounding-target-validation.md)) is owned by `segmentation-agent`:
+it sits structurally between `grounding` and `segmentation` (both already that agent's
+packages), and its job — "is this specific candidate region a plausible match for the
+target" — is a grounding-quality question, not a "should this object move at all" one (that
+remains `vision-agent`'s call, made once, upstream, and not re-litigated here). Mechanically,
+though, it calls into the VLM through the same `VLMClient` protocol `analysis/client.py`
+already defines (a cheap crop-verification call, not a full-page analysis call) rather than
+adding a new model dependency — so a validation-quality question is fair game for
+`vision-agent` to weigh in on too, even though `segmentation-agent` owns the code.
 
 ## Why the Animation Plan sits where it does
 

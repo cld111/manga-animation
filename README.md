@@ -44,9 +44,25 @@ A real manga page was run through the complete pipeline on the remote Kaggle GPU
 producing a genuine, seamlessly-looping H.264 video — see
 [`docs/phase3-results.md`](docs/phase3-results.md) for the full write-up, including two real
 bugs found and fixed (a resolution-driven VLM OOM, a grounding/segmentation dtype mismatch)
-and two open gaps carried into later phases (automatic VLM operation still returns all-STATIC
+and two open gaps carried into Phase 3.2 (automatic VLM operation still returns all-STATIC
 on every real page tested so far; the one successful render used a human-authored fallback
 object and exhibits a real grounding-accuracy defect, not just a mechanical one).
+
+**Phase 3.2 — Semantic reliability: VLM targeting + grounding-target validation —
+implemented, real end-to-end validation run pending.** Addresses both Phase 3.1 gaps directly.
+The analysis prompt now recognizes panel/page-level effect lines and pose-implied motion (not
+only deformation drawn on the object itself), and no longer discards SECONDARY/MICRO reads
+when ranking candidates (`src/manga_animation/analysis/plan_builder.py`). A new explicit
+**target validation stage** (`src/manga_animation/validation`) sits between grounding and
+segmentation: grounding now returns ranked candidates instead of only its best guess
+(`grounding.ground_object_candidates`), and each candidate gets an explicit ACCEPT/REJECT with
+structured diagnostics before segmentation ever runs on it — a technically valid detection is
+no longer automatically trusted as semantically correct. See
+[ADR 0006](docs/decisions/0006-grounding-target-validation.md) for the real calibration
+evidence behind this design (why a simple confidence threshold can't separate Phase 3.1's real
+wrong detection from a real correct one at a similar score) and
+[`docs/phase3.2-results.md`](docs/phase3.2-results.md) for real end-to-end results once the
+remote validation run completes.
 
 Planned phases:
 
@@ -55,7 +71,7 @@ Planned phases:
 | 1 | Engineering foundation: repo, config, schema, tests, docs, agents/skills |
 | 2 | Model benchmarking & selection (VLM, grounding, segmentation, inpainting) |
 | 3.1 | First end-to-end vertical slice: one real page through every stage |
-| 3.2+ | Reliable automatic VLM PRIMARY assignment; grounding-accuracy gate |
+| 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
 | 4 | Layer decomposition refinement, hidden-region reconstruction hardening |
 | 5 | Secondary/micro motion, multi-object plans |
 | 6 | Seamless-looping/rendering hardening at scale |
