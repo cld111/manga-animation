@@ -64,6 +64,26 @@ wrong detection from a real correct one at a similar score) and
 [`docs/phase3.2-results.md`](docs/phase3.2-results.md) for real end-to-end results once the
 remote validation run completes.
 
+**Phase 3.3 — Panel-aware analysis + evaluation framework — implemented, real end-to-end
+comparison run completed.** Addresses Phase 3.2's own flagged gap ("no real panel/scene
+splitting before the VLM call"). A deterministic, model-free gutter-detection panel splitter
+(`src/manga_animation/analysis/panels.py`) — no new model dependency, see
+[ADR 0007](docs/decisions/0007-panel-aware-analysis.md) for why a classical CV approach was
+chosen over a learned detector — feeds a new panel-aware analysis path
+(`analyze_page_panels`) that runs one VLM call per detected panel instead of one per page, with
+a defined page-level fallback when detection finds no usable structure. Page-level analysis
+(`analyze_page`) is completely unchanged and remains the default
+(`run_pipeline(..., analysis_mode="page" | "panel")`). A new evaluation framework
+(`src/manga_animation/evaluation`) adds a real, honest 5-page dataset across 4 series
+(`configs/phase3_3_eval_dataset.yaml`) and reproducible metrics (every rate reported with its
+sample-count denominator). The real comparison result, run on the remote GPU worker: panel-aware
+analysis is real, tested, and produces at least one materially different VLM read on a real
+page, but showed **no measurable end-to-end reliability improvement** over page-level analysis
+on this small dataset — reported honestly as a null result, not reframed as a win. See
+[`docs/phase3.3-results.md`](docs/phase3.3-results.md) for the full real results, including a
+newly-found real visual defect (an oversized grounding box on a `rotate` transform) and a
+significant new VLM cross-session nondeterminism finding.
+
 Planned phases:
 
 | Phase | Scope |
@@ -72,6 +92,7 @@ Planned phases:
 | 2 | Model benchmarking & selection (VLM, grounding, segmentation, inpainting) |
 | 3.1 | First end-to-end vertical slice: one real page through every stage |
 | 3.2 | VLM targeting reliability + explicit grounding-target validation gate |
+| 3.3 | Panel-aware analysis + reproducible evaluation framework |
 | 4 | Layer decomposition refinement, hidden-region reconstruction hardening |
 | 5 | Secondary/micro motion, multi-object plans |
 | 6 | Seamless-looping/rendering hardening at scale |

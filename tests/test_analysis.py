@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 from PIL import Image
 
-from manga_animation.analysis.plan_builder import analyze_page
+from manga_animation.analysis.plan_builder import analyze_page, analyze_page_panels
 from manga_animation.core.config import PipelineConfig
 from manga_animation.pipeline.types import PipelineStageError
 from manga_animation.schemas.animation_plan import MotionType
@@ -272,3 +273,197 @@ def test_analysis_prompt_broadens_evidence_beyond_deformation_on_the_object_itse
     lowered = ANALYSIS_PROMPT.lower()
     assert "page-level" in lowered or "panel-level" in lowered
     assert "pose" in lowered
+
+
+# --- Phase 3.3: panel-aware analysis --------------------------------------------------------
+
+
+def _noise_block(height: int, width: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 255, size=(height, width, 3), dtype=np.uint8)
+
+
+@pytest.fixture
+def two_panel_image_path(tmp_path):
+    """A real, detectable two-panel page: two textured (non-uniform) blocks separated by a
+
+    wide blank gutter -- same construction style proven against `analysis/panels.py` in
+    `tests/test_panels.py`.
+    """
+    page = np.full((900, 300, 3), 255, dtype=np.uint8)
+    page[0:300, 0:300] = _noise_block(300, 300, seed=1)  # top panel: rows 0-300
+    page[500:900, 0:300] = _noise_block(400, 300, seed=2)  # bottom panel: rows 500-900
+    path = tmp_path / "two_panel_page.png"
+    Image.fromarray(page).save(path)
+    return path
+
+
+def test_analyze_page_panels_detects_and_labels_multiple_panel_plans(two_panel_image_path, config):
+    top_decision = _decision(
+        "hair", "primary", confidence=0.8, motion_description="sways"
+    )
+    bottom_decision = _decision("background", "static")
+    client = FakeVLMClient([json.dumps([top_decision]), json.dumps([bottom_decision])])
+
+    plan = analyze_page_panels(two_panel_image_path, client, config=config)
+
+    assert len(plan.panels) == 2
+    # panels are real, distinct sub-regions of the page (not the page-level path's single
+    # (0, 0, 1, 1) whole-page placeholder) -- each covers less than the full page height.
+    for panel in plan.panels:
+        assert panel.bbox.height < 1.0
+    assert plan.panels[0].panel_id != plan.panels[1].panel_id
+
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert len(primary_objects) == 1
+    assert primary_objects[0].semantic_label == "hair"
+    # the PRIMARY object's panel_id must reference a real panel this plan actually declares
+    assert primary_objects[0].panel_id in {p.panel_id for p in plan.panels}
+
+
+def test_analyze_page_panels_falls_back_to_page_level_when_detection_finds_no_panels(
+    sample_image_path, config
+):
+    """`sample_image_path` (100x200, blank) is well above the detector's minimum-size floor,
+
+    but a real fallback trigger (zero panels) is exercised directly against a degenerate,
+    below-minimum-size image instead -- see `analysis/panels.py::_MIN_IMAGE_DIM_PX`.
+    """
+    import numpy as np
+
+    tiny_path = sample_image_path.parent / "tiny.png"
+    Image.fromarray(np.full((8, 8, 3), 255, dtype=np.uint8)).save(tiny_path)
+    decisions = [_decision("banner", "primary", motion_description="waves")]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page_panels(tiny_path, client, config=config)
+
+    # exactly one VLM call -- the page-level fallback path, not a panel-level one
+    assert len(client.prompts) == 1
+    assert len(plan.panels) == 1
+    assert plan.panels[0].bbox.x == 0.0 and plan.panels[0].bbox.width == 1.0
+
+
+def test_analyze_page_panels_falls_back_to_page_level_when_every_panel_response_is_unparseable(
+    two_panel_image_path, config
+):
+    """Detection succeeds (2 real panels), but every panel-level VLM call (including each
+
+    panel's one built-in recovery attempt) returns garbage -- `analyze_page_panels` must fall
+    back to a real page-level VLM call rather than raising, per its documented fallback trigger.
+    """
+    valid_page_level = [_decision("banner", "primary", motion_description="waves")]
+    client = FakeVLMClient(
+        [
+            "not json at all",  # panel 0, first attempt
+            "still not json",  # panel 0, recovery attempt
+            "also not json",  # panel 1, first attempt
+            "nope",  # panel 1, recovery attempt
+            json.dumps(valid_page_level),  # page-level fallback call
+        ]
+    )
+
+    plan = analyze_page_panels(two_panel_image_path, client, config=config)
+
+    assert len(client.prompts) == 5
+    assert len(plan.panels) == 1  # the page-level fallback's single implicit panel
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert primary_objects[0].semantic_label == "banner"
+
+
+def test_analyze_page_panels_one_panels_vlm_failure_does_not_abort_the_others(
+    two_panel_image_path, config
+):
+    """A single panel's VLM response being unparseable must not sink the whole panel-aware
+
+    run -- this is a real reliability advantage over the page-level path (see
+    `analyze_page_panels`'s docstring): analysis continues with whatever other panels did
+    produce usable decisions.
+    """
+    valid = [_decision("hair", "secondary", confidence=0.7, motion_description="sways")]
+    client = FakeVLMClient(
+        [
+            "garbage",  # panel 0, first attempt
+            "still garbage",  # panel 0, recovery attempt (both fail -- panel 0 contributes nothing)
+            json.dumps(valid),  # panel 1, first attempt (succeeds)
+        ]
+    )
+
+    plan = analyze_page_panels(two_panel_image_path, client, config=config)
+
+    assert len(client.prompts) == 3
+    assert len(plan.panels) == 2  # detection still recorded both real panels
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert len(primary_objects) == 1
+    assert primary_objects[0].semantic_label == "hair"
+
+
+def test_analyze_page_panels_ranking_preserves_motion_type_over_confidence_across_panels(
+    two_panel_image_path, config
+):
+    """`_rank_panel_candidates` must apply the same "motion_type strictly dominates confidence"
+
+    rule as the page-level `_rank_candidates`, across panels -- a low-confidence PRIMARY in one
+    panel must still outrank a high-confidence SECONDARY in another.
+    """
+    panel_0_secondary = _decision(
+        "cape", "secondary", confidence=0.99, motion_description="flutters"
+    )
+    panel_1_primary = _decision("sword", "primary", confidence=0.5, motion_description="swings")
+    client = FakeVLMClient([json.dumps([panel_0_secondary]), json.dumps([panel_1_primary])])
+
+    plan = analyze_page_panels(two_panel_image_path, client, config=config)
+
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert primary_objects[0].semantic_label == "sword"
+
+
+def test_analyze_page_panels_all_static_across_every_panel_raises_and_does_not_fall_back(
+    two_panel_image_path, config
+):
+    """An honest "no motion cue on any detected panel" read is a valid, informative result --
+
+    `analyze_page_panels` must raise `PipelineStageError(stage="analysis")` exactly like the
+    page-level path, and must NOT silently retry at the page level (that would let VLM
+    nondeterminism quietly overrule a real per-panel finding -- see the function's docstring).
+    """
+    client = FakeVLMClient(
+        [json.dumps([_decision("background", "static")]), json.dumps([_decision("wall", "static")])]
+    )
+
+    with pytest.raises(PipelineStageError) as excinfo:
+        analyze_page_panels(two_panel_image_path, client, config=config)
+
+    assert excinfo.value.stage == "analysis"
+    # exactly 2 calls (one per real panel) -- no third, page-level fallback call was made
+    assert len(client.prompts) == 2
+
+
+def test_analyze_page_panels_coordinates_map_correctly_to_the_page(two_panel_image_path, config):
+    """Each detected panel's `PanelPlan.bbox` (normalized) must correspond to the real
+
+    page-space region it was actually detected at -- the top panel (rows 0-300 of a 900px-tall
+    page) must land near normalized y=0, and the bottom one (rows 500-900) must land near the
+    page's bottom half. This is the "no downstream component should need to know whether a
+    target came from page-level or panel-level analysis" guarantee, checked concretely.
+    """
+    client = FakeVLMClient(
+        [json.dumps([_decision("a", "static")]), json.dumps([_decision("b", "static", 0.1)])]
+    )
+    with pytest.raises(PipelineStageError):
+        # all-STATIC still raises, but the plan's *panels* aren't built in that path -- so
+        # instead directly exercise detection + the panel list this function assembles, via a
+        # real (non-static) call, below.
+        analyze_page_panels(two_panel_image_path, client, config=config)
+
+    client2 = FakeVLMClient(
+        [
+            json.dumps([_decision("hair", "primary", motion_description="x")]),
+            json.dumps([_decision("bg", "static")]),
+        ]
+    )
+    plan = analyze_page_panels(two_panel_image_path, client2, config=config)
+    panels_by_y = sorted(plan.panels, key=lambda p: p.bbox.y)
+
+    assert panels_by_y[0].bbox.y < 0.1  # top panel starts near the page's top edge
+    assert panels_by_y[1].bbox.y > 0.4  # bottom panel starts around/after the page's midpoint

@@ -1,0 +1,373 @@
+"""Tests for src/manga_animation/evaluation/ -- the Phase 3.3 evaluation harness. All fixtures
+
+are plain, hand-built `PageRunOutcome`/`EvalSample` records (no torch, no real model calls,
+matching every other stage's fake-client test style) so metric arithmetic and denominator
+correctness can be checked exactly.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from manga_animation.evaluation.dataset import EvalSample, load_eval_dataset
+from manga_animation.evaluation.metrics import Rate, compute_metrics
+from manga_animation.evaluation.nondeterminism import RepeatedRunRecord, summarize_repeated_runs
+from manga_animation.evaluation.schemas import PageRunOutcome, ValidationAttemptOutcome
+
+# --- Rate ---------------------------------------------------------------------------------
+
+
+def test_rate_formats_numerator_denominator_and_percentage():
+    assert str(Rate(6, 10)) == "6/10 (60.0%)"
+
+
+def test_rate_zero_denominator_is_not_a_percentage():
+    r = Rate(0, 0)
+    assert r.value is None
+    assert str(r) == "0/0 (n/a)"
+
+
+def test_rate_full_and_empty():
+    assert Rate(10, 10).value == pytest.approx(1.0)
+    assert Rate(0, 10).value == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("num,den", [(-1, 5), (5, -1), (6, 5)])
+def test_rate_rejects_invalid_values(num, den):
+    with pytest.raises(ValueError):
+        Rate(num, den)
+
+
+# --- compute_metrics fixtures -----------------------------------------------------------
+
+
+def _sample(sample_id: str, **overrides) -> EvalSample:
+    defaults = dict(
+        sample_id=sample_id,
+        image_path=f"examples/{sample_id}.png",
+        source_citation="test fixture",
+        diversity_tag="test",
+        fetch_script="scripts/fetch_sample_pages.py",
+        acceptable_outcome="anything reasonable",
+    )
+    defaults.update(overrides)
+    return EvalSample(**defaults)
+
+
+def _completed(sample_id: str, mode="page", **overrides) -> PageRunOutcome:
+    defaults = dict(
+        sample_id=sample_id,
+        analysis_mode=mode,
+        status="completed",
+        primary_semantic_label="hair",
+        primary_motion_type="primary",
+        validation_attempts=[
+            ValidationAttemptOutcome(
+                candidate_rank=0, accepted=True, grounding_score=0.6, reason="ok"
+            )
+        ],
+    )
+    defaults.update(overrides)
+    return PageRunOutcome(**defaults)
+
+
+def _failed(
+    sample_id: str, stage: str, detail: str = "failure", mode="page", **overrides
+) -> PageRunOutcome:
+    defaults = dict(
+        sample_id=sample_id,
+        analysis_mode=mode,
+        status="failed",
+        failing_stage=stage,
+        failure_detail=detail,
+    )
+    defaults.update(overrides)
+    return PageRunOutcome(**defaults)
+
+
+def test_compute_metrics_requires_at_least_one_outcome():
+    with pytest.raises(ValueError):
+        compute_metrics([], {})
+
+
+def test_compute_metrics_rejects_mixed_analysis_modes():
+    outcomes = [_completed("a", mode="page"), _completed("b", mode="panel")]
+    with pytest.raises(ValueError):
+        compute_metrics(outcomes, {})
+
+
+def test_usable_target_rate_excludes_only_analysis_stage_failures():
+    outcomes = [
+        _completed("a"),
+        _failed("b", stage="analysis", detail="VLM marked every object STATIC across ..."),
+        _failed("c", stage="grounding", detail="no detection above threshold"),
+    ]
+    report = compute_metrics(outcomes, {})
+    # "a" (completed) and "c" (failed at grounding, past analysis) both count as usable-target;
+    # only "b" (failed AT analysis) does not.
+    assert report.usable_target_rate == Rate(2, 3)
+
+
+def test_static_rate_only_counts_the_genuine_all_static_detail_text():
+    outcomes = [
+        _failed("a", stage="analysis", detail="VLM marked every object STATIC across every ..."),
+        _failed("b", stage="analysis", detail="VLM output remained invalid JSON / schema-invalid"),
+        _completed("c"),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.static_rate == Rate(1, 3)
+
+
+def test_grounding_success_rate_denominator_is_only_pages_that_reached_grounding():
+    outcomes = [
+        _completed("a"),
+        _failed("b", stage="grounding", detail="no detection"),
+        _failed("c", stage="analysis", detail="all STATIC"),  # never reached grounding at all
+    ]
+    report = compute_metrics(outcomes, {})
+    # denominator excludes "c" (analysis failure) -- only "a"/"b" reached grounding
+    assert report.grounding_success_rate == Rate(1, 2)
+
+
+def test_validation_acceptance_and_rejection_rates_pool_across_pages():
+    outcomes = [
+        _completed(
+            "a",
+            validation_attempts=[
+                ValidationAttemptOutcome(
+                    candidate_rank=0, accepted=False, grounding_score=0.3, reason="x"
+                ),
+                ValidationAttemptOutcome(
+                    candidate_rank=1, accepted=True, grounding_score=0.5, reason="y"
+                ),
+            ],
+        ),
+        _failed(
+            "b",
+            stage="validation",
+            detail="all candidates rejected",
+            validation_attempts=[
+                ValidationAttemptOutcome(
+                    candidate_rank=0, accepted=False, grounding_score=0.4, reason="z"
+                ),
+            ],
+        ),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.validation_acceptance_rate == Rate(1, 3)
+    assert report.validation_rejection_rate == Rate(2, 3)
+
+
+def test_validation_rate_denominator_is_zero_when_no_attempts_were_made():
+    outcomes = [_failed("a", stage="analysis", detail="all STATIC")]
+    report = compute_metrics(outcomes, {})
+    assert report.validation_acceptance_rate == Rate(0, 0)
+    assert report.validation_acceptance_rate.value is None
+
+
+def test_fallback_rate_and_end_to_end_completion_rate():
+    outcomes = [
+        _completed("a", used_fallback_plan=True),
+        _completed("b"),
+        _failed("c", stage="grounding", detail="x"),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.fallback_rate == Rate(1, 3)
+    assert report.end_to_end_completion_rate == Rate(2, 3)
+
+
+def test_semantic_false_positive_rate_flags_completions_on_no_target_samples():
+    samples = {
+        "static_page": _sample("static_page", animation_possible="no"),
+        "hair_page": _sample("hair_page", animation_possible="yes"),
+    }
+    outcomes = [
+        _completed("static_page"),  # false positive: completed where ground truth says "no"
+        _completed("hair_page"),  # correct: completed where ground truth says "yes"
+    ]
+    report = compute_metrics(outcomes, samples)
+    assert report.semantic_false_positive_rate == Rate(1, 1)
+    assert report.semantic_false_negative_rate == Rate(0, 1)
+
+
+def test_semantic_false_negative_rate_flags_failures_on_yes_target_samples():
+    samples = {"hair_page": _sample("hair_page", animation_possible="yes")}
+    outcomes = [_failed("hair_page", stage="grounding", detail="nothing found")]
+    report = compute_metrics(outcomes, samples)
+    assert report.semantic_false_negative_rate == Rate(1, 1)
+    assert report.semantic_false_positive_rate == Rate(0, 0)  # no "no" samples at all
+
+
+def test_uncertain_ground_truth_samples_are_excluded_from_fp_fn_denominators():
+    samples = {"ambiguous": _sample("ambiguous", animation_possible="uncertain")}
+    outcomes = [_completed("ambiguous")]
+    report = compute_metrics(outcomes, samples)
+    assert report.semantic_false_positive_rate == Rate(0, 0)
+    assert report.semantic_false_negative_rate == Rate(0, 0)
+
+
+def test_samples_missing_from_ground_truth_dict_are_skipped_not_crashed():
+    outcomes = [_completed("unknown_sample")]
+    report = compute_metrics(outcomes, {})  # no matching EvalSample at all
+    assert report.semantic_false_positive_rate == Rate(0, 0)
+    assert report.semantic_false_negative_rate == Rate(0, 0)
+
+
+def test_regression_violation_is_flagged_only_for_a_completed_outcome_on_a_flagged_sample():
+    samples = {
+        "flagged": _sample(
+            "flagged", regression_reference="must never accept the known-bad face crop"
+        ),
+        "unflagged": _sample("unflagged"),
+    }
+    outcomes = [_completed("flagged"), _completed("unflagged")]
+    report = compute_metrics(outcomes, samples)
+    assert report.regression_samples_checked == 1  # only "flagged" carries a reference
+    assert report.regression_violation_count == 1  # it completed -> flagged as a violation
+
+
+def test_regression_not_violated_when_the_flagged_sample_correctly_fails():
+    samples = {
+        "flagged": _sample("flagged", regression_reference="must never accept the bad crop"),
+    }
+    outcomes = [_failed("flagged", stage="validation", detail="rejected correctly")]
+    report = compute_metrics(outcomes, samples)
+    assert report.regression_samples_checked == 1
+    assert report.regression_violation_count == 0
+
+
+def test_panel_detection_multi_panel_rate_only_reported_in_panel_mode():
+    page_outcomes = [_completed("a", mode="page", panel_count=3)]
+    panel_outcomes = [
+        _completed("a", mode="panel", panel_count=3),
+        _completed("b", mode="panel", panel_count=1),
+        _failed("c", mode="panel", stage="analysis", detail="all STATIC", panel_count=None),
+    ]
+    page_report = compute_metrics(page_outcomes, {})
+    panel_report = compute_metrics(panel_outcomes, {})
+
+    assert page_report.panel_detection_multi_panel_rate is None
+    # "a" has panel_count=3 (>=2, counts); "b" has 1 (doesn't); "c" has None -> treated as 0
+    assert panel_report.panel_detection_multi_panel_rate == Rate(1, 3)
+
+
+# --- nondeterminism -----------------------------------------------------------------------
+
+
+def test_summarize_repeated_runs_requires_at_least_one_record():
+    with pytest.raises(ValueError):
+        summarize_repeated_runs([])
+
+
+def test_summarize_repeated_runs_rejects_mixed_sample_ids():
+    records = [
+        RepeatedRunRecord(sample_id="a", run_index=0, outcome="usable"),
+        RepeatedRunRecord(sample_id="b", run_index=1, outcome="usable"),
+    ]
+    with pytest.raises(ValueError):
+        summarize_repeated_runs(records)
+
+
+def test_summarize_repeated_runs_stable_when_every_run_agrees():
+    records = [
+        RepeatedRunRecord(
+            sample_id="s", run_index=i, outcome="usable", primary_semantic_label="hair"
+        )
+        for i in range(3)
+    ]
+    summary = summarize_repeated_runs(records)
+    assert summary.outcome_stable is True
+    assert summary.target_category_stable is True
+    assert summary.distinct_outcomes == ["usable"]
+    assert summary.distinct_primary_labels == ["hair"]
+
+
+def test_summarize_repeated_runs_detects_outcome_flip():
+    """Mirrors the real, documented Phase 3.2 finding: sample_page_01 flipped between an
+
+    all-STATIC read and a usable character_hair PRIMARY read across runs.
+    """
+    records = [
+        RepeatedRunRecord(sample_id="s", run_index=0, outcome="static_or_unusable"),
+        RepeatedRunRecord(
+            sample_id="s", run_index=1, outcome="usable", primary_semantic_label="character_hair"
+        ),
+    ]
+    summary = summarize_repeated_runs(records)
+    assert summary.outcome_stable is False
+    assert summary.distinct_outcomes == ["static_or_unusable", "usable"]
+
+
+def test_summarize_repeated_runs_detects_target_category_change():
+    records = [
+        RepeatedRunRecord(
+            sample_id="s", run_index=0, outcome="usable", primary_semantic_label="hair"
+        ),
+        RepeatedRunRecord(
+            sample_id="s", run_index=1, outcome="usable", primary_semantic_label="cape"
+        ),
+    ]
+    summary = summarize_repeated_runs(records)
+    assert summary.outcome_stable is True  # both runs were "usable"
+    assert summary.target_category_stable is False
+    assert summary.distinct_primary_labels == ["cape", "hair"]
+
+
+def test_summarize_repeated_runs_all_static_is_outcome_stable_with_no_labels():
+    records = [
+        RepeatedRunRecord(sample_id="s", run_index=i, outcome="static_or_unusable")
+        for i in range(3)
+    ]
+    summary = summarize_repeated_runs(records)
+    assert summary.outcome_stable is True
+    assert summary.target_category_stable is True  # vacuously -- no usable runs to disagree
+    assert summary.distinct_primary_labels == []
+
+
+# --- dataset ------------------------------------------------------------------------------
+
+
+def test_real_eval_dataset_manifest_loads_and_validates():
+    samples = load_eval_dataset()
+    assert len(samples) >= 3
+    ids = [s.sample_id for s in samples]
+    assert len(ids) == len(set(ids))  # no duplicate sample_ids
+    for sample in samples:
+        assert sample.animation_possible in ("yes", "no", "uncertain")
+        assert sample.acceptable_outcome  # never empty
+
+
+def test_eval_dataset_never_fabricates_expected_region_as_a_bbox():
+    """Ground-truth region info must stay a qualitative note, never a pixel bbox -- no sample
+
+    has an independently measured ground-truth region (see EvalSample's docstring)."""
+    samples = load_eval_dataset()
+    for sample in samples:
+        if sample.expected_region_note is not None:
+            assert isinstance(sample.expected_region_note, str)
+
+
+def test_eval_dataset_uncertain_samples_are_explicitly_flagged():
+    samples = load_eval_dataset()
+    uncertain = [s for s in samples if s.animation_possible == "uncertain"]
+    for sample in uncertain:
+        assert sample.ground_truth_uncertain is True
+
+
+def test_eval_sample_loader_roundtrips_a_minimal_yaml(tmp_path):
+    manifest = tmp_path / "mini.yaml"
+    manifest.write_text(
+        """
+samples:
+  - sample_id: mini
+    image_path: examples/mini.png
+    source_citation: test
+    diversity_tag: test
+    fetch_script: scripts/fetch_sample_pages.py
+    acceptable_outcome: anything
+"""
+    )
+    samples = load_eval_dataset(manifest)
+    assert len(samples) == 1
+    assert samples[0].animation_possible == "uncertain"  # the schema's own safe default
+    assert samples[0].expected_target_category is None

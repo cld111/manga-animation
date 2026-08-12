@@ -220,6 +220,25 @@ def config() -> PipelineConfig:
     return PipelineConfig(duration_s=0.5, fps=8)
 
 
+def _noise_block(height: int, width: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 255, size=(height, width, 3), dtype=np.uint8)
+
+
+@pytest.fixture
+def two_panel_page_path(tmp_path: Path) -> Path:
+    """A real, detectably-two-panel page (see tests/test_panels.py's construction style) for
+
+    exercising `run_pipeline(..., analysis_mode="panel")` end to end.
+    """
+    page = np.full((900, 300, 3), 255, dtype=np.uint8)
+    page[0:300, 0:300] = _noise_block(300, 300, seed=11)
+    page[500:900, 0:300] = _noise_block(400, 300, seed=12)
+    path = tmp_path / "two_panel_page.png"
+    Image.fromarray(page).save(path)
+    return path
+
+
 # --- happy path -----------------------------------------------------------------------------
 
 
@@ -369,6 +388,217 @@ def test_run_pipeline_rejects_semantically_wrong_candidate_even_at_high_groundin
             out_dir=tmp_path / "out",
         )
     assert excinfo.value.stage == "validation"
+
+
+def test_run_pipeline_flag_banner_historical_regression_still_rejected_by_semantics(
+    page_path: Path, config, tmp_path: Path
+):
+    """Explicit, named regression guard for the real Phase 3.1 historical failure (a
+
+    "flag_banner" candidate whose crop is actually a face/dialogue box, see
+    docs/decisions/0006-grounding-target-validation.md) -- must remain REJECTed by the
+    semantic check, unaffected by adding the new Phase 3.3.1 geometry check alongside it.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(
+                [_primary_decision("flag_banner")], verification_matches=False
+            ),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert excinfo.value.stage == "validation"
+
+
+# --- Phase 3.3.1: transform-aware geometric validation --------------------------------------
+#
+# Real motivating defect (Phase 3.3 real E2E run, eval_weapon_effects.png): a candidate passed
+# semantic validation ("yes, this crop shows a weapon") but its bbox covered nearly the entire
+# action panel; the plan's `rotate` transform then visibly swung the whole panel, not the
+# weapon, producing torn black-wedge artifacts. See validation/transform_geometry.py and
+# docs/decisions/0008-transform-aware-target-validation.md.
+
+
+@requires_ffmpeg
+def test_run_pipeline_tries_next_candidate_when_first_fails_geometry_not_semantics(
+    page_path: Path, config, tmp_path: Path
+):
+    """"Attempt another ranked grounding candidate if available" (Phase 3.2 failure policy)
+
+    must also apply when the FIRST candidate is rejected by the NEW transform-geometry check,
+    not only a semantic mismatch -- the retry loop is agnostic to WHY a candidate was rejected.
+    """
+    oversized_box = (5, 5, 115, 155)  # ~86% of the 120x160 test image -- fails ROTATE's 15% cap
+    small_box = (20, 20, 50, 50)  # ~4.7% of the image, well clear of every edge -- passes
+    grounding_client = FakeGroundingClient(boxes=[oversized_box, small_box])
+    vlm_client = FakeVLMClient([_primary_decision("weapon")])  # verification_matches=True default
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=vlm_client,
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert len(result.validation_attempts) == 2
+    assert result.validation_attempts[0].accepted is False
+    assert result.validation_attempts[0].semantic_match is True
+    assert result.validation_attempts[0].transform_compatible is False
+    assert result.validation_attempts[1].accepted is True
+    assert result.validation_attempts[1].transform_compatible is True
+    assert result.grounding.bbox.as_xyxy() == small_box
+    assert result.render.output_path.exists()
+
+
+def test_run_pipeline_fallback_plan_can_be_rejected_by_geometry_check(
+    page_path: Path, config, tmp_path: Path
+):
+    """"Never silently animate an unvalidated candidate" (Phase 3.2) now also covers geometric
+
+    safety, not just semantic correctness -- a human-authored fallback plan whose grounded
+    region is semantically right but geometrically unsafe for its transform_kind must still
+    fail the run, exactly like a semantic mismatch already does
+    (test_run_pipeline_fallback_plan_can_still_be_rejected_by_validation).
+    """
+    from manga_animation.schemas.animation_plan import (
+        AnimationPlan,
+        BBox,
+        Easing,
+        LoopSpec,
+        MotionSpec,
+        MotionType,
+        ObjectPlan,
+        PanelPlan,
+        PivotSpec,
+        SourceImage,
+        TransformKind,
+    )
+
+    w, h = Image.open(page_path).size
+    plan = AnimationPlan(
+        source=SourceImage(path=str(page_path), width=w, height=h),
+        panels=[PanelPlan(panel_id="panel_1", bbox=BBox(x=0, y=0, width=1, height=1))],
+        objects=[
+            ObjectPlan(
+                object_id="obj_weapon",
+                panel_id="panel_1",
+                semantic_label="weapon",
+                confidence=0.9,
+                motion_type=MotionType.PRIMARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.ROTATE,
+                    amplitude=8.0,
+                    speed=1.0,
+                    easing=Easing.SINE,
+                    pivot=PivotSpec(x=0.5, y=1.0, reference="object_bbox"),
+                ),
+            )
+        ],
+        loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+    )
+    oversized_box = (5, 5, 115, 155)  # ~86% of the 120x160 test image -- fails ROTATE's 15% cap
+    grounding_client = FakeGroundingClient(box=oversized_box)
+    # verification_matches=True -- the fallback candidate IS semantically correct; only its
+    # geometry is unsafe, isolating this test from the already-covered semantic-rejection case.
+    vlm_client = FakeVLMClient([], verification_matches=True)
+
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=vlm_client,
+            grounding_client=grounding_client,
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+            plan=plan,
+        )
+    assert excinfo.value.stage == "validation"
+    assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+# --- Phase 3.3: panel-aware analysis_mode ---------------------------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_analysis_mode_panel_produces_a_valid_run(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    """`analysis_mode="panel"` must wire real panel detection into the same orchestrator path
+
+    -- grounding/validation/segmentation/animation/rendering are all identical to the
+    page-level path (see docs/decisions/0007-panel-aware-analysis.md's explicit decoupling).
+    """
+    result = run_pipeline(
+        two_panel_page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision(), _static_decision()]),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        analysis_mode="panel",
+    )
+
+    assert isinstance(result, PipelineRunResult)
+    assert len(result.plan.panels) >= 1
+    assert result.primary_object.motion_type == MotionType.PRIMARY
+    assert result.render.output_path.exists()
+
+
+def test_run_pipeline_analysis_mode_panel_still_rejects_semantically_wrong_candidate(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    """Regression guard: the panel-aware analysis path must not bypass Phase 3.2's
+
+    grounding-target validation gate -- this mirrors
+    `test_run_pipeline_rejects_semantically_wrong_candidate_even_at_high_grounding_score`
+    (the real Phase 3.1 historical false-grounding failure this stage exists to catch, see
+    docs/decisions/0006-grounding-target-validation.md), but through `analysis_mode="panel"`.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            two_panel_page_path,
+            config,
+            vlm_client=FakeVLMClient(
+                [_primary_decision(), _static_decision()], verification_matches=False
+            ),
+            grounding_client=FakeGroundingClient(),  # single box, score 0.9 -- high confidence
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+            analysis_mode="panel",
+        )
+    assert excinfo.value.stage == "validation"
+    assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+def test_run_pipeline_analysis_mode_defaults_to_page_level(page_path: Path, config, tmp_path: Path):
+    """`analysis_mode` defaults to `"page"` -- every pre-existing Phase 3.1/3.2 caller/test
+
+    (which never passes `analysis_mode`) is unaffected by this phase (acceptance criterion #2).
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_static_decision(), _static_decision("other")]),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    # the page-level all-STATIC error message (not a panel-aware one) proves the default path
+    # was actually taken
+    assert excinfo.value.stage == "analysis"
+    assert "every object STATIC" in excinfo.value.detail
 
 
 # --- controlled-fallback plan override (Phase 3.1 failure policy escape hatch) -------------

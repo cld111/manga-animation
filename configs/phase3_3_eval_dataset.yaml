@@ -1,0 +1,170 @@
+# Phase 3.3 evaluation dataset manifest. See src/manga_animation/evaluation/dataset.py for the
+# schema (EvalSample) and docs/phase3.3-results.md for the real evaluation run this feeds.
+#
+# Every sample is a REAL manga/webtoon page (never synthetic/fabricated). Ground truth fields
+# are left null wherever this project does not actually have evidence for them -- per the
+# Phase 3.3 brief: "Do NOT fabricate ground truth. ... If a sample has uncertain ground truth,
+# explicitly mark it as uncertain instead of inventing a label."
+#
+# Images themselves are NOT committed (see .gitignore's examples/*.png rule -- copyrighted
+# third-party content, re-fetchable on demand). Fetch them all before running the evaluation:
+#   uv run python scripts/fetch_sample_pages.py          # (see note on sample_page_01/02 below)
+#   uv run python scripts/fetch_phase3_sample_page.py     -> examples/phase3_action_page.png
+#   uv run python scripts/fetch_phase3_3_eval_pages.py    -> the two eval_*.png pages
+#
+# NOTE on sample_page_01.png / sample_page_02.png: these two were originally fetched in Phase 2
+# via fetch_sample_pages.py, which picks "the first full-color, English-translated manga by
+# current follower count" -- a live, time-varying MangaDex query, NOT reproducible on demand
+# the way the other three pages are (their citations are hardcoded chapter/page ids). Their
+# exact series/chapter was not recorded in Phase 2's docs. This is a real, honest documentation
+# gap carried forward from Phase 2, not fabricated now -- see each sample's `notes` below for
+# what can still be said about them from direct visual inspection of the actual files already
+# in this project's history.
+
+samples:
+  - sample_id: sample_page_01
+    image_path: examples/sample_page_01.png
+    source_citation: >
+      Fetched via scripts/fetch_sample_pages.py during Phase 2 (exact series/chapter not
+      recorded at the time -- see the dataset-level note above). Visually: a dark-haired
+      character against a starry sky says "WAIT A MINUTE." / "EXCUSE ME?", with a blue
+      system-message-style UI box between panels.
+    diversity_tag: ambiguous_nondeterministic
+    fetch_script: scripts/fetch_sample_pages.py
+    animation_possible: uncertain
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      Either an honest all-STATIC analysis result (stage=analysis, no video) OR a usable
+      character_hair PRIMARY candidate that reaches a validated ACCEPT are both acceptable
+      outcomes for this specific page, given real, already-documented run-to-run
+      nondeterminism (docs/phase3.2-results.md's "Run 1" note: an earlier run produced a
+      usable character_hair PRIMARY read on this same page; a later run came back all-STATIC).
+      NOT acceptable: a validated ACCEPT on any object other than real hair-like content.
+    regression_reference: null
+    ground_truth_uncertain: true
+    notes: >
+      Real, evidenced VLM nondeterminism was specifically observed on this page
+      (docs/phase3.2-results.md) -- this sample exists in the dataset specifically to measure
+      that property (see the Phase 3.3 "VLM nondeterminism" repeated-run harness), not to
+      assert a single correct answer.
+
+  - sample_id: sample_page_02
+    image_path: examples/sample_page_02.png
+    source_citation: >
+      Fetched via scripts/fetch_sample_pages.py during Phase 2 (exact series/chapter not
+      recorded at the time -- see the dataset-level note above). Visually: a phone-screenshot
+      panel ("Three Ways To... [1st Revision]", "AT THAT TIME, WE SHOULDN'T HAVE"), held by a
+      character's hand, credited "Flamecomics.com" at the bottom.
+    diversity_tag: hair
+    fetch_script: scripts/fetch_sample_pages.py
+    animation_possible: "yes"
+    expected_target_category: hair
+    expected_motion_category: primary
+    expected_region_note: >
+      The character's hair, confirmed by REAL visual QA in Phase 3.2 (decoded frame pixels
+      compared directly, not simulated): hair visibly translates/sways between frame 0 and
+      frame 24 of the rendered video, while the face, both speech bubbles ("WAIT A MINUTE.",
+      "EXCUSE ME?"), and narration box are pixel-identical across those frames.
+    acceptable_outcome: >
+      A completed render whose PRIMARY object is hair (or an equivalent real, non-degenerate
+      hair-adjacent label), validated ACCEPT, with unrelated page regions (face, text,
+      narration box) staying pixel-identical outside the animated region.
+    regression_reference: >
+      This page produced a real, visually-confirmed true positive in Phase 3.2
+      (docs/phase3.2-results.md's "Run 1"). A regression here (all-STATIC, grounding failure,
+      or an ACCEPT landing on a non-hair region) is a real quality regression, not just a
+      metric dip -- this sample is this dataset's positive-control case.
+    ground_truth_uncertain: false
+    notes: >
+      The strongest real ground truth in this dataset: not just a plausible expectation, but
+      an already-confirmed, visually-verified correct end-to-end result from Phase 3.2.
+
+  - sample_id: phase3_action_page
+    image_path: examples/phase3_action_page.png
+    source_citation: >
+      'The Skeleton Soldier Failed to Defend the Dungeon', MangaDex id
+      d993f789-e7e5-4832-92fd-37614220b427, chapter 25 (id
+      2cb6c639-033e-4064-a3fd-dacbe0aaaaad), page 13 of 15. See
+      scripts/fetch_phase3_sample_page.py (hardcoded, reproducible on demand).
+    diversity_tag: weapon_action_effects
+    fetch_script: scripts/fetch_phase3_sample_page.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      Either a validated ACCEPT on a real weapon-shaped or cloth-banner-shaped region, OR an
+      honest grounding/validation failure (no video), are both acceptable outcomes -- this
+      page has multiple plausible real targets (a raised sword, vertical speed-line effects,
+      hanging arena banners) and this dataset does not assert which single one is "the"
+      correct choice. The ONE specifically unacceptable outcome is named under
+      regression_reference below.
+    regression_reference: >
+      Phase 3.1's real automatic run grounded a "flag_banner" prompt to a face/speech-bubble
+      region (score 0.269) and rendered a visibly distorted video (docs/phase3-results.md).
+      Phase 3.2's validation stage was directly confirmed, on this exact page against real
+      models, to REJECT that exact reproduction (docs/phase3.2-results.md's "Run 2":
+      "The crop shows a character's head and dialogue box, not a flag banner."). A validated
+      ACCEPT whose grounded crop is actually a face/dialogue-box region is the one outcome
+      this sample must never reproduce again.
+    ground_truth_uncertain: false
+    notes: >
+      Chosen originally (Phase 3.1) specifically for an unambiguous drawn motion cue; the
+      exact best single target among several real candidates is genuinely open, which is why
+      expected_target_category is left null rather than guessed.
+
+  - sample_id: eval_static_dialogue
+    image_path: examples/eval_static_dialogue.png
+    source_citation: >
+      'Who Made Me a Princess', MangaDex id 722a45c0-5e55-40f2-929b-ff69b0989edb, chapter 47
+      (id 5607ccd4-5cc8-4a24-9053-7a0f22cffc46), page 4 of 17. See
+      scripts/fetch_phase3_3_eval_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: static_dialogue
+    fetch_script: scripts/fetch_phase3_3_eval_pages.py
+    animation_possible: "no"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      An honest all-STATIC analysis result (stage=analysis, no video produced) is the correct
+      outcome. A completed render (any object animated) is a semantic false positive -- direct
+      visual inspection finds no motion lines, no wind/implied-force cues on hair or clothing,
+      and no mid-action pose anywhere on this page; every panel is characters talking.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Added specifically to give this dataset a confident (not merely nondeterministic-STATIC,
+      like sample_page_01) real negative-control case, and to add a non-action genre/series to
+      a dataset that was otherwise 100% one action-fantasy MangaDex series
+      (docs/phase3.2-results.md's own flagged cross-series-generalization gap).
+
+  - sample_id: eval_weapon_effects
+    image_path: examples/eval_weapon_effects.png
+    source_citation: >
+      'Latna Saga: Survival of a Sword King', MangaDex id
+      478e6926-b8bc-465c-9694-2bae1dbaf32b, chapter 238 (id
+      98b4f2e6-9703-494f-bd78-7d992aae48ca), page 26 of 83. See
+      scripts/fetch_phase3_3_eval_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: weapon_action_effects
+    fetch_script: scripts/fetch_phase3_3_eval_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on a real weapon-shaped or energy-effect-shaped region is a good
+      outcome; an honest grounding/validation failure (no video) is also acceptable, given
+      this panel's motion cue is effect-heavy rather than one concrete, easily-prompted object.
+      NOT acceptable: an ACCEPT whose grounded crop shows an unrelated background/dialogue
+      region (the same class of failure this dataset's regression case, phase3_action_page,
+      already guards against, now on a second, visually distinct series/art style).
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      A second, real, cross-series weapon/action/effects sample -- distinct series and art
+      style from phase3_action_page, specifically to start giving the semantic-validation
+      false-positive/false-negative measurement more than one series' worth of real evidence
+      (docs/decisions/0006-grounding-target-validation.md's own flagged "untested on a second,
+      visually distinct series" open question).

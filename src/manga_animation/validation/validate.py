@@ -33,6 +33,7 @@ from manga_animation.pipeline.types import (
     ValidationResult,
 )
 from manga_animation.schemas.animation_plan import ObjectPlan
+from manga_animation.validation.transform_geometry import check_transform_geometry
 
 logger = get_logger(__name__)
 
@@ -178,10 +179,11 @@ def validate_target(
     vlm_client: VLMClient,
     *,
     candidate_rank: int = 0,
+    panel_bbox_px: BBoxPx | None = None,
 ) -> ValidationResult:
     """ACCEPT/REJECT one grounding candidate for `object_plan`, with structured diagnostics.
 
-    Two independent checks, cheapest first:
+    Three independent checks, cheapest first:
 
     1. **Bbox plausibility** (deterministic, no model call) — see `_bbox_plausibility`. A
        candidate that fails this is rejected without spending a VLM call on it.
@@ -195,11 +197,26 @@ def validate_target(
        adding a new model dependency, and is the same "cheap VLM-based visual sanity check on
        the grounded crop" `docs/phase3-results.md` already identified as the fix for this
        exact failure.
+    3. **Transform-aware geometric compatibility** (deterministic, no model call) — see
+       `validation/transform_geometry.py::check_transform_geometry` and
+       `docs/decisions/0008-transform-aware-target-validation.md`. "Is this a plausible X" and
+       "is this specific box safe to animate with the plan's transform_kind" are independent
+       questions — a real, observed failure (`eval_weapon_effects.png`, Phase 3.3's real E2E
+       run) had a candidate pass check 2 (a real weapon was visible in the crop) while its bbox
+       was far too large to safely `rotate`, visibly swinging the whole panel instead of the
+       object. Runs only after check 2 accepts (skipped entirely on a semantic mismatch — no
+       point scoring geometry for a candidate that's already the wrong object).
 
     Never raises — a REJECT is a normal, expected outcome (see the Phase 3.2 acceptance
     criterion: "a correct REJECT is a successful result"), always returned as a
     `ValidationResult`, never silently promoted to an accept. An unparseable VLM response is
     treated as a REJECT (fail closed), never swallowed into a false accept.
+
+    `panel_bbox_px`: the object's real panel region in page-pixel space, if known — used as
+    check 3's reference region for area-fraction/edge-margin bounds. Falls back to the full
+    image when `None` (page-level analysis, or a caller that hasn't threaded panel geometry
+    through yet), identical to how a page-level `AnimationPlan`'s single `(0, 0, 1, 1)`
+    `PanelPlan` already behaves everywhere else in this pipeline.
     """
     h, w = image.shape[0], image.shape[1]
     plausible, area_fraction = _bbox_plausibility(grounding.bbox, (h, w))
@@ -226,6 +243,7 @@ def validate_target(
             semantic_confidence=None,
             reason=reason,
             model_id="none",
+            transform_compatible=None,
         )
 
     crop = _crop_with_margin(image, grounding.bbox)
@@ -253,10 +271,11 @@ def validate_target(
             semantic_confidence=None,
             reason=reason,
             model_id=model_id,
+            transform_compatible=None,
         )
 
     logger.info(
-        "validation stage: object_id=%s candidate_rank=%d %s (semantic_match=%s "
+        "validation stage: object_id=%s candidate_rank=%d semantic %s (semantic_match=%s "
         "confidence=%.2f): %s",
         object_plan.object_id,
         candidate_rank,
@@ -265,15 +284,69 @@ def validate_target(
         verification.confidence,
         verification.reason,
     )
+
+    if not verification.matches:
+        return ValidationResult(
+            object_id=object_plan.object_id,
+            candidate_rank=candidate_rank,
+            accepted=False,
+            grounding_score=grounding.bbox.score,
+            bbox_area_fraction=area_fraction,
+            bbox_plausible=True,
+            semantic_match=False,
+            semantic_confidence=verification.confidence,
+            reason=verification.reason,
+            model_id=model_id,
+            transform_compatible=None,
+        )
+
+    # Semantic check passed -- check 3: is this specific box geometrically safe for the plan's
+    # transform_kind? (see check_transform_geometry's docstring for the real defect this
+    # catches). Objects with no motion spec (not expected for a PRIMARY object the schema
+    # guarantees a MotionSpec for, but validate_target is a generic function -- defensive) skip
+    # this check entirely, matching _build_verification_prompt's own defensive handling above.
+    if object_plan.motion is not None:
+        h_img, w_img = image.shape[0], image.shape[1]
+        transform_compatible, geometry_reason = check_transform_geometry(
+            grounding.bbox,
+            object_plan.motion.transform_kind,
+            panel_bbox_px=panel_bbox_px,
+            image_shape=(h_img, w_img),
+        )
+        logger.info(
+            "validation stage: object_id=%s candidate_rank=%d geometry %s: %s",
+            object_plan.object_id,
+            candidate_rank,
+            "ACCEPT" if transform_compatible else "REJECT",
+            geometry_reason,
+        )
+        if not transform_compatible:
+            return ValidationResult(
+                object_id=object_plan.object_id,
+                candidate_rank=candidate_rank,
+                accepted=False,
+                grounding_score=grounding.bbox.score,
+                bbox_area_fraction=area_fraction,
+                bbox_plausible=True,
+                semantic_match=True,
+                semantic_confidence=verification.confidence,
+                reason=geometry_reason,
+                model_id=model_id,
+                transform_compatible=False,
+            )
+    else:
+        transform_compatible = None
+
     return ValidationResult(
         object_id=object_plan.object_id,
         candidate_rank=candidate_rank,
-        accepted=verification.matches,
+        accepted=True,
         grounding_score=grounding.bbox.score,
         bbox_area_fraction=area_fraction,
         bbox_plausible=True,
-        semantic_match=verification.matches,
+        semantic_match=True,
         semantic_confidence=verification.confidence,
         reason=verification.reason,
         model_id=model_id,
+        transform_compatible=transform_compatible,
     )

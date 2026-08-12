@@ -8,12 +8,20 @@ fake client.
 """
 
 from manga_animation.analysis.client import Qwen25VLClient, VLMClient
-from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT, analyze_page, build_plan
+from manga_animation.analysis.panels import detect_panels
+from manga_animation.analysis.plan_builder import (
+    ANALYSIS_PROMPT,
+    analyze_page,
+    analyze_page_panels,
+    build_plan,
+)
 
 __all__ = [
     "ANALYSIS_PROMPT",
     "Qwen25VLClient",
     "VLMClient",
     "analyze_page",
+    "analyze_page_panels",
     "build_plan",
+    "detect_panels",
 ]

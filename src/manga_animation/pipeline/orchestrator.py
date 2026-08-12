@@ -28,11 +28,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
 
-from manga_animation.analysis import Qwen25VLClient, VLMClient, analyze_page
+from manga_animation.analysis import Qwen25VLClient, VLMClient, analyze_page, analyze_page_panels
 from manga_animation.animation import generate_transformed_layer
 from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame
@@ -52,6 +53,7 @@ from manga_animation.pipeline.types import (
     RenderResult,
     SegmentationResult,
     ValidationResult,
+    normalized_bbox_to_px,
 )
 from manga_animation.reconstruction import (
     LamaClient,
@@ -160,10 +162,7 @@ def _select_primary(plan: AnimationPlan, image_path: str) -> ObjectPlan:
 def _panel_bbox_px(plan: AnimationPlan, panel_id: str, page_shape: tuple[int, int]) -> BBoxPx:
     h, w = page_shape
     panel = next(p for p in plan.panels if p.panel_id == panel_id)
-    b = panel.bbox
-    return BBoxPx(
-        x0=int(b.x * w), y0=int(b.y * h), x1=int((b.x + b.width) * w), y1=int((b.y + b.height) * h)
-    )
+    return normalized_bbox_to_px(panel.bbox, page_width=w, page_height=h)
 
 
 def run_pipeline(
@@ -176,6 +175,7 @@ def run_pipeline(
     reconstruction_client: ReconstructionClient,
     out_dir: Path,
     plan: AnimationPlan | None = None,
+    analysis_mode: Literal["page", "panel"] = "page",
 ) -> PipelineRunResult:
     """Run the complete pipeline (analysis through rendering, with Phase 3.2's grounding-
     validation gate) on one real manga page.
@@ -193,6 +193,15 @@ def run_pipeline(
     genuinely returned an unusable result (e.g. a defensible all-STATIC read on every candidate
     object) -- this skips the analysis stage's VLM call entirely, so the caller is responsible
     for recording that substitution honestly wherever this run's results are reported.
+
+    `analysis_mode`: `"page"` (default, unchanged Phase 3.2 behavior -- one whole-page VLM
+    call, `analyze_page`) or `"panel"` (Phase 3.3 -- deterministic panel detection followed by
+    one VLM call per detected panel, `analyze_page_panels`; see
+    docs/decisions/0007-panel-aware-analysis.md). Ignored when `plan` is already supplied
+    (there is no analysis stage to mode-switch on the controlled-fallback path). Everything
+    downstream of analysis (grounding, validation, segmentation, animation, compositing,
+    rendering) is identical either way -- this switch only changes how the `AnimationPlan` was
+    produced, per ADR 0007's explicit decoupling from grounding/segmentation/animation.
     """
     device = config.resolve_device()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -201,7 +210,11 @@ def run_pipeline(
         with StageTimer(
             "analysis", logger, device=device, model=config.model_variants.get("vlm")
         ):
-            plan = analyze_page(image_path, vlm_client, config=config)
+            plan = (
+                analyze_page_panels(image_path, vlm_client, config=config)
+                if analysis_mode == "panel"
+                else analyze_page(image_path, vlm_client, config=config)
+            )
     else:
         logger.warning(
             "run_pipeline: using an externally supplied AnimationPlan -- the analysis stage's "
@@ -218,6 +231,10 @@ def run_pipeline(
 
     image = np.asarray(Image.open(image_path).convert("RGB"))
     page_shape = (image.shape[0], image.shape[1])
+    # Computed here (not just before the animation stage, as in Phase 3.1/3.2) so validation's
+    # transform-geometry check (Phase 3.3.1) can measure a candidate bbox against its REAL
+    # panel region, not just the full page -- see validation/transform_geometry.py.
+    panel_bbox_px = _panel_bbox_px(plan, primary.panel_id, page_shape)
 
     with StageTimer(
         "grounding", logger, device=device, model=config.model_variants.get("grounding")
@@ -232,7 +249,14 @@ def run_pipeline(
         validation_attempts: list[ValidationResult] = []
         grounding: GroundingResult | None = None
         for rank, candidate in enumerate(grounding_candidates):
-            result = validate_target(image, primary, candidate, vlm_client, candidate_rank=rank)
+            result = validate_target(
+                image,
+                primary,
+                candidate,
+                vlm_client,
+                candidate_rank=rank,
+                panel_bbox_px=panel_bbox_px,
+            )
             validation_attempts.append(result)
             if result.accepted:
                 grounding = candidate
@@ -274,7 +298,6 @@ def run_pipeline(
             segmentation_client.unload()
 
     assert primary.motion is not None  # schema guarantees this for a PRIMARY object
-    panel_bbox_px = _panel_bbox_px(plan, primary.panel_id, page_shape)
 
     with StageTimer("animation", logger, device="cpu", model=None):
         frame_count = plan.loop.frame_count

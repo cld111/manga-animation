@@ -23,11 +23,14 @@ possible, to avoid the conversion needing to happen at all.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
+
+from manga_animation.schemas.animation_plan import BBox
 
 ImageArray = np.ndarray
 """RGB uint8 array, shape (H, W, 3). See module docstring for the channel-order convention."""
@@ -80,6 +83,80 @@ class BBoxPx:
         return (self.x0, self.y0, self.x1, self.y1)
 
 
+def normalized_bbox_to_px(bbox: BBox, page_width: int, page_height: int) -> BBoxPx:
+    """Convert a schema-space normalized (`[0, 1]`) `BBox` to pixel space for a page of the
+
+    given size — the canonical "panel-local coordinates -> page coordinates" direction Phase
+    3.3 needs to be deterministic and tested (see `docs/decisions/0007-panel-aware-analysis.md`).
+    The origin is floored and the far edge is ceiled (not both floored, as a naive `int(...)`
+    cast would) so a normalized box that is meant to reach a page edge doesn't lose a row/column
+    of pixels to truncation; both are then clamped to the page's actual bounds.
+    """
+    x0 = max(0, math.floor(bbox.x * page_width))
+    y0 = max(0, math.floor(bbox.y * page_height))
+    x1 = min(page_width, math.ceil((bbox.x + bbox.width) * page_width))
+    y1 = min(page_height, math.ceil((bbox.y + bbox.height) * page_height))
+    return BBoxPx(x0=x0, y0=y0, x1=x1, y1=y1)
+
+
+def bbox_px_to_normalized(bbox: BBoxPx, page_width: int, page_height: int) -> BBox:
+    """Convert a pixel-space `BBoxPx` (e.g. a detected `PanelCandidate.bbox`) to a schema-space
+
+    normalized `BBox` relative to the full page — the inverse direction of
+    `normalized_bbox_to_px`. Not a bit-exact round trip (both directions round to integer
+    pixels), but stable to within one pixel, which is what `PanelPlan.bbox` needs: something
+    deterministic and reproducible, not sub-pixel-precise.
+    """
+    x = bbox.x0 / page_width
+    y = bbox.y0 / page_height
+    width = (bbox.x1 - bbox.x0) / page_width
+    height = (bbox.y1 - bbox.y0) / page_height
+    # Clamp for float rounding at the page edge (e.g. x + width landing at 1.0000000002,
+    # which BBox's own bounds validator would otherwise reject).
+    width = min(width, 1.0 - x)
+    height = min(height, 1.0 - y)
+    return BBox(x=x, y=y, width=width, height=height)
+
+
+PanelSource = Literal["gutter_xy_cut", "fallback_full_page"]
+"""Where a `PanelCandidate` came from: `"gutter_xy_cut"` for a real detected panel (see
+
+`analysis/panels.py`), `"fallback_full_page"` for the degenerate "no internal gutters found,
+whole page is one panel" case, which is a valid splash-page read (see the `manga-analysis`
+skill), not a detector failure — distinguished from a genuine zero-panel result (which returns
+an empty list rather than a candidate at all; see `analysis/panels.py::detect_panels`).
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PanelCandidate:
+    """One detected panel/region on a page, in page-space pixel coordinates.
+
+    `crop` always corresponds exactly to `bbox` (checked below) — any context margin around a
+    detected gutter boundary is baked into `bbox` itself before this type is constructed, not
+    tracked as a second, separately-offset region (see ADR 0007's "Structured output").
+    """
+
+    id: str
+    bbox: BBoxPx
+    crop: ImageArray
+    confidence: float
+    source: PanelSource
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.confidence <= 1.0):
+            raise ValueError(
+                f"PanelCandidate confidence must be within [0, 1], got {self.confidence}"
+            )
+        expected = (self.bbox.height, self.bbox.width)
+        if self.crop.shape[:2] != expected:
+            raise ValueError(
+                f"PanelCandidate crop shape {self.crop.shape[:2]} does not match its bbox "
+                f"extent {expected} -- crop must be exactly image[bbox]"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class GroundingResult:
     """Where one `ObjectPlan.object_id` actually is in the source image."""
@@ -114,6 +191,14 @@ class ValidationResult:
     semantic_confidence: float | None
     reason: str
     model_id: str
+    transform_compatible: bool | None = None
+    """Phase 3.3.1: whether the candidate's bbox geometry is safe for the plan's specific
+    `transform_kind` (see `validation/transform_geometry.py`) — a semantically-correct region
+    can still be geometrically unsafe to animate (e.g. a bbox too large to `rotate` without
+    visibly swinging the whole panel, not just the intended object; see
+    docs/decisions/0008-transform-aware-target-validation.md). `None` when this check was never
+    reached (bbox-implausible or semantic-mismatch already rejected the candidate first, or the
+    object has no `motion` to check against)."""
 
 
 @dataclass(frozen=True, slots=True)
