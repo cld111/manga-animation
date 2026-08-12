@@ -203,3 +203,72 @@ def test_page_within_resolution_is_not_upscaled(sample_image_path, config):
     analyze_page(sample_image_path, client, config=config)
 
     assert client.image_sizes[0] == (100, 200)
+
+
+# --- Phase 3.2: ranked candidates (no longer discards SECONDARY/MICRO reads) ---------------
+
+
+def test_no_primary_but_a_secondary_candidate_still_produces_a_usable_plan(
+    sample_image_path, config
+):
+    """Real Phase 3.1-era gap: a VLM read with real SECONDARY/MICRO motion signal but no
+
+    literal "primary" label used to be treated identically to an all-STATIC read (unusable) --
+    even though the model DID identify a motion-worthy object, just not confidently enough to
+    call it primary. `_rank_candidates` now considers the whole non-STATIC pool, not only
+    objects labeled "primary" (see docs/decisions/0006-grounding-target-validation.md).
+    """
+    decisions = [
+        _decision("background", "static"),
+        _decision("character_hair", "secondary", confidence=0.7, motion_description="sways"),
+    ]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(sample_image_path, client, config=config)
+
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert len(primary_objects) == 1
+    assert primary_objects[0].semantic_label == "character_hair"
+    assert primary_objects[0].motion is not None
+
+
+def test_only_a_micro_candidate_also_produces_a_usable_plan(sample_image_path, config):
+    decisions = [_decision("eye", "micro", confidence=0.6, motion_description="blinks")]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(sample_image_path, client, config=config)
+
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert len(primary_objects) == 1
+    assert primary_objects[0].semantic_label == "eye"
+
+
+def test_a_real_primary_still_outranks_a_more_confident_secondary(sample_image_path, config):
+    """motion_type strictly dominates confidence in the ranking -- a "secondary" read must
+
+    never bump out an actual "primary" one just because the model was more confident about it.
+    """
+    decisions = [
+        _decision("cape", "primary", confidence=0.5, motion_description="flutters"),
+        _decision("hair", "secondary", confidence=0.99, motion_description="sways"),
+    ]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(sample_image_path, client, config=config)
+
+    primary_objects = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+    assert primary_objects[0].semantic_label == "cape"
+
+
+def test_analysis_prompt_broadens_evidence_beyond_deformation_on_the_object_itself():
+    """Real Phase 3.1 finding: the original prompt only recognized motion cues drawn directly
+
+    on an object, which structurally could not justify motion for a page whose only cue was a
+    page-level speed-line effect (see docs/phase3-results.md finding #2). Guard against
+    silently reverting the broadened prompt.
+    """
+    from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT
+
+    lowered = ANALYSIS_PROMPT.lower()
+    assert "page-level" in lowered or "panel-level" in lowered
+    assert "pose" in lowered

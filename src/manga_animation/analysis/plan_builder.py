@@ -63,15 +63,30 @@ character)
   - "micro": small motion that adds life without carrying narrative weight (a blink, subtle \
 sway)
 - "confidence": a float 0-1, your confidence in this STATIC/ANIMATED decision
-- "reason": one sentence grounded in what's actually drawn (motion lines, deformation, \
-wind-blown shapes) -- not speculation
+- "reason": one sentence grounded in what's actually drawn -- not speculation
 - "motion_description": (only if motion_type is not "static") one short sentence describing \
 the physical motion in plain terms, e.g. "banner sways left and right in the wind"
 
-Only mark an object "primary"/"secondary"/"micro" if there is a genuine, visually justified \
-reason -- motion lines, drawn deformation, or an implied force (wind, impact, motion). If \
-nothing on the page has such a cue, mark everything "static" -- that is a valid, correct \
-answer, not a failure.
+A visually justified reason for motion can come from ANY of these, not only deformation \
+drawn on the object itself:
+1. Deformation/distortion drawn directly on the object (wavy linework, a bent/curved shape).
+2. Motion/speed lines drawn on or immediately touching the object.
+3. Panel-level or page-level effect lines (speed lines, impact bursts, radiating focus \
+lines) layered over the scene near the object, even if the object's own outline is drawn \
+clean -- a raised weapon inside a field of speed lines is still visually justified motion \
+for that weapon, even though the lines aren't drawn ON the blade itself.
+4. The object's drawn pose/position implying it is mid-action (a sword raised for a swing, \
+an outstretched arm, a foot lifted mid-stride) -- an implied trajectory is a real, drawable \
+cue, not speculation about what happens next.
+5. An implied physical force that would plausibly act on the object given the scene (wind \
+blowing through the panel, an impact that would shake attached cloth).
+
+Only mark an object "primary"/"secondary"/"micro" if you can point to at least one of these \
+five categories actually present in the drawing. If nothing on the page has such a cue for \
+any object, mark everything "static" -- that is a valid, correct answer, not a failure. But \
+do not default to "static" just because the cue isn't drawn on the object's own outline -- \
+check the whole panel around each candidate object, not only the object's own silhouette, \
+before deciding.
 
 Return ONLY a JSON array of these objects, no prose, no markdown code fences."""
 
@@ -259,25 +274,46 @@ def _slugify(label: str, index: int) -> str:
     return f"obj_{slug or 'object'}_{index}"
 
 
-def _select_single_primary(
-    decisions: list[_RawObjectDecision], image_ref: str
-) -> tuple[_RawObjectDecision, list[_RawObjectDecision]]:
-    """Phase 3.1 scope: exactly one animated object. Returns (chosen_primary, everyone_else).
+# motion_type -> sort priority. Strictly dominates confidence in `_rank_candidates`'s sort key,
+# so an existing "primary" decision always outranks any "secondary"/"micro" one, regardless of
+# confidence -- this preserves Phase 3.1's original "highest-confidence primary wins" behavior
+# whenever a real primary exists (see tests/test_analysis.py); it only changes the outcome when
+# NO primary exists at all.
+_MOTION_TYPE_RANK: dict[MotionType, int] = {
+    MotionType.PRIMARY: 2,
+    MotionType.SECONDARY: 1,
+    MotionType.MICRO: 0,
+}
 
-    Everyone else is returned as-is (their own decision), but `build_plan` forces them all to
-    STATIC when constructing `ObjectPlan`s -- see that function's docstring for why keeping
-    the plan truthful to what the pipeline will actually render matters more here than
-    preserving the VLM's full multi-object read.
+
+def _rank_candidates(
+    decisions: list[_RawObjectDecision], image_ref: str
+) -> list[_RawObjectDecision]:
+    """Rank every non-STATIC decision best-to-worst as a candidate for the plan's single
+    animated object -- the "ranked animation candidates" analysis representation Phase 3.2
+    adds (see the Phase 3.2 brief's VLM investigation section).
+
+    Phase 3.1's original selector (`_select_single_primary`) only ever considered decisions
+    the VLM explicitly labeled "primary", discarding "secondary"/"micro" reads entirely when
+    deciding whether a plan was usable at all -- a real page where the VLM saw *some*
+    motion-worthy object but wasn't confident enough to call it "primary" would incorrectly
+    report "no PRIMARY object" even though it had real, usable signal. Ranking by
+    `(motion_type priority, confidence)` instead of requiring a literal "primary" label fixes
+    that without changing what gets picked whenever a real primary exists.
+
+    Still raises `PipelineStageError` when every decision is genuinely STATIC -- see "Static
+    Is a Valid Result" in docs/architecture.md; this ranking does not loosen that case, only
+    the case where non-STATIC signal existed but wasn't labeled "primary".
     """
-    primaries = [d for d in decisions if d.motion_type == MotionType.PRIMARY]
-    if not primaries:
+    candidates = [d for d in decisions if d.motion_type != MotionType.STATIC]
+    if not candidates:
         raise PipelineStageError(
             stage="analysis",
             input_ref=image_ref,
             detail=(
-                "VLM assigned no PRIMARY motion on this page -- an all-STATIC read is a "
-                "valid model output but an unusable one for this task (Phase 3.1 requires "
-                "one real animated object)"
+                "VLM marked every object STATIC -- an all-STATIC read is a valid model "
+                "output but an unusable one for this task (the pipeline requires one real "
+                "animated object)"
             ),
             root_cause=(
                 "either no drawn motion cue was present on the page, or the model failed to "
@@ -289,18 +325,28 @@ def _select_single_primary(
                 "labeled test fixture rather than fabricating a plan"
             ),
         )
+
+    candidates.sort(key=lambda d: (_MOTION_TYPE_RANK[d.motion_type], d.confidence), reverse=True)
+    primaries = [d for d in candidates if d.motion_type == MotionType.PRIMARY]
     if len(primaries) > 1:
-        primaries.sort(key=lambda d: d.confidence, reverse=True)
         logger.info(
             "analysis stage: VLM proposed %d PRIMARY objects; keeping highest-confidence "
-            "'%s' (%.2f), deferring the rest to STATIC per Phase 3.1 single-object scope",
+            "'%s' (%.2f), deferring the rest to STATIC per the single-object pipeline scope",
             len(primaries),
-            primaries[0].semantic_label,
-            primaries[0].confidence,
+            candidates[0].semantic_label,
+            candidates[0].confidence,
         )
-    chosen = primaries[0]
-    rest = [d for d in decisions if d is not chosen]
-    return chosen, rest
+    elif not primaries:
+        logger.info(
+            "analysis stage: VLM proposed no PRIMARY object but %d SECONDARY/MICRO "
+            "candidate(s); using the highest-ranked one ('%s', %s, confidence=%.2f) as the "
+            "plan's single animated object",
+            len(candidates),
+            candidates[0].semantic_label,
+            candidates[0].motion_type.value,
+            candidates[0].confidence,
+        )
+    return candidates
 
 
 def _checksum(image_path: Path) -> str:
@@ -321,7 +367,9 @@ def build_plan(
     task scope for this phase), so leaving other objects marked as animated in the plan would
     make the plan lie about what the rendered video will actually contain.
     """
-    chosen, rest = _select_single_primary(decisions, str(image_path))
+    ranked = _rank_candidates(decisions, str(image_path))
+    chosen = ranked[0]
+    rest = [d for d in decisions if d is not chosen]
 
     objects: list[ObjectPlan] = []
     for index, decision in enumerate(rest):
