@@ -118,16 +118,28 @@ once, by hand, treating a lucky single VLM read as if it were independent eviden
   actually supports (immutability, versioning, and honestly re-labeling the one contaminated
   sample); generalizing to a provenance taxonomy from a single real data point would be
   speculative schema growth this project's own conventions caution against.
-- No live remote GPU worker was available during this investigation (per ADR 0002/0003: remote
-  compute is disposable and never guessed at; CLAUDE.md requires an explicit URL before reaching
-  one). The brief's Experiment 3 (testing deterministic decoding — `temperature=0`,
-  `do_sample=False`, a fixed seed) was therefore not run this phase. The existing real evidence
-  already in this repository — three independent real sessions, `Qwen25VLClient.generate()`
-  pinning no seed/temperature (`docs/phase3.2-results.md`'s original finding, unchanged) — is
-  sufficient to explain the observed instability's mechanism without a new live run, but does
-  not rule out other contributing factors (prompt-adjacent sensitivity, a `transformers` version
-  change to `generate()`'s default sampling config). Confirming the exact decoding-parameter
-  boundary remains future work, not attempted here without a live worker to run it on.
+- **Resolved, same phase, after a live worker became available**: Experiment 3 (deterministic
+  decoding) was run for real on the user's live Kaggle session, in a dedicated kernel, against
+  commit `a2296bc`. Result: **`do_sample=False` (true greedy decoding) changed nothing.** The
+  checkpoint's own default `generation_config` already carries `temperature=1e-06` — sampling
+  noise was never a plausible mechanism, since the default is already numerically indistinguishable
+  from greedy. 9/9 calls to `sample_page_02` this session (3 baseline, 3 forced-greedy, 3 more
+  after a full model unload/reload) came back all-STATIC; 6/6 calls to `sample_page_01` came back
+  identically `character_hair`/PRIMARY/0.9 — both conditions were internally 100% self-consistent
+  *within* this session, matching this project's existing finding that within-session repeated
+  calls are stable. `torch`/`transformers` versions matched every other documented session
+  exactly (`2.10.0+cu128`/`5.0.0`), ruling out a library-version explanation too. **The
+  decoding-parameter hypothesis this ADR originally proposed as the leading mechanism is
+  therefore experimentally disconfirmed, not just untested.** The real cross-session flip (one
+  historical `hair` read vs. now four independent real sessions — Phase 3.3, Phase 3.3.1, and
+  two conditions of this run — all reading all-STATIC) remains real and unexplained at the
+  decoding-parameter level; the most plausible remaining mechanism is GPU floating-point/kernel
+  nondeterminism across physically different hardware allocations or sharding layouts between
+  separate Kaggle sessions (a non-reproducible reduction order shifting logits enough to flip a
+  near-boundary STATIC/non-STATIC decision on this specific page) — not confirmed, since testing
+  it would need the same image run across several *separate fresh Kaggle sessions* in one
+  investigation, which this run's single session couldn't provide. Left genuinely open, not
+  guessed at further.
 - Whether `sample_page_02` should be re-adjudicated by an actual human reviewer, or retired in
   favor of a different, unambiguous positive-control sample, is left to the user — flagged, per
   this phase's explicit operational rule, not resolved unilaterally.

@@ -593,25 +593,66 @@ showed were internally self-consistent within any one of these three sessions).
 `temperature`, and no fixed seed — this was already identified as a real, evidenced gap in
 `docs/phase3.2-results.md` (the original `sample_page_01` flip) and repeated here for
 `sample_page_02`: the model is free to sample differently across calls on byte-identical input,
-and nothing in this codebase constrains that. This is category **(1) genuine VLM
-stochasticity**, compounded by **(4) model/configuration**: the runtime never overrides
-`transformers`' default generation config to make decoding deterministic. No evidence was found
-for categories (2) prompt drift (the exact same `ANALYSIS_PROMPT` constant is reused
-byte-for-byte across all three sessions — verified by reading `plan_builder.py`'s current
-source, unchanged since Phase 3.1), (3) preprocessing differences (`_resized_for_vlm` is a pure
-function of `config.resolution`, unchanged across these sessions), (5)/(6) caching or hidden
-state (no cache layer exists anywhere in the analysis stage), or (7) an incorrect evaluation
-assumption *in the metric computation itself* — `compute_metrics` was already comparing
-predictions against stored `EvalSample` ground truth correctly (see "Architectural diagnosis"
-below for the narrower, real gap that *does* exist).
+and nothing in this codebase constrains that. Initially treated as the leading candidate
+mechanism — category **(1) genuine VLM stochasticity**, compounded by **(4)
+model/configuration** (the runtime never overrides `transformers`' default generation config to
+make decoding deterministic) — **this was directly tested live and disconfirmed; see "Addendum:
+live Experiment 3 result" below.** No evidence was found for categories (2) prompt drift (the
+exact same `ANALYSIS_PROMPT` constant is reused byte-for-byte across every session — verified by
+reading `plan_builder.py`'s current source, unchanged since Phase 3.1), (3) preprocessing
+differences (`_resized_for_vlm` is a pure function of `config.resolution`, unchanged across
+these sessions), (5)/(6) caching or hidden state (no cache layer exists anywhere in the analysis
+stage), or (7) an incorrect evaluation assumption *in the metric computation itself* —
+`compute_metrics` was already comparing predictions against stored `EvalSample` ground truth
+correctly (see "Architectural diagnosis" below for the narrower, real gap that *does* exist).
 
-**Experiment 3 (progressively freezing variables) was not run live this phase** — no remote GPU
-worker was available, and per CLAUDE.md's explicit policy this project does not guess at one.
-This is a real, disclosed limitation (see ADR 0009's "Open questions"), not a gap papered over:
-the existing real evidence is sufficient to identify the *mechanism* (unpinned decoding) without
-a new run, but does not by itself prove decoding-parameter pinning is sufficient to fully
-eliminate the instability — that remains to be confirmed against real hardware in a future
-phase, deliberately not attempted here.
+## Addendum: live Experiment 3 result (do_sample=False)
+
+Written after the section above and after this document's original Phase 3.3.2 acceptance —
+the user supplied a live Kaggle Jupyter URL specifically so Experiment 3 (deterministic
+decoding) could actually be run, closing the "not run live this phase" gap the original version
+of this section left open. Run for real: dedicated kernel (a pre-existing kernel on the same
+server, belonging to a separate, untouched session, was left running throughout), code synced
+to commit `a2296bc`, `sample_page_01.png`/`sample_page_02.png` uploaded and sha256-verified
+against the local bytes before use, real `Qwen/Qwen2.5-VL-7B-Instruct` (float16,
+`device_map="auto"` across 2×T4 — identical model/hardware profile to every prior real session).
+
+| Condition | `sample_page_01` (3 calls) | `sample_page_02` (3 calls) |
+| --- | --- | --- |
+| Baseline (checkpoint default — `do_sample=True`, `temperature=1e-06`) | usable, `character_hair` PRIMARY, confidence 0.9, 3/3 identical | all-STATIC, 3/3 |
+| Deterministic (`generation_config.do_sample=False`, true greedy) | usable, `character_hair` PRIMARY, confidence 0.9, 3/3 identical | all-STATIC, 3/3 |
+| Fresh model reload (unload + re-instantiate, same kernel/GPUs, baseline config) | not re-tested | all-STATIC, 3/3 |
+
+**`do_sample=False` changed nothing.** The checkpoint's own `generation_config` already ships
+`temperature=1e-06` — sampling noise was never a plausible mechanism, since the shipped default
+is already numerically indistinguishable from greedy decoding. All 9 `sample_page_02` calls this
+session (3 baseline + 3 forced-greedy + 3 more after a full model unload/reload) came back
+all-STATIC; all 6 `sample_page_01` calls came back identically `character_hair`/PRIMARY/0.9 —
+both conditions were internally 100% self-consistent *within* this session, consistent with this
+project's existing finding that within-session repeated calls are stable. `torch`/`transformers`
+versions matched every other documented real session exactly (`2.10.0+cu128`/`5.0.0`), ruling
+out a library-version explanation too.
+
+**Consequence: the decoding-parameter hypothesis is experimentally disconfirmed as the
+mechanism, not merely untested.** The real cross-session flip is still real — one historical
+`hair` read (Phase 3.2) vs. now **four** independent real sessions all reading all-STATIC (the
+main Phase 3.3 run, the Phase 3.3.1 re-check, and both conditions of this run) — but it cannot
+be explained by unpinned sampling. The most plausible remaining mechanism, not confirmed here,
+is GPU floating-point/kernel nondeterminism across physically different hardware allocations or
+sharding layouts between separate Kaggle sessions (a non-reproducible reduction order in
+matmul/attention kernels shifting logits enough to flip a near-boundary STATIC/non-STATIC
+decision on this specific page) — testing that would require the same image run across several
+*separate fresh Kaggle sessions* within one investigation, which a single live session can't
+provide. Left genuinely open (see ADR 0009's "Open questions"), not guessed at further. This
+does not change this phase's ground-truth conclusion: if anything, a fourth independent
+all-STATIC read further supports treating `sample_page_02` as `uncertain` rather than
+reinstating a confident `"yes"` — the file was not modified again for this addendum, since the
+stored ground truth value itself did not need to change, only the surrounding investigation
+record.
+
+The secondary goal (extending this same test to the other 3 dataset samples) was not reached —
+the primary goal's model-reload check used the full time budget available. Remains open future
+work, same as before.
 
 ## Scope: dataset-wide stability
 
@@ -714,11 +755,15 @@ truth, produce the expected opposite metric verdicts while the ground truth obje
 
 ## Remaining limitations
 
-- Experiment 3 (deterministic decoding config: `temperature=0`/`do_sample=False`/fixed seed) was
-  not run live — no remote GPU worker was available this session, and CLAUDE.md/ADR 0002/0003
-  forbid guessing at one. The mechanism (unpinned decoding in `Qwen25VLClient.generate()`) is
-  well-evidenced by three independent real sessions already in this repository, but pinning it
-  and re-confirming stability is real future work, not done here.
+- Experiment 3 (deterministic decoding config) **was** run live, after this document's original
+  Phase 3.3.2 acceptance, once the user supplied a live Kaggle URL — see "Addendum: live
+  Experiment 3 result" above. Result: `do_sample=False` changed nothing (the checkpoint's own
+  default is already `temperature=1e-06`), so unpinned decoding is **not** the mechanism behind
+  `sample_page_02`'s cross-session flip, contrary to this document's own original hypothesis.
+  The real mechanism remains open — most likely GPU floating-point/kernel nondeterminism across
+  physically different hardware allocations between separate Kaggle sessions, not confirmed.
+  Testing that specific hypothesis needs the same image run across multiple *separate fresh*
+  Kaggle sessions in one investigation, which remains real, not-yet-attempted future work.
 - The repeated-run nondeterminism harness (`scripts/run_phase3_3_evaluation.py`) still only
   targets `sample_page_01`/`sample_page_02` by default — extending it to the full dataset on a
   live worker would strengthen "Scope" above from "no *evidenced* instability elsewhere" to "no
@@ -744,9 +789,12 @@ construction, not merely by convention, and is covered by regression tests.
 
 **VLM prediction reliability: not resolved, and not in this phase's scope.** Two of five
 dataset samples (`sample_page_01`, `sample_page_02`) still have genuinely unstable underlying
-VLM reads — that is a real property of the current unpinned-decoding VLM client, honestly
-recorded as `ground_truth_uncertain` rather than hidden, but it is a *prediction*-quality
-problem, not a ground-truth-integrity one, and fixing it (decoding parameters, prompt work, or
-otherwise) is explicitly out of this phase's brief. A future phase should treat "pin/measure
-VLM decoding determinism" as a real prerequisite before leaning heavily on this dataset's
-usable-target/STATIC rate metrics for go/no-go decisions.
+VLM reads across sessions — honestly recorded as `ground_truth_uncertain` rather than hidden,
+but a *prediction*-quality problem, not a ground-truth-integrity one, and fixing it is
+explicitly out of this phase's brief. The live Experiment 3 run ruled out the leading
+hypothesis (unpinned decoding) as the cause, which means "pin the decoding config" is **not**
+a real fix a future phase can reach for here — the actual mechanism (most plausibly
+cross-session GPU/hardware nondeterminism, unconfirmed) needs real investigation across
+multiple fresh remote sessions before this dataset's usable-target/STATIC rate metrics should
+be leaned on for go/no-go decisions, and a future phase should treat identifying that mechanism
+as the real prerequisite, not assume decoding pinning above.
