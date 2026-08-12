@@ -87,6 +87,23 @@ _Z_ORDER_BY_MOTION_TYPE: dict[MotionType, int] = {
 
 
 @dataclass
+class DroppedObjectResult:
+    """A SECONDARY/MICRO object the plan proposed but that did not make it into the render
+    (Phase 7.2.1, closing an evaluation-visibility gap ADR 0010 explicitly deferred to Phase 7:
+    "extending evaluation to report on secondary/micro objects too is real future work").
+    ADR 0010's failure policy already drops these without failing the whole run (see
+    `run_pipeline`'s grounding/validation stages below) -- this type is the additive record of
+    WHICH object was dropped, at which stage, and why, so a caller (e.g.
+    `evaluation/schemas.py::ObjectAttemptOutcome`) can see past `secondary_objects`, which only
+    ever contained the objects that succeeded.
+    """
+
+    object_plan: ObjectPlan
+    failing_stage: Literal["grounding", "validation"]
+    reason: str
+
+
+@dataclass
 class ObjectRunResult:
     """Everything produced for one non-PRIMARY animated object during a run (Phase 4) -- a
 
@@ -123,6 +140,11 @@ class PipelineRunResult:
     reconstruction: ReconstructionResult | None
     render: RenderResult
     secondary_objects: list[ObjectRunResult] = field(default_factory=list)
+    dropped_objects: list[DroppedObjectResult] = field(default_factory=list)
+    """Phase 7.2.1: every SECONDARY/MICRO object the plan proposed that did NOT make it into
+    the render (grounding or validation failure) -- additive, does not change the meaning of
+    `secondary_objects` (still only the successful ones). Always empty for a single-object
+    plan or a plan whose non-PRIMARY objects all succeeded."""
 
 
 def _candidate_source(stage: str, config: PipelineConfig) -> str:
@@ -295,6 +317,8 @@ def run_pipeline(
     def _is_primary(object_id: str) -> bool:
         return object_id == primary.object_id
 
+    dropped_objects: list[DroppedObjectResult] = []
+
     with StageTimer(
         "grounding", logger, device=device, model=config.model_variants.get("grounding")
     ):
@@ -309,7 +333,7 @@ def run_pipeline(
                         grounding_client,
                         panel_bbox_px=panel_bbox_px_by_object[obj.object_id],
                     )
-                except PipelineStageError:
+                except PipelineStageError as exc:
                     if _is_primary(obj.object_id):
                         raise
                     logger.warning(
@@ -318,6 +342,11 @@ def run_pipeline(
                         obj.motion_type.value,
                         obj.object_id,
                         obj.semantic_label,
+                    )
+                    dropped_objects.append(
+                        DroppedObjectResult(
+                            object_plan=obj, failing_stage="grounding", reason=exc.detail
+                        )
                     )
         finally:
             grounding_client.unload()
@@ -381,6 +410,16 @@ def run_pipeline(
                     obj.motion_type.value,
                     obj.object_id,
                     obj.semantic_label,
+                )
+                dropped_objects.append(
+                    DroppedObjectResult(
+                        object_plan=obj,
+                        failing_stage="validation",
+                        reason="all "
+                        + str(len(attempts))
+                        + " grounding candidate(s) failed target validation: "
+                        + "; ".join(f"rank={r.candidate_rank} {r.reason}" for r in attempts),
+                    )
                 )
 
     with StageTimer(
@@ -490,4 +529,5 @@ def run_pipeline(
         reconstruction=reconstructions.get(primary.object_id),
         render=render_result,
         secondary_objects=secondary_results,
+        dropped_objects=dropped_objects,
     )

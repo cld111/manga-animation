@@ -13,7 +13,11 @@ from pydantic import ValidationError
 from manga_animation.evaluation.dataset import EvalSample, load_eval_dataset
 from manga_animation.evaluation.metrics import Rate, compute_metrics
 from manga_animation.evaluation.nondeterminism import RepeatedRunRecord, summarize_repeated_runs
-from manga_animation.evaluation.schemas import PageRunOutcome, ValidationAttemptOutcome
+from manga_animation.evaluation.schemas import (
+    ObjectAttemptOutcome,
+    PageRunOutcome,
+    ValidationAttemptOutcome,
+)
 
 # --- Rate ---------------------------------------------------------------------------------
 
@@ -345,6 +349,115 @@ def test_panel_detection_multi_panel_rate_only_reported_in_panel_mode():
     assert page_report.panel_detection_multi_panel_rate is None
     # "a" has panel_count=3 (>=2, counts); "b" has 1 (doesn't); "c" has None -> treated as 0
     assert panel_report.panel_detection_multi_panel_rate == Rate(1, 3)
+
+
+# --- Phase 7.2.1: SECONDARY/MICRO per-object reporting -------------------------------------
+#
+# Closes the evaluation gap ADR 0010 explicitly deferred to Phase 7 ("extending evaluation to
+# report on secondary/micro objects too is real future work... at Phase 7, not here"):
+# PageRunOutcome.primary_semantic_label/primary_motion_type only ever described the PRIMARY
+# object -- these tests cover the new object_outcomes list and the two render-rate metrics
+# computed from it.
+
+
+def _object_outcome(
+    motion_type: str, status: str, object_id: str = "obj_1", semantic_label: str = "cloth"
+) -> ObjectAttemptOutcome:
+    return ObjectAttemptOutcome(
+        object_id=object_id, semantic_label=semantic_label, motion_type=motion_type, status=status
+    )
+
+
+def test_page_run_outcome_defaults_to_empty_object_outcomes_and_schema_version_1():
+    """Every `PageRunOutcome` recorded before Phase 7.2.1 (no `object_outcomes`/
+    `schema_version` key in stored JSON) must load with the pre-Phase-7.2.1 default -- an empty
+    list and schema_version=1 -- not silently be treated as "this page genuinely had zero
+    SECONDARY/MICRO objects" under the new schema.
+    """
+    outcome = _completed("a")
+    assert outcome.object_outcomes == []
+    assert outcome.schema_version == 1
+
+
+def test_secondary_and_micro_object_render_rates_pool_across_pages():
+    outcomes = [
+        _completed(
+            "a",
+            schema_version=2,
+            object_outcomes=[
+                _object_outcome("secondary", "rendered", "s1"),
+                _object_outcome("secondary", "dropped", "s2"),
+                _object_outcome("micro", "rendered", "m1"),
+            ],
+        ),
+        _completed(
+            "b",
+            schema_version=2,
+            object_outcomes=[
+                _object_outcome("secondary", "rendered", "s3"),
+                _object_outcome("micro", "dropped", "m2"),
+            ],
+        ),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.secondary_object_render_rate == Rate(2, 3)  # s1, s3 rendered; s2 dropped
+    assert report.micro_object_render_rate == Rate(1, 2)  # m1 rendered; m2 dropped
+
+
+def test_secondary_object_render_rate_denominator_is_zero_with_no_object_outcomes():
+    """The common, pre-Phase-7.2.1-equivalent case (a single-PRIMARY-only plan, or every
+    outcome still at schema_version=1) must report "0/0 (n/a)", never a fabricated 0%.
+    """
+    outcomes = [_completed("a"), _failed("b", stage="grounding", detail="x")]
+    report = compute_metrics(outcomes, {})
+    assert report.secondary_object_render_rate == Rate(0, 0)
+    assert report.secondary_object_render_rate.value is None
+    assert report.micro_object_render_rate == Rate(0, 0)
+
+
+def test_object_outcomes_do_not_affect_primary_only_metrics():
+    """Adding object_outcomes to a PageRunOutcome must not change any pre-existing
+    PRIMARY-only rate -- this is a purely additive extension.
+    """
+    plain = compute_metrics([_completed("a")], {})
+    with_secondary = compute_metrics(
+        [
+            _completed(
+                "a",
+                schema_version=2,
+                object_outcomes=[_object_outcome("secondary", "rendered")],
+            )
+        ],
+        {},
+    )
+    assert plain.end_to_end_completion_rate == with_secondary.end_to_end_completion_rate
+    assert plain.usable_target_rate == with_secondary.usable_target_rate
+    assert plain.validation_acceptance_rate == with_secondary.validation_acceptance_rate
+
+
+def test_object_attempt_outcome_round_trips_through_json():
+    outcome = _completed(
+        "a",
+        schema_version=2,
+        object_outcomes=[
+            ObjectAttemptOutcome(
+                object_id="obj_2",
+                semantic_label="trailing_cloth",
+                motion_type="secondary",
+                status="dropped",
+                validation_attempts=[
+                    ValidationAttemptOutcome(
+                        candidate_rank=0, accepted=False, grounding_score=0.4, reason="no match"
+                    )
+                ],
+            )
+        ],
+    )
+    restored = PageRunOutcome.model_validate_json(outcome.model_dump_json())
+    assert restored.object_outcomes[0].object_id == "obj_2"
+    assert restored.object_outcomes[0].status == "dropped"
+    assert restored.object_outcomes[0].validation_attempts[0].reason == "no match"
+    assert restored.schema_version == 2
 
 
 # --- nondeterminism -----------------------------------------------------------------------

@@ -18,13 +18,18 @@ from manga_animation.evaluation.nondeterminism import (
     RepeatedRunRecord,
     summarize_repeated_runs,
 )
-from manga_animation.evaluation.schemas import PageRunOutcome, ValidationAttemptOutcome
+from manga_animation.evaluation.schemas import (
+    ObjectAttemptOutcome,
+    PageRunOutcome,
+    ValidationAttemptOutcome,
+)
 
 __all__ = [
     "DEFAULT_DATASET_PATH",
     "EvalSample",
     "EvaluationReport",
     "NondeterminismSummary",
+    "ObjectAttemptOutcome",
     "PageRunOutcome",
     "Rate",
     "RepeatedRunRecord",

@@ -46,6 +46,7 @@ from manga_animation.core.logging import setup_logging
 from manga_animation.evaluation import (
     EvalSample,
     NondeterminismSummary,
+    ObjectAttemptOutcome,
     PageRunOutcome,
     RepeatedRunRecord,
     ValidationAttemptOutcome,
@@ -119,6 +120,11 @@ def _run_one(
             analysis_mode=mode,
         )
     except PipelineStageError as exc:
+        # No PipelineRunResult exists on this path (run_pipeline raised before returning), so
+        # there is no visibility into which SECONDARY/MICRO objects might have been attempted
+        # -- object_outcomes stays empty here, same as any other schema_version=2 page that
+        # genuinely had none. schema_version is still bumped: this producer supports the
+        # field, it just has nothing to report for a failed run.
         return PageRunOutcome(
             sample_id=sample.sample_id,
             analysis_mode=mode,
@@ -127,6 +133,7 @@ def _run_one(
             failure_detail=exc.detail,
             panel_count=panel_count,
             panel_sources=panel_sources,
+            schema_version=2,
         )
     except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
         # the rest of the evaluation run; recorded distinctly from a classified
@@ -140,7 +147,35 @@ def _run_one(
             failure_detail=f"{type(exc).__name__}: {exc}",
             panel_count=panel_count,
             panel_sources=panel_sources,
+            schema_version=2,
         )
+
+    object_outcomes = [
+        ObjectAttemptOutcome(
+            object_id=obj.object_plan.object_id,
+            semantic_label=obj.object_plan.semantic_label,
+            motion_type=obj.object_plan.motion_type.value,
+            status="rendered",
+            validation_attempts=[
+                ValidationAttemptOutcome(
+                    candidate_rank=v.candidate_rank,
+                    accepted=v.accepted,
+                    grounding_score=v.grounding_score,
+                    reason=v.reason,
+                )
+                for v in obj.validation_attempts
+            ],
+        )
+        for obj in result.secondary_objects
+    ] + [
+        ObjectAttemptOutcome(
+            object_id=dropped.object_plan.object_id,
+            semantic_label=dropped.object_plan.semantic_label,
+            motion_type=dropped.object_plan.motion_type.value,
+            status="dropped",
+        )
+        for dropped in result.dropped_objects
+    ]
 
     return PageRunOutcome(
         sample_id=sample.sample_id,
@@ -159,6 +194,8 @@ def _run_one(
             )
             for v in result.validation_attempts
         ],
+        object_outcomes=object_outcomes,
+        schema_version=2,
     )
 
 
@@ -321,6 +358,8 @@ def main() -> None:
         )
         if r.panel_detection_multi_panel_rate is not None:
             print(f"  panel_detection_multi_panel_rate: {r.panel_detection_multi_panel_rate}")
+        print(f"  secondary_object_render_rate: {r.secondary_object_render_rate}")
+        print(f"  micro_object_render_rate: {r.micro_object_render_rate}")
     print("\n--- nondeterminism ---")
     for s in nondeterminism_summaries:
         print(

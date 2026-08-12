@@ -948,6 +948,14 @@ def test_run_pipeline_drops_a_secondary_that_fails_grounding_without_failing_the
     assert result.secondary_objects == []
     assert (tmp_path / "out" / "output.mp4").exists()  # the run still completed
 
+    # Phase 7.2.1: the drop is now visible, not just logged -- evaluation reporting needs to
+    # see WHICH object was dropped and why, not just that secondary_objects came back empty.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "ghost_object"
+    assert dropped.failing_stage == "grounding"
+    assert dropped.reason  # non-empty, human-readable
+
 
 def test_run_pipeline_drops_a_secondary_that_fails_validation_without_failing_the_run(
     page_path: Path, config, tmp_path: Path
@@ -973,6 +981,13 @@ def test_run_pipeline_drops_a_secondary_that_fails_validation_without_failing_th
     assert result.primary_object.semantic_label == "hanging_banner"
     assert result.secondary_objects == []
     assert (tmp_path / "out" / "output.mp4").exists()
+
+    # Phase 7.2.1: same visibility for a validation-stage drop.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "trailing_cloth"
+    assert dropped.failing_stage == "validation"
+    assert "rank=0" in dropped.reason
 
 
 def test_run_pipeline_still_raises_for_primary_failure_even_with_a_secondary_present(

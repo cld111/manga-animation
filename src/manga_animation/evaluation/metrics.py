@@ -115,6 +115,19 @@ class EvaluationReport:
 
     found >=2 panels / all panel-mode pages attempted. `None` for `analysis_mode="page"`
     reports, where this metric does not apply."""
+    secondary_object_render_rate: Rate
+    """Phase 7.2.1 (closes the evaluation gap ADR 0010 explicitly deferred to Phase 7): among
+
+    every `PageRunOutcome.object_outcomes` entry with `motion_type == "secondary"`, pooled
+    across every outcome in this report, the fraction with `status == "rendered"` -- i.e. of
+    every SECONDARY object the VLM proposed on an attempted page, how many actually made it
+    into the final render (grounding+validation both succeeded), vs. how many were dropped per
+    ADR 0010's non-fatal SECONDARY/MICRO failure policy. `denominator=0` (rendered as "0/0
+    (n/a)", per `Rate`) whenever every outcome in this report has `schema_version < 2` (see
+    `PageRunOutcome.schema_version`) or genuinely proposed no SECONDARY object at all -- these
+    two cases are NOT distinguished by this rate alone."""
+    micro_object_render_rate: Rate
+    """Same as `secondary_object_render_rate`, for `motion_type == "micro"`."""
 
 
 def _is_static_failure(outcome: PageRunOutcome) -> bool:
@@ -252,6 +265,12 @@ def compute_metrics(
         multi_panel = sum(1 for o in outcomes if (o.panel_count or 0) >= 2)
         panel_rate = Rate(multi_panel, n)
 
+    all_object_outcomes = [oo for o in outcomes for oo in o.object_outcomes]
+    secondary_outcomes = [oo for oo in all_object_outcomes if oo.motion_type == "secondary"]
+    micro_outcomes = [oo for oo in all_object_outcomes if oo.motion_type == "micro"]
+    secondary_rendered = sum(1 for oo in secondary_outcomes if oo.status == "rendered")
+    micro_rendered = sum(1 for oo in micro_outcomes if oo.status == "rendered")
+
     return EvaluationReport(
         analysis_mode=analysis_mode,
         sample_count=n,
@@ -268,4 +287,6 @@ def compute_metrics(
         regression_violation_count=regression_violated,
         regression_samples_checked=regression_checked,
         panel_detection_multi_panel_rate=panel_rate,
+        secondary_object_render_rate=Rate(secondary_rendered, len(secondary_outcomes)),
+        micro_object_render_rate=Rate(micro_rendered, len(micro_outcomes)),
     )
