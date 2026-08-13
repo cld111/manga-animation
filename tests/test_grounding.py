@@ -353,3 +353,45 @@ def test_ground_object_candidates_raises_with_the_region_in_the_error_detail():
 
     assert exc_info.value.stage == "grounding"
     assert "(10, 10, 50, 50)" in exc_info.value.detail
+
+
+# --- Phase 7.1.4: defensive panel_bbox_px/image consistency check ---------------------------
+#
+# ADR 0011's "Known limitations" flagged this directly: every real call site derives
+# panel_bbox_px and image from the same page_shape, so this is structurally unreachable in
+# production today -- but ground_object_candidates had no defensive check for it, only numpy's
+# silent out-of-range slice truncation. These tests protect the fix, not a redesign.
+
+
+def test_ground_object_candidates_raises_on_panel_bbox_wider_than_image():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=0, y0=0, x1=250, y1=100)  # x1 exceeds the 200-wide image
+
+    with pytest.raises(ValueError, match="inconsistent with the actual image dimensions"):
+        ground_object_candidates(
+            make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+        )
+
+
+def test_ground_object_candidates_raises_on_panel_bbox_taller_than_image():
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=0, y0=0, x1=100, y1=250)  # y1 exceeds the 200-tall image
+
+    with pytest.raises(ValueError, match="inconsistent with the actual image dimensions"):
+        ground_object_candidates(
+            make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+        )
+
+
+def test_ground_object_candidates_boundary_exact_panel_bbox_stays_valid():
+    """The ordinary, real, full-page-equivalent case (panel_bbox_px exactly matching the
+    image's own bounds, per ADR 0011's fallback_full_page/page-mode synthetic panel) must NOT
+    be rejected by the new defensive check -- only a genuinely out-of-range box should raise.
+    """
+    client = SpyGroundingClient([Detection(label="hair", score=0.9, box=(5, 5, 15, 15))])
+    panel = BBoxPx(x0=0, y0=0, x1=200, y1=200)  # exactly the image's own bounds
+
+    candidates = ground_object_candidates(
+        make_image(h=200, w=200), make_object_plan(), client, panel_bbox_px=panel
+    )
+    assert candidates[0].bbox.as_xyxy() == (5, 5, 15, 15)

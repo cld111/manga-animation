@@ -1,0 +1,387 @@
+# Phase 9 Real-World Evaluation Dataset. See src/manga_animation/evaluation/dataset.py for the
+# schema (EvalSample, reused as-is -- no parallel schema) and
+# docs/decisions/0016-phase9-realworld-evaluation.md / docs/phase9-results.md for the dataset
+# design and the real evaluation run this feeds.
+#
+# Why a separate file from configs/phase3_3_eval_dataset.yaml (the Phase 8 golden set): the
+# Phase 9 brief is explicit that the existing 7-sample golden set is "primarily designed for
+# regression/safety validation" and must not be treated as "a statistically meaningful
+# real-world quality benchmark." This file is a second, larger, characterization-focused
+# manifest -- loaded together with the golden set via
+# `manga_animation.evaluation.load_combined_eval_dataset()` for Phase 9's own reporting, never
+# merged into or duplicating the golden file itself.
+#
+# Every one of these 10 pages is a REAL manga/manhwa page (never synthetic/fabricated), from 8
+# distinct MangaDex series, all different from the 3 series every earlier phase's dataset draws
+# from ('The Skeleton Soldier Failed to Defend the Dungeon', 'Who Made Me a Princess', 'Latna
+# Saga: Survival of a Sword King') -- see scripts/fetch_phase9_realworld_pages.py for exactly
+# how each was chosen (MangaDex "Full Color" tag crossed with a genre-tag spread, then manual
+# visual review of real candidate pages, same policy the two earlier fetch scripts already
+# established).
+#
+# Ground truth provenance (see EvalSample's own module docstring and ADR 0009): every
+# animation_possible/ground_truth_uncertain/tag value below was assigned by the Claude Code
+# assistant performing DIRECT visual inspection of the actual downloaded source image against
+# the `manga-analysis` skill's STATIC vs. ANIMATED checklist (motion lines, impact lines,
+# wavy/flowing linework, deliberately-static backgrounds) -- never derived from running this
+# project's own VLM/pipeline on the image (the exact anti-pattern ADR 0009 exists to prevent)
+# and never guessed to fill a field. This is AI, not human, visual inspection -- distinct from
+# `examples/verified_action/`'s `annotation_provenance: independent_human_verification` (the
+# project owner's own direct confirmation) -- so `annotation_provenance` is deliberately left
+# unset on every sample below (matching `eval_static_dialogue`/`phase3_action_page`'s own
+# existing precedent of putting this reasoning in `notes` prose rather than claiming a
+# provenance value this dataset doesn't actually have).
+#
+# Images are NOT committed (see .gitignore's `examples/**/*.png` rule -- copyrighted
+# third-party content, re-fetchable on demand). Fetch them all before running the evaluation:
+#   uv run python scripts/fetch_phase9_realworld_pages.py    -> examples/realworld/*.png
+#
+# Dataset composition (10 samples, computed for real via
+# manga_animation.evaluation.dataset_composition -- see docs/phase9-results.md for the full
+# table): 7 confident animation_possible="yes", 1 confident "no", 2 genuinely uncertain.
+# Real, disclosed zero-coverage gaps in this file's own tags (not fabricated around): no sample
+# is tagged `geometric_difficulty_tags: [near_boundary]` or `[partially_occluded]`, and no
+# sample is tagged `motion_type_tags: [deformation]` or `potential_motion_tags:
+# [facial_feature]`. `partially_occluded`/`deformation` mirror the golden set's own two
+# disclosed gaps (`partially_occluded_object`/`scale_or_deformation` in
+# configs/phase3_3_eval_dataset.yaml) -- occlusion and deformation remain a real, unclosed gap
+# across the COMBINED dataset, not only this file. `near_boundary` is not chased here since the
+# golden set's `verified_action_1` already covers it (incidentally); `facial_feature` was not
+# found as a clear, real drawn motion cue (e.g. a blink/wink) on any candidate page reviewed
+# during curation, so it was left uncovered rather than force-fit onto a page that doesn't
+# actually show it.
+
+samples:
+  - sample_id: realworld_wind_breaker_sprint
+    image_path: examples/realworld/wind_breaker_sprint.png
+    source_citation: >
+      'Wind Breaker', MangaDex chapter id 84a8bccc-591e-4de9-b764-2954fc5b5ad8 (ch. 540),
+      page 9 of 32. See scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on
+      demand).
+    diversity_tag: sports_action
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on a real cyclist/bicycle region (either a full rider or a specific
+      part like the wheels) is a good outcome; an honest grounding/validation failure is also
+      acceptable given several plausible targets exist and this dataset does not assert which
+      single one is "the" correct choice. Not acceptable: an ACCEPT on the static narration
+      caption or an unrelated background building.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Direct visual inspection: a 3-panel vertical strip of a road-cyclist race. Every panel
+      has real drawn motion lines (near-horizontal streaks trailing the riders/background) and
+      a blurred, speed-implying background -- a textbook ANIMATED read per the manga-analysis
+      skill's "speed lines" cue, not a guess.
+    annotation_version: 1
+    scene_complexity_tags: [multiple_panels, complex_background]
+    potential_motion_tags: [character_movement, object_moving_across_scene]
+    geometric_difficulty_tags: [thin_structure]
+    motion_type_tags: [translation]
+    expected_difficulty: medium
+
+  - sample_id: realworld_wind_breaker_finish
+    image_path: examples/realworld/wind_breaker_finish.png
+    source_citation: >
+      'Wind Breaker', MangaDex chapter id 84a8bccc-591e-4de9-b764-2954fc5b5ad8 (ch. 540),
+      page 16 of 32. See scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on
+      demand).
+    diversity_tag: sports_action
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on a real cyclist/bicycle region at the finish-line moment is a good
+      outcome; an honest grounding/validation failure is also acceptable, given the extreme
+      dutch-angle composition and multiple overlapping riders make this a deliberately hard
+      geometric case. Not acceptable: an ACCEPT on the "FINISH SPRINTER!!" caption text.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Direct visual inspection: an extreme dutch-angle multi-panel finish-line composition,
+      several riders/bicycles overlapping at different rotations, dense speed-line linework
+      throughout -- a strong, unambiguous ANIMATED read, deliberately included for its real
+      geometric difficulty (overlap, rotation, thin bicycle-frame silhouettes at odd angles),
+      the same class of case Phase 8.3's real overlap-guard/mask-shape fixes were built for.
+    annotation_version: 1
+    scene_complexity_tags: [multiple_characters, multiple_panels, crowded_scene, complex_background]
+    potential_motion_tags: [character_movement, object_moving_across_scene]
+    geometric_difficulty_tags: [overlapping_objects, thin_structure, irregular_silhouette]
+    motion_type_tags: [rotation, mixed_motion]
+    expected_difficulty: hard
+
+  - sample_id: realworld_omniscient_reader_blade
+    image_path: examples/realworld/omniscient_reader_blade.png
+    source_citation: >
+      'Omniscient Reader's Viewpoint', MangaDex chapter id d3c06606-4ee7-4454-a3a7-ffdb9ecf5d26
+      (ch. 255, 'Asmodeus Part 3'), page 31 of 56. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: fantasy_weapon_effects
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on the raised sword/blade or the swirling dark-energy tendril effect
+      behind the character is a good outcome; an honest grounding/validation failure is also
+      acceptable, given the effect is stylized/abstract rather than one simple rigid object.
+      Not acceptable: an ACCEPT on the character's static face/dialogue-bubble region.
+    regression_reference: null
+    ground_truth_uncertain: false
+    honest_failure_acceptable: true
+    notes: >
+      Direct visual inspection: a single character mid-action, blade raised with a visible
+      white motion-streak trail, against a swirling purple energy-tendril background -- both a
+      weapon motion-trail and an environmental-effect cue, matching the manga-analysis skill's
+      "speed lines"/"implied trajectory" criteria directly. honest_failure_acceptable mirrors
+      this dataset's existing `phase3_action_page`/`eval_weapon_effects` precedent: the
+      swirling energy effect is not one simple, easily-prompted rigid object.
+    annotation_version: 1
+    scene_complexity_tags: [single_character, complex_background]
+    potential_motion_tags: [weapon, environmental_effect]
+    geometric_difficulty_tags: [thin_structure, irregular_silhouette]
+    motion_type_tags: [rotation, translation]
+    expected_difficulty: medium
+
+  - sample_id: realworld_angels_of_war_fleet
+    image_path: examples/realworld/angels_of_war_fleet.png
+    source_citation: >
+      'Tiejī Gāngbīng' ('Angels of War'), MangaDex chapter id
+      3addf99c-2e3b-4754-addf-3aedae292c86 (ch. 1), page 11 of 24. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: mecha_scifi
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: uncertain
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      Either an honest all-STATIC analysis result OR a validated ACCEPT on the large central
+      warship/mech (or one of the smaller fleet ships) are both acceptable outcomes for this
+      specific page, given the genuinely ambiguous ground truth below. Not acceptable: an
+      ACCEPT on the narration caption boxes.
+    regression_reference: null
+    ground_truth_uncertain: true
+    notes: >
+      Direct visual inspection: a wide sci-fi splash of a large mechanical warship over Earth
+      surrounded by dozens of smaller fleet ships, with expository narration captions ("In the
+      beginning of the 21st century..."). This is composed as an establishing/exposition
+      illustration -- no drawn speed lines, no motion trail, no implied trajectory anywhere on
+      the ship itself, which argues STATIC per the manga-analysis skill's checklist item 1
+      ("what in the drawing itself justifies motion here?"). But the subject is a spacecraft in
+      an interstellar setting, and the smaller ships' scattered, non-uniform orientations could
+      also be read as a frozen mid-flight moment -- genuinely ambiguous by direct inspection,
+      not confidently either way, so this is honestly marked uncertain rather than guessed.
+      Included specifically for its real geometric difficulty (one large, structurally complex
+      mechanical object with many holes/gaps and thin protruding parts against a busy
+      multi-object background).
+    annotation_version: 1
+    scene_complexity_tags: [complex_background, crowded_scene]
+    potential_motion_tags: [object_moving_across_scene, environmental_effect]
+    geometric_difficulty_tags: [large_rectangular_object, complex_internal_holes, thin_structure]
+    motion_type_tags: []
+    expected_difficulty: hard
+
+  - sample_id: realworld_space_monster_creature
+    image_path: examples/realworld/space_monster_creature.png
+    source_citation: >
+      'Jinhwahaneun Ujugoemul i Doetda' ('I Became an Evolving Space Monster'), MangaDex
+      chapter id 3e1fafa2-e831-4337-82d4-ecdccd5e8d6d (ch. 1), page 36 of 50. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: horror_creature
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on the flying creature (or its wings specifically) is a good outcome;
+      an honest grounding/validation failure is also acceptable, given the creature's unusual,
+      non-humanoid silhouette. Not acceptable: an ACCEPT on the static shipping-container
+      background.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Direct visual inspection: a winged robotic/organic creature flying through an industrial
+      warehouse of shipping containers, dutch-angle panel framing, real motion-line linework
+      around the wings/tail consistent with active flight -- a clear ANIMATED read (implied
+      trajectory + motion lines).
+    annotation_version: 1
+    scene_complexity_tags: [complex_background, multiple_panels]
+    potential_motion_tags: [character_movement, object_moving_across_scene, environmental_effect]
+    geometric_difficulty_tags: [thin_structure, irregular_silhouette]
+    motion_type_tags: [translation, mixed_motion]
+    expected_difficulty: medium
+
+  - sample_id: realworld_space_monster_hypersenses
+    image_path: examples/realworld/space_monster_hypersenses.png
+    source_citation: >
+      'Jinhwahaneun Ujugoemul i Doetda' ('I Became an Evolving Space Monster'), MangaDex
+      chapter id 3e1fafa2-e831-4337-82d4-ecdccd5e8d6d (ch. 1), page 16 of 50. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: horror_creature
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on the glowing swirl effect is a good outcome; an honest
+      grounding/validation failure is also acceptable and arguably likely, given the target is
+      an abstract glowing effect against a near-solid-black background with no concrete
+      object shape for a text-prompted detector to anchor on.
+    regression_reference: null
+    ground_truth_uncertain: false
+    honest_failure_acceptable: true
+    notes: >
+      Direct visual inspection: an almost entirely black panel containing one glowing
+      teal/green concentric swirl ("HYPERSENSES." caption, a sound-effect-style text mark
+      below) -- a stylized power/sense-activation effect, a real and common manga
+      environmental-effect convention, but genuinely abstract (no character, no rigid object).
+      Deliberately included as a hard grounding case: Grounding DINO is a text-prompted object
+      detector, not tuned for an abstract glow blob, so honest_failure_acceptable is set for
+      the same documented reason phase3_action_page/eval_weapon_effects already establish.
+    annotation_version: 1
+    scene_complexity_tags: [sparse_scene, simple_background]
+    potential_motion_tags: [environmental_effect]
+    geometric_difficulty_tags: [irregular_silhouette]
+    motion_type_tags: [scale, mixed_motion]
+    expected_difficulty: hard
+
+  - sample_id: realworld_reality_lie_office
+    image_path: examples/realworld/reality_lie_office.png
+    source_citation: >
+      'Real mo Tama ni wa Uso o Tsuku' ('Sometimes Even Reality Is a Lie!'), MangaDex chapter
+      id 0759f760-102d-4f36-8817-5a3fdd658ab3 (ch. 1), page 6 of 25. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: static_office_comedy
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "no"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      An honest all-STATIC analysis result (stage=analysis, no video produced) is the correct
+      outcome. A completed render (any object animated) is a semantic false positive -- direct
+      visual inspection finds no motion lines, no wind/implied-force cues on hair or clothing,
+      and no mid-action pose anywhere on this page; every panel is characters talking on a
+      train/at work.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      A second confident negative control (alongside the golden set's `eval_static_dialogue`),
+      from a different genre (office/workplace comedy) and a different, brighter full-color art
+      style -- adds real diversity to this project's semantic-false-positive measurement beyond
+      one single static-page art style.
+    annotation_version: 1
+    scene_complexity_tags: [multiple_panels, multiple_characters, simple_background]
+    potential_motion_tags: []
+    geometric_difficulty_tags: []
+    motion_type_tags: []
+    expected_difficulty: easy
+
+  - sample_id: realworld_marika_love_meter
+    image_path: examples/realworld/marika_love_meter.png
+    source_citation: >
+      'Marika-chan no Koukando wa Bukkowareteiru' ('Marika's Love Meter Malfunction'),
+      MangaDex chapter id b905083b-8fb7-4ba8-b2c1-6a02edacaa7d (ch. 1), page 6 of 26. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: slice_of_life_romance
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: uncertain
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      Either an honest all-STATIC analysis result OR a validated ACCEPT on the character's
+      waving hand/arm are both acceptable outcomes for this page, given the genuinely
+      borderline ground truth below. Not acceptable: an ACCEPT on the "Affection" UI bar
+      overlay (a diegetic game-style graphic, not part of the drawn scene's real motion).
+    regression_reference: null
+    ground_truth_uncertain: true
+    notes: >
+      Direct visual inspection: a character waving in a detailed park background (lake, trees,
+      path), no drawn motion lines/wind cues anywhere, an "Affection" progress-bar UI overlay
+      (a diegetic game-HUD element, not part of the artwork's own depicted motion). The waving
+      pose alone is a weak, ambiguous cue per the manga-analysis skill (a raised hand without
+      motion lines is usually STATIC) -- genuinely borderline rather than confidently either
+      way, so marked uncertain rather than guessed toward "no" for a clean sweep.
+    annotation_version: 1
+    scene_complexity_tags: [complex_background, single_character]
+    potential_motion_tags: [character_movement]
+    geometric_difficulty_tags: []
+    motion_type_tags: []
+    expected_difficulty: medium
+
+  - sample_id: realworld_villainess_ending_scuffle
+    image_path: examples/realworld/villainess_ending_scuffle.png
+    source_citation: >
+      'Agyeogui Ending Jugeumppun' ('Death Is the Only Ending for the Villainess'), MangaDex
+      chapter id 0f01d260-fc5f-4f32-8be0-2b82e5ebecb6 (ch. 64), page 11 of 18. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: gothic_drama_action
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on the grabbed sleeve/arm (real motion-streak linework) or the small
+      inset scuffle illustration is a good outcome; an honest grounding/validation failure is
+      also acceptable given the page mixes calm and dynamic content and the true target is
+      genuinely open. Not acceptable: an ACCEPT on the calm establishing-shot panel at the top
+      of the page (two characters walking, no motion cue there).
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Direct visual inspection: this page opens with a calm walking-establishing-shot panel
+      (no motion cue, deliberately not the target), then a "GIVE IT BACKK!!" panel with real
+      diagonal motion-streak linework on a grabbed sleeve, followed by a small inset scuffle
+      illustration (two characters struggling, raised fists, Korean sound-effect text) -- a
+      real, unambiguous ANIMATED cue later in the page, a useful within-page contrast between a
+      STATIC establishing panel and a real motion panel on the same page.
+    annotation_version: 1
+    scene_complexity_tags: [multiple_characters, multiple_panels]
+    potential_motion_tags: [character_movement, hair_or_clothing, impact_or_action_effect]
+    geometric_difficulty_tags: [overlapping_objects]
+    motion_type_tags: [translation, mixed_motion]
+    expected_difficulty: medium
+
+  - sample_id: realworld_sss_hunter_gladiator
+    image_path: examples/realworld/sss_hunter_gladiator.png
+    source_citation: >
+      'SSS-geup Jugeoya Saneun Hunter' ('SSS-Class Suicide Hunter'), MangaDex chapter id
+      839122d1-4d36-4233-a955-ee9f7ca986cd (ch. 151), page 10 of 13. See
+      scripts/fetch_phase9_realworld_pages.py (hardcoded, reproducible on demand).
+    diversity_tag: fantasy_hunter_action
+    fetch_script: scripts/fetch_phase9_realworld_pages.py
+    animation_possible: "yes"
+    expected_target_category: null
+    expected_motion_category: null
+    expected_region_note: null
+    acceptable_outcome: >
+      A validated ACCEPT on the raised sword, the striking gladiator, or the impact-effect
+      burst are all good outcomes; an honest grounding/validation failure is also acceptable
+      given several plausible real targets exist and this dataset does not assert which single
+      one is "the" correct choice. Not acceptable: an ACCEPT on the static spectator/statue
+      background.
+    regression_reference: null
+    ground_truth_uncertain: false
+    notes: >
+      Direct visual inspection: a colosseum gladiator-combat scene -- a raised sword, a
+      radiating white impact-line burst at the moment of a strike, blood-red impact marks, and
+      dynamic diagonal fighter poses -- a clear, textbook ANIMATED read per the manga-analysis
+      skill's "impact/focus lines" criterion (marking the peak moment of an action).
+    annotation_version: 1
+    scene_complexity_tags: [multiple_characters, complex_background, crowded_scene]
+    potential_motion_tags: [weapon, impact_or_action_effect, character_movement]
+    geometric_difficulty_tags: [thin_structure, overlapping_objects]
+    motion_type_tags: [rotation, translation, mixed_motion]
+    expected_difficulty: hard

@@ -18,7 +18,8 @@ import pytest
 from PIL import Image, ImageDraw
 
 from manga_animation.pipeline.types import FrameSequence, PipelineStageError
-from manga_animation.rendering import render
+from manga_animation.rendering import compute_loop_metrics, render
+from manga_animation.rendering.encode import _ssim
 
 
 def _resolve_test_ffmpeg() -> str | None:
@@ -64,6 +65,48 @@ def _moving_circle_sequence(
     return FrameSequence(frames=frames, fps=fps)
 
 
+# --- compute_loop_metrics (pure function, no ffmpeg needed) ------------------------------
+
+
+def test_compute_loop_metrics_returns_none_below_three_frames():
+    frames = _moving_circle_sequence(count=2).frames
+    assert compute_loop_metrics(frames) is None
+
+
+def test_compute_loop_metrics_passes_both_checks_for_a_genuine_periodic_sequence():
+    frames = _moving_circle_sequence(count=24, periodic=True).frames
+    metrics = compute_loop_metrics(frames)
+    assert metrics is not None
+    assert metrics.wrap_step_within_2x_ordinary is True
+    assert metrics.wrap_ssim_within_tolerance is True
+    assert metrics.seamless is True
+    # the wrap step is one more identical-magnitude motion step, same as any ordinary step --
+    # structurally, it should score close to the ordinary step's own SSIM, not near zero.
+    assert metrics.wrap_step_ssim == pytest.approx(metrics.ordinary_adjacent_step_ssim, abs=0.1)
+
+
+def test_compute_loop_metrics_flags_both_checks_for_a_non_periodic_sequence():
+    frames = _moving_circle_sequence(count=24, periodic=False).frames
+    metrics = compute_loop_metrics(frames)
+    assert metrics is not None
+    assert metrics.wrap_step_within_2x_ordinary is False
+    assert metrics.wrap_ssim_within_tolerance is False
+    assert metrics.seamless is False
+
+
+def test_ssim_is_one_for_identical_frames():
+    frame = _moving_circle_sequence(count=1).frames[0]
+    assert _ssim(frame, frame) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_ssim_is_low_for_structurally_unrelated_frames():
+    rng = np.random.default_rng(0)
+    a = np.zeros((64, 64, 3), dtype=np.uint8)
+    a[16:48, 16:48] = 255  # a solid square
+    b = rng.integers(0, 256, size=(64, 64, 3), dtype=np.uint8)  # unstructured noise
+    assert _ssim(a, b) < 0.3
+
+
 # --- codec / precondition guards (no ffmpeg needed) --------------------------------------
 
 
@@ -101,6 +144,8 @@ def test_render_reports_seamless_loop_for_a_periodic_sequence(tmp_path: Path):
     frames = _moving_circle_sequence(count=24, periodic=True)
     result = render(frames, tmp_path / "out.mp4")
     assert result.seamless_loop_verified is True
+    assert result.loop_metrics is not None
+    assert result.loop_metrics.seamless is True
 
 
 @requires_ffmpeg
@@ -108,6 +153,8 @@ def test_render_reports_non_seamless_loop_for_a_non_periodic_sequence(tmp_path: 
     frames = _moving_circle_sequence(count=24, periodic=False)
     result = render(frames, tmp_path / "out.mp4")
     assert result.seamless_loop_verified is False
+    assert result.loop_metrics is not None
+    assert result.loop_metrics.seamless is False
 
 
 @requires_ffmpeg

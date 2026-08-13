@@ -247,6 +247,38 @@ class TestSeamlessLoopTiming:
         plan = self._plan_with_speed(base_plan_kwargs, speed=1.5, loop_mode="ping_pong")
         assert plan.objects[0].motion.speed == 1.5
 
+    def test_non_integer_speed_seamless_cycle_error_does_not_suggest_once_hold(
+        self, base_plan_kwargs
+    ):
+        # once_hold cannot actually satisfy the seamless-loop promise (it holds its end
+        # state rather than returning to rest), so the error guiding users away from a
+        # non-integer cycle speed must not present it as an equivalent fix to ping_pong.
+        with pytest.raises(ValidationError) as exc_info:
+            self._plan_with_speed(base_plan_kwargs, speed=1.5)
+        message = str(exc_info.value)
+        assert "once_hold" not in message
+        assert "ping_pong" in message
+
+    def test_once_hold_with_seamless_loop_is_rejected(self, base_plan_kwargs):
+        # once_hold sweeps to its end state and holds there forever; a fresh loop
+        # iteration restarts the object at rest, so this combination always produces a
+        # discontinuity at the loop boundary, regardless of speed.
+        with pytest.raises(ValidationError, match="always breaks the seamless-loop boundary"):
+            self._plan_with_speed(base_plan_kwargs, speed=1.0, loop_mode="once_hold")
+
+    def test_once_hold_with_non_integer_speed_and_seamless_loop_is_rejected(self, base_plan_kwargs):
+        # The once_hold rejection is independent of the (cycle-only) integer-speed rule —
+        # it must trigger even when speed alone would have been fine.
+        with pytest.raises(ValidationError, match="always breaks the seamless-loop boundary"):
+            self._plan_with_speed(base_plan_kwargs, speed=1.5, loop_mode="once_hold")
+
+    def test_once_hold_is_allowed_when_not_seamless(self, base_plan_kwargs):
+        plan = self._plan_with_speed(
+            base_plan_kwargs, speed=1.0, seamless=False, loop_mode="once_hold"
+        )
+        assert plan.objects[0].motion.timing.loop_mode == "once_hold"
+        assert plan.loop.seamless is False
+
     def test_motion_window_exceeding_loop_duration_is_rejected(self, base_plan_kwargs):
         obj = ObjectPlan(
             object_id="flag",

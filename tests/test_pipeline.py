@@ -252,6 +252,25 @@ class RecordingGroundingClient:
         self.unloaded = True
 
 
+def _region_mask(h: int, w: int, box) -> np.ndarray:
+    """A full-image-shape uint8 0/255 mask: a diamond inscribed in `box`, touching each of its
+
+    4 edges at exactly its midpoint -- same tight-bbox-equals-`box` property a solid rectangle
+    fill has, but without a solid rectangle's 100%-of-every-edge touch fraction. Phase 8.3:
+    `segmentation/segment.py::_validate_mask_shape` now rejects real masks shaped like that (see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md) -- a raw rectangle fill here
+    would trip that same real check, so every fake segmentation mask in this test module needs a
+    shape an actual SAM output could plausibly have.
+    """
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cx, cy = (box.x0 + box.x1 - 1) / 2.0, (box.y0 + box.y1 - 1) / 2.0
+    ax, ay = max((box.x1 - box.x0) / 2.0, 1e-9), max((box.y1 - box.y0) / 2.0, 1e-9)
+    yy, xx = np.mgrid[box.y0 : box.y1, box.x0 : box.x1]
+    local = (np.abs(xx - cx) / ax + np.abs(yy - cy) / ay) <= 1.0
+    mask[box.y0 : box.y1, box.x0 : box.x1] = local.astype(np.uint8) * 255
+    return mask
+
+
 class FakeSegmentationClient:
     model_id = "fake-sam2.1"
 
@@ -260,8 +279,37 @@ class FakeSegmentationClient:
 
     def segment(self, image, box) -> list[MaskCandidate]:
         h, w = image.shape[0], image.shape[1]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        mask[box.y0 : box.y1, box.x0 : box.x1] = 255
+        return [MaskCandidate(mask=_region_mask(h, w, box), iou_score=0.9)]
+
+    def unload(self) -> None:
+        pass
+
+
+class MaskShapeControlledSegmentationClient:
+    """Like `FakeSegmentationClient`, but returns a one-sided mask (Phase 8.3's
+
+    `segmentation/segment.py::_validate_mask_shape` real, evidenced "hugs one bbox edge, but not
+    the opposite one" rejection case -- a diamond silhouette unioned with a solid strip along
+    the box's own left third, matching the real downloaded SAM mask's LEFT=45.5%/RIGHT=0.56%
+    asymmetry) for any box in `bad_boxes`, and a realistic diamond mask (`_region_mask`) for
+    everything else -- lets a test control exactly which object gets a defective real mask
+    shape.
+    """
+
+    model_id = "fake-sam2.1"
+
+    def __init__(self, bad_boxes: set[tuple[int, int, int, int]]):
+        self._bad_boxes = bad_boxes
+
+    def load(self) -> None:
+        pass
+
+    def segment(self, image, box) -> list[MaskCandidate]:
+        h, w = image.shape[0], image.shape[1]
+        mask = _region_mask(h, w, box)
+        if box.as_xyxy() in self._bad_boxes:
+            strip_x1 = box.x0 + max(1, (box.x1 - box.x0) // 3)
+            mask[box.y0 : box.y1, box.x0 : strip_x1] = 255
         return [MaskCandidate(mask=mask, iou_score=0.9)]
 
     def unload(self) -> None:
@@ -683,10 +731,18 @@ def test_run_pipeline_analysis_mode_panel_still_rejects_semantically_wrong_candi
     assert not (tmp_path / "out" / "output.mp4").exists()
 
 
-def test_run_pipeline_analysis_mode_defaults_to_page_level(page_path: Path, config, tmp_path: Path):
-    """`analysis_mode` defaults to `"page"` -- every pre-existing Phase 3.1/3.2 caller/test
+def test_run_pipeline_analysis_mode_defaults_to_panel_level(
+    page_path: Path, config, tmp_path: Path
+):
+    """`analysis_mode` defaults to `"panel"` as of Phase 10 (see
 
-    (which never passes `analysis_mode`) is unaffected by this phase (acceptance criterion #2).
+    docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md) -- real Phase 9
+    evidence (docs/phase9-results.md section 5.3: end_to_end_completion_rate 20%->60%,
+    grounding_success_rate 50%->100%, ERROR outcomes 5->0) and a real Phase 9/10 mid-cycle
+    visual defect traced to page-level analysis specifically (`realworld_marika_love_meter`,
+    docs/phase10-results.md) together superseded Phase 3.3's original "default stays
+    page-level" acceptance criterion. Every pre-existing caller/test that explicitly passes
+    `analysis_mode="page"` is unaffected (see the sibling test below).
     """
     with pytest.raises(PipelineStageError) as excinfo:
         run_pipeline(
@@ -698,10 +754,33 @@ def test_run_pipeline_analysis_mode_defaults_to_page_level(page_path: Path, conf
             reconstruction_client=FakeReconstructionClient(),
             out_dir=tmp_path / "out",
         )
-    # the page-level all-STATIC error message (not a panel-aware one) proves the default path
-    # was actually taken
+    # the panel-aware all-STATIC error message ("...across every analyzed panel", not the plain
+    # page-level one) proves the default path actually taken was panel-aware analysis
     assert excinfo.value.stage == "analysis"
-    assert "every object STATIC" in excinfo.value.detail
+    assert "every object STATIC across every analyzed panel" in excinfo.value.detail
+
+
+def test_run_pipeline_analysis_mode_page_still_available_explicitly(
+    page_path: Path, config, tmp_path: Path
+):
+    """`analysis_mode="page"` (Phase 3.1/3.2's original default) remains fully available and
+
+    behaviorally unchanged for any caller that asks for it explicitly -- only the *default*
+    changed in Phase 10, not the page-level path itself.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_static_decision(), _static_decision("other")]),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+            analysis_mode="page",
+        )
+    assert excinfo.value.stage == "analysis"
+    assert excinfo.value.detail.startswith("VLM marked every object STATIC --")
 
 
 # --- controlled-fallback plan override (Phase 3.1 failure policy escape hatch) -------------
@@ -948,6 +1027,14 @@ def test_run_pipeline_drops_a_secondary_that_fails_grounding_without_failing_the
     assert result.secondary_objects == []
     assert (tmp_path / "out" / "output.mp4").exists()  # the run still completed
 
+    # Phase 7.2.1: the drop is now visible, not just logged -- evaluation reporting needs to
+    # see WHICH object was dropped and why, not just that secondary_objects came back empty.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "ghost_object"
+    assert dropped.failing_stage == "grounding"
+    assert dropped.reason  # non-empty, human-readable
+
 
 def test_run_pipeline_drops_a_secondary_that_fails_validation_without_failing_the_run(
     page_path: Path, config, tmp_path: Path
@@ -973,6 +1060,13 @@ def test_run_pipeline_drops_a_secondary_that_fails_validation_without_failing_th
     assert result.primary_object.semantic_label == "hanging_banner"
     assert result.secondary_objects == []
     assert (tmp_path / "out" / "output.mp4").exists()
+
+    # Phase 7.2.1: same visibility for a validation-stage drop.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "trailing_cloth"
+    assert dropped.failing_stage == "validation"
+    assert "rank=0" in dropped.reason
 
 
 def test_run_pipeline_still_raises_for_primary_failure_even_with_a_secondary_present(
@@ -1036,12 +1130,14 @@ def test_run_pipeline_multi_object_bbox_and_mask_are_correctly_associated_per_ob
     assert secondary.grounding.bbox.as_xyxy() == box_secondary
 
     # Each object's mask is populated only inside ITS OWN box and is exactly zero inside
-    # the OTHER object's box.
+    # the OTHER object's box. `FakeSegmentationClient` fills a diamond inscribed in its box
+    # (Phase 8.3, not a solid rectangle -- see `_region_mask`'s docstring), so "populated
+    # inside its own box" is `.any()`, not `.all()`.
     px0, py0, px1, py1 = box_primary
     sx0, sy0, sx1, sy1 = box_secondary
-    assert result.segmentation.mask[py0:py1, px0:px1].all()
+    assert result.segmentation.mask[py0:py1, px0:px1].any()
     assert not result.segmentation.mask[sy0:sy1, sx0:sx1].any()
-    assert secondary.segmentation.mask[sy0:sy1, sx0:sx1].all()
+    assert secondary.segmentation.mask[sy0:sy1, sx0:sx1].any()
     assert not secondary.segmentation.mask[py0:py1, px0:px1].any()
 
 
@@ -1091,6 +1187,11 @@ def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loo
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
         out_dir=out_dir,
+        # Explicit, not the (Phase 10) default: FakeVLMClient returns the same canned
+        # `decisions` regardless of which panel it's asked about, so panel-mode's one-call-
+        # per-detected-panel behavior would pool duplicate objects across arbitrary panel_ids
+        # -- a fixture-simplification mismatch, not something this test is meant to exercise.
+        analysis_mode="page",
     )
     primary_motion = result.primary_object.motion
     secondary_motion = result.secondary_objects[0].object_plan.motion
@@ -1127,6 +1228,219 @@ def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loo
     # neither did) -- at least one frame differs from frame 0 within its own padded region.
     assert any(not np.array_equal(f[a_region], frames[0][a_region]) for f in frames[1:])
     assert any(not np.array_equal(f[b_region], frames[0][b_region]) for f in frames[1:])
+
+
+def test_run_pipeline_drops_a_secondary_object_whose_mask_overlaps_an_already_accepted_one(
+    config, tmp_path: Path
+):
+    """Phase 8.3, Defect A regression: `verified_action_1`'s real "duplicate silhouette"
+
+    ghost was traced to two independently-accepted SECONDARY `character_hair` objects whose
+    masks substantially overlapped, each animated with its own MotionSpec -- invisible at
+    rest, a visible double-exposure once their motions diverged (see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md). This is the exact invariant
+    the fix (`_drop_overlapping_secondary_objects`) protects: two SECONDARY objects whose
+    real segmentation masks overlap far above `_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION` must
+    never both reach the render -- the second one is dropped instead, non-fatally.
+    """
+    box_primary = (110, 130, 160, 200)  # "raised_hand" -- ROTATE, does not overlap either hair box
+    box_hair_left = (10, 10, 60, 90)  # "left_hair" -> TRANSLATE (contains "hair")
+    box_hair_right = (15, 15, 58, 88)  # "right_hair" -- nested almost entirely inside the above
+
+    decisions = [
+        _primary_decision("raised_hand"),
+        _secondary_decision("left_hair"),
+        _secondary_decision("right_hair"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"raised_hand": box_primary, "left_hair": box_hair_left, "right_hair": box_hair_right}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    # The run itself still succeeds -- an overlap conflict between two SECONDARY objects is a
+    # non-fatal drop, exactly like a grounding/validation failure for a non-PRIMARY object.
+    assert result.render.output_path.exists()
+    assert result.primary_object.semantic_label == "raised_hand"
+
+    # Exactly one of the two overlapping hair objects made it into the render...
+    assert len(result.secondary_objects) == 1
+    kept_label = result.secondary_objects[0].object_plan.semantic_label
+    assert kept_label == "left_hair"  # first-encountered-in-plan-order wins, deterministically
+
+    # ...and the other was dropped, attributed to this exact new reason, not silently lost.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "right_hair"
+    assert dropped.failing_stage == "segmentation"
+    assert "overlaps" in dropped.reason
+
+
+def test_run_pipeline_keeps_two_secondary_objects_with_genuinely_distinct_masks(
+    config, tmp_path: Path
+):
+    """Negative control for the overlap guard above: two real SECONDARY objects whose masks
+
+    do NOT meaningfully overlap must both survive -- the fix must not become an accidental cap
+    on multi-object rendering in general (ADR 0010's core Phase 4 guarantee).
+    """
+    box_primary = (10, 10, 60, 90)
+    box_hair = (70, 10, 110, 60)  # "trailing_cloth" default label -- disjoint from box_hand
+    box_hand = (70, 130, 110, 190)  # "raised_hand" -- disjoint from box_hair too
+
+    decisions = [
+        _primary_decision("character_hair"),
+        _secondary_decision("trailing_cloth"),
+        _secondary_decision("raised_hand"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "trailing_cloth": box_hair, "raised_hand": box_hand}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert len(result.secondary_objects) == 2
+    assert result.dropped_objects == []
+
+
+def test_run_pipeline_keeps_two_secondary_objects_whose_bboxes_intersect_but_masks_do_not(
+    config, tmp_path: Path
+):
+    """Stronger negative control than the one above (found by independent review): the
+
+    previous negative control uses fully disjoint bboxes, which short-circuits at
+    `_bbox_intersects` and never exercises the actual pixel-overlap arithmetic in
+    `_mask_overlap_fraction`. Here `box_hair`/`box_hand`'s bboxes DO intersect (a real 10x10
+    corner overlap), but `_region_mask`'s diamond shape tapers to a point at each bbox corner,
+    so the actual mask intersection in that corner is 0 -- both objects must still survive.
+    """
+    box_primary = (10, 10, 60, 90)
+    box_hair = (70, 10, 120, 90)  # "trailing_cloth" -- bbox-disjoint from box_hand
+    box_hand = (110, 80, 160, 160)  # "raised_hand" -- bbox INTERSECTS box_hair at (110-120, 80-90)
+
+    decisions = [
+        _primary_decision("character_hair"),
+        _secondary_decision("trailing_cloth"),
+        _secondary_decision("raised_hand"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "trailing_cloth": box_hair, "raised_hand": box_hand}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert len(result.secondary_objects) == 2
+    assert result.dropped_objects == []
+
+
+def test_run_pipeline_raises_stage_segmentation_when_primary_mask_hugs_a_bbox_edge(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 8.3, Defect B regression: a real SAM mask that hugs one edge of its own tight
+
+    bbox (see `test_segment_object_raises_on_a_mask_that_hugs_one_bbox_edge` for the real
+    evidence) is exactly the shape traced to `phase3_action_page`'s real "vertical seam"
+    defect -- when that shape lands on the PRIMARY object, the run must fail outright (stage=
+    "segmentation"), the same hard-failure policy every other PRIMARY-stage defect already
+    gets, rather than silently rendering the defective video.
+    """
+    box_primary = (10, 10, 60, 90)
+    grounding_client = FakeGroundingClient(box=box_primary)
+    segmentation_client = MaskShapeControlledSegmentationClient(bad_boxes={box_primary})
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_primary_decision()]),
+            grounding_client=grounding_client,
+            segmentation_client=segmentation_client,
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert exc_info.value.stage == "segmentation"
+    assert "hugs" in exc_info.value.detail
+
+
+def test_run_pipeline_drops_a_secondary_whose_mask_hugs_a_bbox_edge_without_failing_the_run(
+    config, tmp_path: Path
+):
+    """Same real defect shape as above, but on a SECONDARY object -- must be dropped
+
+    non-fatally (this is the pre-existing orchestration gap Phase 8.3 also found and fixed: the
+    segmentation stage's per-object loop previously had no try/except at all, so a SECONDARY's
+    segmentation failure used to fail the WHOLE run, contradicting this module's own documented
+    policy).
+    """
+    box_primary = (10, 10, 60, 90)
+    box_secondary = (70, 100, 110, 150)  # "raised_hand" -- gets the defective mask shape
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "raised_hand": box_secondary}
+    )
+    segmentation_client = MaskShapeControlledSegmentationClient(bad_boxes={box_secondary})
+
+    decisions = [_primary_decision("character_hair"), _secondary_decision("raised_hand")]
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=segmentation_client,
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert result.render.output_path.exists()
+    assert result.secondary_objects == []
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "raised_hand"
+    assert dropped.failing_stage == "segmentation"
+    assert "hugs" in dropped.reason
 
 
 def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
@@ -1217,6 +1531,293 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
         reconstruction_masks_by_object_id[secondary.object_plan.object_id],
         secondary.segmentation.mask,
     )
+
+
+# --- Phase 7.1.1: multi-object E2E encode/decode regression --------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_multi_object_e2e_encode_decode_regression(config, tmp_path: Path):
+    """Phase 7.1.1: a deterministic multi-object scenario through the REAL render/encode path,
+    decoded back from the actual .mp4 on disk (not the intermediate frame PNGs, and not a
+    mocked render) -- extends
+    `test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loop`'s coverage
+    (which only checks the pre-encode frame PNGs) with a genuine decode-verification pass,
+    matching what a real evaluation/QA consumer would actually observe. Fake VLM/grounding/
+    segmentation/reconstruction clients; real animation/compositing/rendering/ffmpeg encode
+    and a real `cv2.VideoCapture` decode. No GPU needed.
+    """
+    import cv2
+
+    width, height = 200, 220
+    box_primary = (10, 10, 60, 90)  # "character_hair" -> TRANSLATE (_MOTION_HEURISTICS)
+    box_secondary = (110, 130, 160, 200)  # "raised_hand" -> ROTATE (_MOTION_HEURISTICS)
+    static_box = (10, 130, 60, 200)  # touched by neither object -- must stay unchanged
+    red = (200, 30, 30)
+    blue = (30, 30, 200)
+    green = (30, 180, 30)
+
+    image = np.full((height, width, 3), (240, 240, 245), dtype=np.uint8)
+    image[box_primary[1] : box_primary[3], box_primary[0] : box_primary[2]] = red
+    image[box_secondary[1] : box_secondary[3], box_secondary[0] : box_secondary[2]] = blue
+    image[static_box[1] : static_box[3], static_box[0] : static_box[2]] = green
+    page_path = tmp_path / "two_color_page.png"
+    Image.fromarray(image).save(page_path)
+
+    decisions = [_primary_decision("character_hair"), _secondary_decision("raised_hand")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "raised_hand": box_secondary}
+    )
+
+    out_dir = tmp_path / "out"
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+        # Explicit, not the (Phase 10) default -- see the sibling color-bleed test's own
+        # comment for why: FakeVLMClient isn't panel-crop-aware.
+        analysis_mode="page",
+    )
+
+    # -- successful render, expected frame count/resolution -----------------------------------
+    assert result.render.output_path.exists()
+    assert result.render.frame_count == result.plan.loop.frame_count
+    assert result.render.resolution == (width, height)
+
+    # -- seamless loop verification ------------------------------------------------------------
+    assert result.render.seamless_loop_verified is True
+
+    # -- object identity preservation ----------------------------------------------------------
+    assert result.primary_object.semantic_label == "character_hair"
+    assert len(result.secondary_objects) == 1
+    assert result.secondary_objects[0].object_plan.semantic_label == "raised_hand"
+    assert result.secondary_objects[0].object_plan.object_id != result.primary_object.object_id
+
+    # -- decode the ACTUAL encoded .mp4 for real, independent of render()'s own internal
+    # validation, to prove the file on disk really contains what's expected ------------------
+    cap = cv2.VideoCapture(str(result.render.output_path))
+    decoded_frames = []
+    ok, frame = cap.read()
+    while ok:
+        decoded_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        ok, frame = cap.read()
+    cap.release()
+    assert len(decoded_frames) == result.render.frame_count
+
+    pad = 15  # see test_run_pipeline_multi_object_no_color_bleed... for why this is generous
+    # but still leaves a clear gap between the two padded regions.
+
+    def _padded(box: tuple[int, int, int, int]) -> tuple[slice, slice]:
+        x0, y0, x1, y1 = box
+        return (
+            slice(max(0, y0 - pad), min(height, y1 + pad)),
+            slice(max(0, x0 - pad), min(width, x1 + pad)),
+        )
+
+    def _contains_color(region: np.ndarray, color: tuple[int, int, int], atol: int = 12) -> bool:
+        return bool(np.any(np.all(np.abs(region.astype(int) - np.array(color)) <= atol, axis=-1)))
+
+    a_region, b_region = _padded(box_primary), _padded(box_secondary)
+    sx0, sy0, sx1, sy1 = static_box
+    for i, frame in enumerate(decoded_frames):
+        # -- static-region preservation (H.264 is lossy -- a flat solid patch stays close to
+        # its source color, not bit-exact; a real compositing bug would show a gross drift,
+        # not a small quantization delta) ------------------------------------------------------
+        static_patch = frame[sy0:sy1, sx0:sx1].astype(int)
+        assert np.abs(static_patch - np.array(green)).mean() < 8, (
+            f"frame {i}: static region drifted from its source color -- possible "
+            "compositing/reconstruction leak into an untouched region"
+        )
+        # -- no cross-object color/mask contamination -------------------------------------------
+        assert not _contains_color(frame[a_region], blue), f"frame {i}: blue leaked into A's region"
+        assert not _contains_color(frame[b_region], red), f"frame {i}: red leaked into B's region"
+
+    # Sanity: both objects actually moved (this test would be vacuous otherwise).
+    assert any(
+        not np.array_equal(f[a_region], decoded_frames[0][a_region]) for f in decoded_frames[1:]
+    )
+    assert any(
+        not np.array_equal(f[b_region], decoded_frames[0][b_region]) for f in decoded_frames[1:]
+    )
+
+
+# --- Phase 7.1.2: whole-pipeline determinism regression -------------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_is_deterministic_for_identical_fake_inputs(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 7.1.2: identical deterministic/fake inputs through the WHOLE orchestration path
+    (analysis -> grounding -> validation -> segmentation -> animation -> reconstruction ->
+    compositing -> rendering) must produce byte-identical composited frames, run to run.
+
+    This tests DETERMINISTIC PIPELINE CODE ONLY -- every client here is a fake, deterministic
+    stand-in for a real model. It says nothing about, and does not attempt to claim, real VLM
+    determinism -- see docs/decisions/0009-evaluation-ground-truth-integrity.md's real,
+    opposite finding (Qwen2.5-VL is NOT reproducibly deterministic run to run on live GPU
+    hardware, even with forced-greedy decoding) -- that finding is untouched by this test.
+    """
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    boxes_by_label = {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+
+    def _run(out_dir: Path) -> PipelineRunResult:
+        return run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(list(decisions)),
+            grounding_client=MultiObjectFakeGroundingClient(dict(boxes_by_label)),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=out_dir,
+        )
+
+    result_a = _run(tmp_path / "run_a")
+    result_b = _run(tmp_path / "run_b")
+
+    # Plan-level determinism -- not just pixels.
+    assert result_a.primary_object.semantic_label == result_b.primary_object.semantic_label
+    assert result_a.primary_object.motion == result_b.primary_object.motion
+    assert result_a.grounding.bbox.as_xyxy() == result_b.grounding.bbox.as_xyxy()
+    assert len(result_a.secondary_objects) == len(result_b.secondary_objects) == 1
+    assert (
+        result_a.secondary_objects[0].object_plan.motion
+        == result_b.secondary_objects[0].object_plan.motion
+    )
+
+    # Pixel-level determinism -- the actual composited frame sequence written before encoding.
+    frames_a = sorted((tmp_path / "run_a" / "frames").glob("frame_*.png"))
+    frames_b = sorted((tmp_path / "run_b" / "frames").glob("frame_*.png"))
+    assert len(frames_a) == len(frames_b) == result_a.plan.loop.frame_count
+    for fa, fb in zip(frames_a, frames_b, strict=True):
+        arr_a = np.asarray(Image.open(fa).convert("RGB"))
+        arr_b = np.asarray(Image.open(fb).convert("RGB"))
+        np.testing.assert_array_equal(arr_a, arr_b)
+
+
+# --- Phase 7.1.3: panel-aware regression on real phase3_action_page.png geometry ------------
+
+_PHASE3_ACTION_PAGE = Path(__file__).resolve().parents[1] / "examples" / "phase3_action_page.png"
+
+requires_phase3_action_page = pytest.mark.skipif(
+    not _PHASE3_ACTION_PAGE.exists(),
+    reason=(
+        "examples/phase3_action_page.png is not present locally -- panel-aware real-geometry "
+        "regression skipped, not fabricated (see docs/decisions/0002-local-canonical-source.md)"
+    ),
+)
+
+
+@requires_ffmpeg
+@requires_phase3_action_page
+def test_run_pipeline_panel_aware_regression_on_real_action_page_geometry(config, tmp_path: Path):
+    """Phase 7.1.3: deterministic regression coverage using `phase3_action_page.png`'s REAL
+    720x5062 dimensions and REAL detected panel geometry (`analysis/panels.py::detect_panels`,
+    no VLM call) through the panel-aware grounding path (ADR 0011) -- fake VLM/grounding/
+    segmentation/reconstruction clients, but real panel detection and real localized CV
+    rendering against this project's real extreme-aspect-ratio evaluation page (the same page
+    ADR 0011's own live-GPU evidence used).
+    """
+    from manga_animation.analysis.panels import detect_panels
+    from manga_animation.pipeline.types import bbox_px_to_normalized
+    from manga_animation.schemas.animation_plan import (
+        AnimationPlan,
+        Easing,
+        LoopSpec,
+        MotionSpec,
+        MotionType,
+        ObjectPlan,
+        PanelPlan,
+        PivotSpec,
+        SourceImage,
+        TransformKind,
+    )
+
+    image = np.asarray(Image.open(_PHASE3_ACTION_PAGE).convert("RGB"))
+    height, width = image.shape[0], image.shape[1]
+    # Documents the real, known geometry this regression targets (see ADR 0011's evidence table).
+    assert (width, height) == (720, 5062)
+
+    real_panels = detect_panels(image)
+    assert len(real_panels) >= 1  # the real detector must find at least the whole-page fallback
+
+    # Prefer a real detected gutter panel over the degenerate whole-page fallback when one
+    # exists (matching ADR 0011's own real live-evidence panel, panel_01) -- falls back to
+    # whatever detect_panels actually returns if this page's real detector output ever changes.
+    gutter_panels = [p for p in real_panels if p.source == "gutter_xy_cut"]
+    target_panel = gutter_panels[1] if len(gutter_panels) > 1 else real_panels[0]
+    assert target_panel.bbox.width > 0 and target_panel.bbox.height > 0
+
+    panel_bbox_norm = bbox_px_to_normalized(
+        target_panel.bbox, page_width=width, page_height=height
+    )
+    plan = AnimationPlan(
+        source=SourceImage(path=str(_PHASE3_ACTION_PAGE), width=width, height=height),
+        panels=[PanelPlan(panel_id="real_panel", bbox=panel_bbox_norm)],
+        objects=[
+            ObjectPlan(
+                object_id="obj_weapon",
+                panel_id="real_panel",
+                semantic_label="weapon",
+                confidence=0.9,
+                motion_type=MotionType.PRIMARY,
+                motion=MotionSpec(
+                    transform_kind=TransformKind.ROTATE,
+                    amplitude=8.0,
+                    speed=1.0,
+                    easing=Easing.SINE,
+                    pivot=PivotSpec(x=0.5, y=1.0, reference="object_bbox"),
+                ),
+            )
+        ],
+        loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+    )
+
+    # A small, in-bounds local box relative to the real panel's own real crop dimensions --
+    # exercises the real local-to-page coordinate translation (ADR 0011) against real panel
+    # geometry, not a synthetic placeholder. Sized/margined as fractions of the real panel so
+    # it clears validation/transform_geometry.py's ROTATE edge-margin and area-fraction checks
+    # regardless of which real panel detect_panels() happens to return.
+    panel_w, panel_h = target_panel.bbox.width, target_panel.bbox.height
+    margin_x, margin_y = panel_w // 4, panel_h // 4
+    box_w, box_h = panel_w // 4, panel_h // 6
+    local_box = (margin_x, margin_y, margin_x + box_w, margin_y + box_h)
+    grounding_client = RecordingGroundingClient({"weapon": local_box})
+
+    result = run_pipeline(
+        _PHASE3_ACTION_PAGE,
+        config,
+        vlm_client=FakeVLMClient([], verification_matches=True),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+        plan=plan,
+    )
+
+    # Grounding must have seen the real panel's own real crop, not the real 720x5062 full page.
+    assert len(grounding_client.calls) == 1
+    called_shape, called_prompt = grounding_client.calls[0]
+    assert called_prompt == "weapon."
+    assert called_shape == (target_panel.bbox.height, target_panel.bbox.width, 3)
+    assert called_shape != (height, width, 3)
+
+    # Translated back to real full-page coordinates -- offset by the real panel's own origin.
+    expected_bbox = (
+        local_box[0] + target_panel.bbox.x0,
+        local_box[1] + target_panel.bbox.y0,
+        local_box[2] + target_panel.bbox.x0,
+        local_box[3] + target_panel.bbox.y0,
+    )
+    assert result.grounding.bbox.as_xyxy() == expected_bbox
+
+    assert result.render.output_path.exists()
+    assert result.render.resolution == (width, height)
+    assert result.render.seamless_loop_verified is True
 
 
 def test_select_primary_raises_when_plan_has_no_primary_object():

@@ -37,11 +37,23 @@ def make_image(h: int = 64, w: int = 64) -> np.ndarray:
 def make_mask(
     h: int = 64, w: int = 64, region: tuple[int, int, int, int] | None = None
 ) -> np.ndarray:
-    """A full-image-shape uint8 0/255 mask, nonzero only inside `region` (x0,y0,x1,y1)."""
+    """A full-image-shape uint8 0/255 mask: a diamond inscribed in `region` (x0,y0,x1,y1),
+
+    nonzero only inside it, touching each of its 4 edges at exactly its midpoint -- same
+    tight-bbox-equals-`region` property a solid rectangle fill has, but without a solid
+    rectangle's 100%-of-every-edge touch fraction, which the real, evidenced
+    `segmentation/segment.py::_validate_mask_shape` check (Phase 8.3, see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md) now correctly rejects as
+    implausible for a real object silhouette.
+    """
     mask = np.zeros((h, w), dtype=np.uint8)
     if region is not None:
         x0, y0, x1, y1 = region
-        mask[y0:y1, x0:x1] = 255
+        cx, cy = (x0 + x1 - 1) / 2.0, (y0 + y1 - 1) / 2.0
+        ax, ay = max((x1 - x0) / 2.0, 1e-9), max((y1 - y0) / 2.0, 1e-9)
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        local = (np.abs(xx - cx) / ax + np.abs(yy - cy) / ay) <= 1.0
+        mask[y0:y1, x0:x1] = local.astype(np.uint8) * 255
     return mask
 
 
@@ -118,6 +130,85 @@ def test_segment_object_raises_on_full_page_mask():
     with pytest.raises(PipelineStageError) as exc_info:
         segment_object(make_image(), make_grounding(), client)
     assert exc_info.value.stage == "segmentation"
+
+
+def _one_sided_mask(h: int, w: int, region: tuple[int, int, int, int]) -> np.ndarray:
+    """A mask matching the real Defect B evidence exactly: a diamond silhouette (see `make_mask`)
+
+    UNIONED with a solid strip along the region's left third -- the left edge is hugged for its
+    full length while the opposite (right) edge stays low, same asymmetric signature the real
+    downloaded SAM mask had (LEFT=45.5%, RIGHT=0.56%, see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md).
+    """
+    mask = make_mask(h, w, region=region)
+    x0, y0, x1, y1 = region
+    strip_x1 = x0 + max(1, (x1 - x0) // 3)
+    mask[y0:y1, x0:strip_x1] = 255
+    return mask
+
+
+def test_segment_object_raises_on_a_mask_that_hugs_one_bbox_edge_but_not_the_opposite_one():
+    """Phase 8.3, Defect B regression: `phase3_action_page`'s real "vertical seam" defect was
+
+    traced to a real SAM 2.1 mask (downloaded from a live Kaggle run and independently
+    re-verified by reproducing it through the real production compositing/animation code) whose
+    own tight bbox's LEFT edge was mask-covered for 45.5% of its height while the OPPOSITE
+    (right) edge was only 0.56% -- an over-segmentation into adjacent background on just one
+    side, invisible while the object sits at rest but producing a hard, duplicate-looking seam
+    once TRANSLATE displaces it. Five OTHER real masks from the same investigation (a sword, two
+    eyes, two hair regions with no visual defect) ranged 2.2%-20.2% on their own worst edge. See
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md for the full evidence and for why
+    the check requires this LEFT-high/RIGHT-low asymmetry rather than flagging any one edge
+    alone (which would also flag a genuinely rectangular object, e.g. a real banner/flag).
+    """
+    region = (10, 10, 40, 40)
+    x0, y0, x1, y1 = region
+    candidate = MaskCandidate(mask=_one_sided_mask(64, 64, region), iou_score=0.9)
+    client = FakeSegmentationClient([candidate])
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        segment_object(make_image(), make_grounding(BBoxPx(x0=x0, y0=y0, x1=x1, y1=y1)), client)
+    assert exc_info.value.stage == "segmentation"
+    assert "hugs" in exc_info.value.detail
+    assert "left" in exc_info.value.detail
+
+
+def test_segment_object_accepts_a_mask_that_only_touches_bbox_edges_near_their_midpoint():
+    """Negative control for the check above: a real object silhouette's tight bbox is touched
+
+    by the mask only near each edge's midpoint (an extremal point of the silhouette), not along
+    a long run -- this must not be rejected.
+    """
+    region = (10, 10, 40, 40)
+    candidate = MaskCandidate(mask=make_mask(region=region), iou_score=0.9)
+    client = FakeSegmentationClient([candidate])
+    x0, y0, x1, y1 = region
+
+    grounding = make_grounding(BBoxPx(x0=x0, y0=y0, x1=x1, y1=y1))
+    result = segment_object(make_image(), grounding, client)
+
+    assert result.bbox.as_xyxy() == region
+
+
+def test_segment_object_accepts_a_genuinely_rectangular_mask():
+    """Negative control found by independent review: a solid rectangle (BOTH opposite edges of
+
+    an axis hugged together, e.g. a real banner/flag/sign with a genuinely straight silhouette
+    -- explicitly a valid target per this project's own dataset, `configs/
+    phase3_3_eval_dataset.yaml`'s `phase3_action_page`/`eval_weapon_effects` acceptable_outcome
+    entries naming "cloth-banner-shaped region"/"energy-effect-shaped region") must NOT be
+    rejected -- only a ONE-sided hug (see the test above) is the real, evidenced defect shape.
+    """
+    region = (10, 10, 40, 40)
+    x0, y0, x1, y1 = region
+    solid_rectangle = np.zeros((64, 64), dtype=np.uint8)
+    solid_rectangle[y0:y1, x0:x1] = 255
+    client = FakeSegmentationClient([MaskCandidate(mask=solid_rectangle, iou_score=0.9)])
+
+    grounding = make_grounding(BBoxPx(x0=x0, y0=y0, x1=x1, y1=y1))
+    result = segment_object(make_image(), grounding, client)
+
+    assert result.bbox.as_xyxy() == region
 
 
 def test_segment_object_raises_when_client_returns_no_candidates():

@@ -10,10 +10,31 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from manga_animation.evaluation.dataset import EvalSample, load_eval_dataset
-from manga_animation.evaluation.metrics import Rate, compute_metrics
+from manga_animation.evaluation.dataset import (
+    DEFAULT_DATASET_PATH,
+    GOLDEN_DATASET_CATEGORIES,
+    REALWORLD_DATASET_PATH,
+    EvalSample,
+    dataset_composition,
+    golden_category_coverage,
+    load_combined_eval_dataset,
+    load_eval_dataset,
+    uncovered_golden_categories,
+)
+from manga_animation.evaluation.metrics import (
+    Rate,
+    StatusBreakdown,
+    classify_outcome,
+    compute_metrics,
+)
 from manga_animation.evaluation.nondeterminism import RepeatedRunRecord, summarize_repeated_runs
-from manga_animation.evaluation.schemas import PageRunOutcome, ValidationAttemptOutcome
+from manga_animation.evaluation.schemas import (
+    LoopMetricsOutcome,
+    ObjectAttemptOutcome,
+    PageRunOutcome,
+    RenderSummary,
+    ValidationAttemptOutcome,
+)
 
 # --- Rate ---------------------------------------------------------------------------------
 
@@ -221,9 +242,7 @@ def test_ground_truth_uncertain_flag_excludes_a_sample_even_with_a_resolved_anim
     `animation_possible == "uncertain"` value was excluded, so this exact case would have
     counted as a known positive.
     """
-    samples = {
-        "hedged": _sample("hedged", animation_possible="yes", ground_truth_uncertain=True)
-    }
+    samples = {"hedged": _sample("hedged", animation_possible="yes", ground_truth_uncertain=True)}
     outcomes = [_failed("hedged", stage="analysis", detail="all STATIC")]
     report = compute_metrics(outcomes, samples)
     assert report.semantic_false_negative_rate == Rate(0, 0)
@@ -347,6 +366,115 @@ def test_panel_detection_multi_panel_rate_only_reported_in_panel_mode():
     assert panel_report.panel_detection_multi_panel_rate == Rate(1, 3)
 
 
+# --- Phase 7.2.1: SECONDARY/MICRO per-object reporting -------------------------------------
+#
+# Closes the evaluation gap ADR 0010 explicitly deferred to Phase 7 ("extending evaluation to
+# report on secondary/micro objects too is real future work... at Phase 7, not here"):
+# PageRunOutcome.primary_semantic_label/primary_motion_type only ever described the PRIMARY
+# object -- these tests cover the new object_outcomes list and the two render-rate metrics
+# computed from it.
+
+
+def _object_outcome(
+    motion_type: str, status: str, object_id: str = "obj_1", semantic_label: str = "cloth"
+) -> ObjectAttemptOutcome:
+    return ObjectAttemptOutcome(
+        object_id=object_id, semantic_label=semantic_label, motion_type=motion_type, status=status
+    )
+
+
+def test_page_run_outcome_defaults_to_empty_object_outcomes_and_schema_version_1():
+    """Every `PageRunOutcome` recorded before Phase 7.2.1 (no `object_outcomes`/
+    `schema_version` key in stored JSON) must load with the pre-Phase-7.2.1 default -- an empty
+    list and schema_version=1 -- not silently be treated as "this page genuinely had zero
+    SECONDARY/MICRO objects" under the new schema.
+    """
+    outcome = _completed("a")
+    assert outcome.object_outcomes == []
+    assert outcome.schema_version == 1
+
+
+def test_secondary_and_micro_object_render_rates_pool_across_pages():
+    outcomes = [
+        _completed(
+            "a",
+            schema_version=2,
+            object_outcomes=[
+                _object_outcome("secondary", "rendered", "s1"),
+                _object_outcome("secondary", "dropped", "s2"),
+                _object_outcome("micro", "rendered", "m1"),
+            ],
+        ),
+        _completed(
+            "b",
+            schema_version=2,
+            object_outcomes=[
+                _object_outcome("secondary", "rendered", "s3"),
+                _object_outcome("micro", "dropped", "m2"),
+            ],
+        ),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.secondary_object_render_rate == Rate(2, 3)  # s1, s3 rendered; s2 dropped
+    assert report.micro_object_render_rate == Rate(1, 2)  # m1 rendered; m2 dropped
+
+
+def test_secondary_object_render_rate_denominator_is_zero_with_no_object_outcomes():
+    """The common, pre-Phase-7.2.1-equivalent case (a single-PRIMARY-only plan, or every
+    outcome still at schema_version=1) must report "0/0 (n/a)", never a fabricated 0%.
+    """
+    outcomes = [_completed("a"), _failed("b", stage="grounding", detail="x")]
+    report = compute_metrics(outcomes, {})
+    assert report.secondary_object_render_rate == Rate(0, 0)
+    assert report.secondary_object_render_rate.value is None
+    assert report.micro_object_render_rate == Rate(0, 0)
+
+
+def test_object_outcomes_do_not_affect_primary_only_metrics():
+    """Adding object_outcomes to a PageRunOutcome must not change any pre-existing
+    PRIMARY-only rate -- this is a purely additive extension.
+    """
+    plain = compute_metrics([_completed("a")], {})
+    with_secondary = compute_metrics(
+        [
+            _completed(
+                "a",
+                schema_version=2,
+                object_outcomes=[_object_outcome("secondary", "rendered")],
+            )
+        ],
+        {},
+    )
+    assert plain.end_to_end_completion_rate == with_secondary.end_to_end_completion_rate
+    assert plain.usable_target_rate == with_secondary.usable_target_rate
+    assert plain.validation_acceptance_rate == with_secondary.validation_acceptance_rate
+
+
+def test_object_attempt_outcome_round_trips_through_json():
+    outcome = _completed(
+        "a",
+        schema_version=2,
+        object_outcomes=[
+            ObjectAttemptOutcome(
+                object_id="obj_2",
+                semantic_label="trailing_cloth",
+                motion_type="secondary",
+                status="dropped",
+                validation_attempts=[
+                    ValidationAttemptOutcome(
+                        candidate_rank=0, accepted=False, grounding_score=0.4, reason="no match"
+                    )
+                ],
+            )
+        ],
+    )
+    restored = PageRunOutcome.model_validate_json(outcome.model_dump_json())
+    assert restored.object_outcomes[0].object_id == "obj_2"
+    assert restored.object_outcomes[0].status == "dropped"
+    assert restored.object_outcomes[0].validation_attempts[0].reason == "no match"
+    assert restored.schema_version == 2
+
+
 # --- nondeterminism -----------------------------------------------------------------------
 
 
@@ -450,6 +578,174 @@ def test_eval_dataset_uncertain_samples_are_explicitly_flagged():
         assert sample.ground_truth_uncertain is True
 
 
+# --- Phase 8: golden E2E dataset category coverage -----------------------------------------
+
+
+def test_eval_sample_defaults_to_no_golden_categories():
+    sample = _sample("a")
+    assert sample.golden_categories == []
+
+
+def test_golden_category_coverage_maps_every_required_category():
+    samples = [
+        _sample("a", golden_categories=["single_animatable_object", "translation"]),
+        _sample("b", golden_categories=["translation"]),
+    ]
+    coverage = golden_category_coverage(samples)
+    assert set(coverage.keys()) == set(GOLDEN_DATASET_CATEGORIES)
+    assert coverage["translation"] == ["a", "b"]
+    assert coverage["single_animatable_object"] == ["a"]
+    assert coverage["rotation"] == []  # a real, honest gap -- empty, not absent
+
+
+def test_uncovered_golden_categories_lists_only_empty_ones():
+    samples = [_sample("a", golden_categories=["translation"])]
+    uncovered = uncovered_golden_categories(samples)
+    assert "translation" not in uncovered
+    assert "rotation" in uncovered
+    assert set(uncovered) == set(GOLDEN_DATASET_CATEGORIES) - {"translation"}
+
+
+def test_golden_category_coverage_rejects_an_unknown_category_at_load_time():
+    with pytest.raises(ValidationError):
+        _sample("a", golden_categories=["not_a_real_category"])
+
+
+def test_real_golden_dataset_has_exactly_the_two_disclosed_coverage_gaps():
+    """The real dataset's own header comment (configs/phase3_3_eval_dataset.yaml) discloses
+
+    two categories with zero real coverage -- locks that honest disclosure in as a checkable
+    fact instead of only prose, and would fail loudly if a future edit silently covered (or
+    silently dropped coverage for) one of these without updating the header note.
+    """
+    samples = load_eval_dataset()
+    assert set(uncovered_golden_categories(samples)) == {
+        "partially_occluded_object",
+        "scale_or_deformation",
+    }
+
+
+def test_real_golden_dataset_every_sample_has_at_least_one_category():
+    samples = load_eval_dataset()
+    for sample in samples:
+        assert sample.golden_categories, f"{sample.sample_id} has no golden_categories"
+
+
+# --- Phase 9: Real-World Evaluation Dataset tag fields -------------------------------------
+
+
+def test_eval_sample_defaults_to_no_phase9_tags():
+    sample = _sample("a")
+    assert sample.scene_complexity_tags == []
+    assert sample.potential_motion_tags == []
+    assert sample.geometric_difficulty_tags == []
+    assert sample.motion_type_tags == []
+    assert sample.expected_difficulty is None
+
+
+def test_eval_sample_rejects_an_unknown_phase9_tag():
+    with pytest.raises(ValidationError):
+        _sample("a", scene_complexity_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", potential_motion_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", geometric_difficulty_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", motion_type_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", expected_difficulty="impossible")
+
+
+def test_dataset_composition_counts_every_taxonomy_value_including_zero():
+    samples = [
+        _sample(
+            "a",
+            scene_complexity_tags=["crowded_scene", "multiple_panels"],
+            potential_motion_tags=["weapon"],
+            expected_difficulty="hard",
+            animation_possible="yes",
+        ),
+        _sample(
+            "b",
+            scene_complexity_tags=["crowded_scene"],
+            expected_difficulty="hard",
+            animation_possible="no",
+        ),
+    ]
+    composition = dataset_composition(samples)
+    assert composition["sample_count"] == {"total": 2}
+    assert composition["scene_complexity_tags"]["crowded_scene"] == 2
+    assert composition["scene_complexity_tags"]["multiple_panels"] == 1
+    assert composition["scene_complexity_tags"]["sparse_scene"] == 0  # a real gap, not absent
+    assert composition["potential_motion_tags"]["weapon"] == 1
+    assert composition["expected_difficulty"] == {"easy": 0, "medium": 0, "hard": 2}
+    assert composition["animation_possible"] == {"yes": 1, "no": 1, "uncertain": 0}
+
+
+def test_dataset_composition_of_empty_dataset_is_all_zero_not_an_error():
+    composition = dataset_composition([])
+    assert composition["sample_count"] == {"total": 0}
+    assert all(v == 0 for v in composition["scene_complexity_tags"].values())
+
+
+# --- Phase 9: Real-World Evaluation Dataset (configs/phase9_realworld_eval_dataset.yaml) ---
+
+
+def test_real_realworld_dataset_loads_and_has_ten_samples():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    assert len(samples) == 10
+    assert len({s.sample_id for s in samples}) == 10  # every sample_id is unique
+
+
+def test_real_realworld_dataset_every_sample_has_at_least_one_phase9_tag():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    for sample in samples:
+        has_any_tag = (
+            sample.scene_complexity_tags
+            or sample.potential_motion_tags
+            or sample.geometric_difficulty_tags
+            or sample.motion_type_tags
+        )
+        assert has_any_tag, f"{sample.sample_id} has no Phase 9 tags at all"
+
+
+def test_real_realworld_dataset_has_a_mix_of_confident_and_uncertain_ground_truth():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    certain = [s for s in samples if not s.ground_truth_uncertain]
+    uncertain = [s for s in samples if s.ground_truth_uncertain]
+    assert certain and uncertain  # a real dataset, not one uniform label
+    assert any(s.animation_possible == "yes" for s in certain)
+    assert any(s.animation_possible == "no" for s in certain)
+
+
+def test_load_combined_eval_dataset_concatenates_golden_and_realworld():
+    golden = load_eval_dataset(DEFAULT_DATASET_PATH)
+    realworld = load_eval_dataset(REALWORLD_DATASET_PATH)
+    combined = load_combined_eval_dataset()
+    assert len(combined) == len(golden) + len(realworld)
+    assert {s.sample_id for s in combined} == {s.sample_id for s in golden} | {
+        s.sample_id for s in realworld
+    }
+
+
+def test_load_combined_eval_dataset_rejects_a_cross_file_duplicate_image_path(tmp_path):
+    manifest_a = tmp_path / "a.yaml"
+    manifest_b = tmp_path / "b.yaml"
+    entry = """
+samples:
+  - sample_id: {sid}
+    image_path: examples/shared.png
+    source_citation: test
+    diversity_tag: test
+    fetch_script: scripts/fetch_sample_pages.py
+    acceptable_outcome: anything
+"""
+    manifest_a.write_text(entry.format(sid="a"))
+    manifest_b.write_text(entry.format(sid="b"))
+    with pytest.raises(ValueError, match="duplicate image_path"):
+        load_combined_eval_dataset([manifest_a, manifest_b])
+
+
 def test_eval_sample_loader_roundtrips_a_minimal_yaml(tmp_path):
     manifest = tmp_path / "mini.yaml"
     manifest.write_text(
@@ -550,19 +846,24 @@ def test_repeated_evaluation_never_mutates_the_real_dataset_manifest():
 
 
 def test_real_dataset_ground_truth_changes_carry_an_explicit_annotation_version():
-    """`sample_page_02` is this project's one real, evidenced case of a ground-truth revision --
+    """`sample_page_02` is this project's original real, evidenced case of a ground-truth
 
-    its `annotation_version` must reflect that it was intentionally revised (2), while every
-    unrevised sample stays at the schema's default (1). A version bump is the auditable signal
-    that a human reviewed and changed the annotation, not that a VLM run overwrote it.
+    revision -- its `annotation_version` must reflect that it was intentionally revised (2).
+    Phase 8.3 added a second, real revision reason (`honest_failure_acceptable`, formalizing
+    `phase3_action_page`/`eval_weapon_effects`'s own pre-existing `acceptable_outcome` prose
+    into a structured field) -- those two also sit at version 2. Every other, unrevised sample
+    stays at the schema's default (1). A version bump is the auditable signal that a human
+    reviewed and changed the annotation, not that a VLM run overwrote it.
     """
     samples = {s.sample_id: s for s in load_eval_dataset()}
     assert samples["sample_page_02"].annotation_version == 2
     assert samples["sample_page_02"].animation_possible == "uncertain"
     assert samples["sample_page_02"].ground_truth_uncertain is True
+
+    revised_at_v2 = {"sample_page_02", "phase3_action_page", "eval_weapon_effects"}
     for sample_id, sample in samples.items():
-        if sample_id != "sample_page_02":
-            assert sample.annotation_version == 1
+        expected = 2 if sample_id in revised_at_v2 else 1
+        assert sample.annotation_version == expected, sample_id
 
 
 def test_transform_geometry_failure_does_not_alter_semantic_ground_truth():
@@ -669,9 +970,7 @@ def test_real_dataset_ground_truth_split_is_visible_and_sums_to_sample_count():
     positive_controls = report.semantic_false_negative_rate.denominator
     negative_controls = report.semantic_false_positive_rate.denominator
     unresolved = report.unresolved_ground_truth_count
-    assert positive_controls + negative_controls + unresolved == report.sample_count == len(
-        samples
-    )
+    assert positive_controls + negative_controls + unresolved == report.sample_count == len(samples)
     # verified_action_1/2 count as resolved positive controls, not unresolved.
     assert positive_controls >= 2
 
@@ -733,3 +1032,210 @@ def test_verified_action_samples_do_not_invent_target_or_region_ground_truth():
         assert sample.expected_target_category is None
         assert sample.expected_motion_category is None
         assert sample.expected_region_note is None
+
+
+# --- Phase 8: E2E status classification (PASS / PASS_WITH_FALLBACK / REJECTED / ERROR) -----
+
+
+def _render_summary(**overrides) -> RenderSummary:
+    defaults = dict(
+        frame_count=96,
+        fps=24.0,
+        resolution=(720, 1000),
+        duration_s=4.0,
+        codec="h264",
+        pixel_format="yuv420p",
+        seamless_loop_verified=True,
+    )
+    defaults.update(overrides)
+    return RenderSummary(**defaults)
+
+
+def test_classify_outcome_pass_for_a_fully_automatic_completion():
+    outcome = _completed("a")
+    assert classify_outcome(outcome, _sample("a")) == "PASS"
+
+
+def test_classify_outcome_pass_with_fallback_when_a_controlled_plan_was_used():
+    outcome = _completed("a", used_fallback_plan=True)
+    assert classify_outcome(outcome, _sample("a")) == "PASS_WITH_FALLBACK"
+
+
+def test_classify_outcome_rejected_for_an_attributed_failure_with_no_ground_truth_conflict():
+    outcome = _failed("a", stage="analysis", detail="every object STATIC")
+    assert classify_outcome(outcome, _sample("a", animation_possible="uncertain")) == "REJECTED"
+
+
+def test_classify_outcome_rejected_for_a_harness_attributed_unexpected_exception():
+    """`failing_stage="unexpected"` (the evaluation harness's own catch-all attribution, see
+
+    `evaluation.schemas.FailingStage`) is still an attributed reason -- REJECTED, not ERROR.
+    """
+    outcome = _failed("a", stage="unexpected", detail="RuntimeError: boom")
+    assert classify_outcome(outcome, None) == "REJECTED"
+
+
+def test_classify_outcome_error_for_a_completely_unattributed_failure():
+    outcome = PageRunOutcome(
+        sample_id="a", analysis_mode="page", status="failed", failing_stage=None
+    )
+    assert classify_outcome(outcome, None) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_semantic_false_positive():
+    sample = _sample("a", animation_possible="no")
+    outcome = _completed("a")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_semantic_false_negative():
+    sample = _sample("a", animation_possible="yes")
+    outcome = _failed("a", stage="analysis", detail="every object STATIC")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_reproduced_regression():
+    sample = _sample(
+        "a",
+        regression_reference="must never accept the bad crop",
+        expected_target_category="weapon",
+    )
+    outcome = _completed("a", primary_semantic_label="hair")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_uncertain_ground_truth_never_triggers_a_semantic_error():
+    """A confident-looking "yes"/"no" on a sample explicitly marked `ground_truth_uncertain`
+
+    must not be used to flag ERROR -- mirrors compute_metrics's own fp/fn exclusion.
+    """
+    sample = _sample("a", animation_possible="no", ground_truth_uncertain=True)
+    outcome = _completed("a")
+    assert classify_outcome(outcome, sample) == "PASS"
+
+
+def test_classify_outcome_handles_a_missing_sample_gracefully():
+    outcome = _completed("a")
+    assert classify_outcome(outcome, None) == "PASS"
+
+
+def test_classify_outcome_rejected_for_an_honest_attributed_failure_when_sample_allows_it():
+    """Phase 8.3: a real, previously-observed mismatch -- `eval_weapon_effects`/
+
+    `phase3_action_page`'s own `acceptable_outcome` prose has always allowed an honest
+    grounding/validation failure despite confident animation_possible="yes", but
+    `classify_outcome` only consulted structured fields and classified this as ERROR on real
+    Kaggle GPU output (docs/phase8-results.md section 6.2). `honest_failure_acceptable` closes
+    that gap: an attributed failure on such a sample is REJECTED (an honest negative), not
+    ERROR.
+    """
+    sample = _sample("a", animation_possible="yes", honest_failure_acceptable=True)
+    outcome = _failed("a", stage="validation", detail="all candidates failed target validation")
+    assert classify_outcome(outcome, sample) == "REJECTED"
+
+
+def test_classify_outcome_still_errors_on_unattributed_failure_despite_honest_failure_acceptable():
+    """`honest_failure_acceptable` only excuses an *attributed* failure -- a genuinely
+
+    unattributed one (`failing_stage=None`) is never "honest" and must still be ERROR.
+    """
+    sample = _sample("a", animation_possible="yes", honest_failure_acceptable=True)
+    outcome = PageRunOutcome(
+        sample_id="a", analysis_mode="page", status="failed", failing_stage=None
+    )
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_still_errors_on_confident_yes_failure_without_the_opt_in():
+    """Sanity check: `honest_failure_acceptable` defaults to False, so every sample that has
+
+    never opted in (e.g. `verified_action_1`/`verified_action_2`, whose own acceptable_outcome
+    explicitly treats any failure as a false negative) keeps the pre-Phase-8.3 ERROR behavior.
+    """
+    sample = _sample("a", animation_possible="yes")
+    outcome = _failed("a", stage="validation", detail="all candidates failed target validation")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_real_dataset_honest_failure_acceptable_matches_documented_samples():
+    """Locks in exactly which real samples opted into `honest_failure_acceptable`, and that
+
+    every one of them has prose in `acceptable_outcome` that actually says so -- catches a
+    future edit that flips the flag without updating the sample's own written contract, or
+    vice versa.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    opted_in = {sid for sid, s in samples.items() if s.honest_failure_acceptable}
+    assert opted_in == {"phase3_action_page", "eval_weapon_effects"}
+    for sample_id in opted_in:
+        prose = samples[sample_id].acceptable_outcome.lower()
+        assert "honest" in prose
+        assert "acceptable" in prose
+
+
+def test_status_breakdown_rejects_negative_counts():
+    with pytest.raises(ValueError):
+        StatusBreakdown(-1, 0, 0, 0)
+
+
+def test_status_breakdown_total_sums_all_four_buckets():
+    breakdown = StatusBreakdown(
+        pass_count=2, pass_with_fallback_count=1, rejected_count=3, error_count=1
+    )
+    assert breakdown.total == 7
+
+
+def test_compute_metrics_status_breakdown_sums_to_sample_count():
+    samples = {
+        "pass": _sample("pass"),
+        "fallback": _sample("fallback"),
+        "rejected": _sample("rejected", animation_possible="uncertain"),
+        "error": _sample("error", animation_possible="no"),
+    }
+    outcomes = [
+        _completed("pass"),
+        _completed("fallback", used_fallback_plan=True),
+        _failed("rejected", stage="analysis", detail="every object STATIC"),
+        _completed("error"),  # semantic false positive against animation_possible="no"
+    ]
+    report = compute_metrics(outcomes, samples)
+    assert report.status_breakdown == StatusBreakdown(
+        pass_count=1, pass_with_fallback_count=1, rejected_count=1, error_count=1
+    )
+    assert report.status_breakdown.total == report.sample_count == 4
+
+
+# --- Phase 8: RenderSummary / LoopMetricsOutcome round-tripping ----------------------------
+
+
+def test_render_summary_round_trips_through_json_with_loop_metrics():
+    summary = _render_summary(
+        loop_metrics=LoopMetricsOutcome(
+            ordinary_adjacent_step_mean_abs_diff=1.5,
+            wrap_step_mean_abs_diff=1.8,
+            wrap_step_within_2x_ordinary=True,
+            ordinary_adjacent_step_ssim=0.98,
+            wrap_step_ssim=0.97,
+            wrap_ssim_within_tolerance=True,
+        )
+    )
+    restored = RenderSummary.model_validate_json(summary.model_dump_json())
+    assert restored == summary
+
+
+def test_render_summary_loop_metrics_defaults_to_none():
+    summary = _render_summary()
+    assert summary.loop_metrics is None
+
+
+def test_page_run_outcome_render_summary_defaults_to_none_and_schema_version_1():
+    outcome = _failed("a", stage="analysis")
+    assert outcome.render_summary is None
+    assert outcome.schema_version == 1
+
+
+def test_page_run_outcome_accepts_a_populated_render_summary():
+    outcome = _completed("a", render_summary=_render_summary(), schema_version=3)
+    assert outcome.render_summary is not None
+    assert outcome.render_summary.frame_count == 96
+    assert outcome.schema_version == 3

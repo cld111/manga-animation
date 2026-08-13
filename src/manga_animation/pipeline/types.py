@@ -295,6 +295,46 @@ class FrameSequence:
 
 
 @dataclass(frozen=True, slots=True)
+class LoopMetrics:
+    """Numeric evidence for the seamless-loop guarantee (see "Deterministic First" in
+    docs/architecture.md), not just a pass/fail bit.
+
+    Computed by `rendering.encode.compute_loop_metrics` from a real decoded/sampled frame
+    sequence and attached to every `RenderResult` this stage produces (Phase 8 -- previously
+    this same computation existed but was private, discarded after being logged, and had been
+    re-implemented ad hoc, uncommitted, by every session that needed the actual numbers post
+    hoc; see docs/phase7-results.md section 6.3's `ordinary_adjacent_step`/`wrap_step` figures
+    for exactly that gap).
+
+    Two algorithmically independent signals, per the Phase 8 brief's explicit instruction not
+    to rely solely on raw pixel equality when judging loop quality:
+
+    - Pixel-level (`*_mean_abs_diff`): does the last-frame-to-first-frame ("wrap") transition
+      move roughly as many total pixel values as an ordinary adjacent-frame step does? (Not
+      `frame[0] == frame[-1]` -- see `compute_loop_metrics`'s docstring for why exact equality
+      is the wrong test for a periodically-sampled sequence.)
+    - Structural (`*_ssim`): does the wrap transition preserve as much local structure
+      (luminance/contrast/pattern correlation, not just raw magnitude) as an ordinary step does?
+      A magnitude-only check cannot distinguish "a small further step along the same motion"
+      from "a similarly-sized but structurally unrelated jump" -- this is the second,
+      independent check that distinction needs.
+    """
+
+    ordinary_adjacent_step_mean_abs_diff: float
+    wrap_step_mean_abs_diff: float
+    wrap_step_within_2x_ordinary: bool
+    ordinary_adjacent_step_ssim: float
+    wrap_step_ssim: float
+    wrap_ssim_within_tolerance: bool
+
+    @property
+    def seamless(self) -> bool:
+        """Both independent checks must agree the wrap transition is unremarkable -- either one
+        alone flagging a problem is enough to withhold the seamless claim."""
+        return self.wrap_step_within_2x_ordinary and self.wrap_ssim_within_tolerance
+
+
+@dataclass(frozen=True, slots=True)
 class RenderResult:
     """The final encoded video, plus what was actually measured about it (not just the intent)."""
 
@@ -306,6 +346,10 @@ class RenderResult:
     codec: str
     pixel_format: str
     seamless_loop_verified: bool
+    loop_metrics: LoopMetrics | None = None
+    """`None` only when there weren't enough frames (<3) to compute a meaningful comparison --
+    see `compute_loop_metrics`. Whenever this is not `None`, `seamless_loop_verified` is exactly
+    `loop_metrics.seamless`."""
 
 
 Stage = Literal[

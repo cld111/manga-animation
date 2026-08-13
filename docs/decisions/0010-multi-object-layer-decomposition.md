@@ -289,3 +289,33 @@ already-documented grounding limitation, not by anything this ADR's design got w
 future work — either a different real page whose PRIMARY isn't `"weapon"`-labeled, or
 grounding-side improvement for that specific phrase — not attempted here (out of this audit's
 scope; `analysis`/`grounding` prompt tuning wasn't this pass's mandate).
+
+## Revision (Phase 7, real multi-object E2E success): the open question above is resolved
+
+Phase 7.3's real-model evaluation (see `docs/phase7-results.md` section 6.2) resolves this
+ADR's own standing open item with real, positive evidence: **a real, fully automatic,
+successfully rendered multi-object output has now been observed**, three times, on three
+different real pages, in one live Kaggle GPU session (`analysis_mode="panel"`,
+`qwen2.5-vl-7b-instruct` / `grounding-dino-base` / `sam2.1-hiera-base-plus` / real LaMa, no
+controlled-fallback plan):
+
+- `phase3_action_page.png`: PRIMARY `blood splatter` (translate) + MICRO `character_hair` — 2
+  objects rendered.
+- `examples/verified_action/action_sample_1.png`: PRIMARY `raised_sword` (rotate) + 4 real
+  SECONDARY/MICRO objects rendered (`character_eye`, two `character_hair` instances, `eye`) —
+  5 objects total, out of 9 non-STATIC objects the VLM proposed; the other 4 were genuinely
+  dropped by real geometry/edge-margin rejections (this ADR's own non-fatal SECONDARY/MICRO
+  failure policy working exactly as designed, observed for real for the first time).
+- `examples/verified_action/anction_sample_2.png`: PRIMARY `character movement` (translate) +
+  SECONDARY `object interaction` — 2 objects rendered.
+
+This did not require any change to this ADR's design, `pipeline/orchestrator.py`'s
+grounding/validation/failure-policy logic, or `compositing.composite_frame_stack` — the
+blocker was always the specific, unrelated, already-documented `"weapon"`-phrase Grounding DINO
+limitation on `phase3_action_page.png`'s PRIMARY object (fixed for that one page by ADR 0011's
+panel-aware cropping) combined with this project simply not having previously run automatic
+multi-object plans against pages whose PRIMARY object grounds cleanly. The `verified_action_*`
+pages' PRIMARY objects (`raised_sword`, `character movement`) both grounded and validated
+without difficulty, unblocking their real SECONDARY/MICRO objects for the first time. See
+`docs/phase7-results.md` for full evidence (real decode verification, real LaMa reconstruction
+crops, exact per-object outcomes).

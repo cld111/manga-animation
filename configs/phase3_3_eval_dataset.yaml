@@ -30,6 +30,21 @@
 # page as all-STATIC -- see that sample's `notes` for the full account. This file's own
 # `EvalSample` Python type is frozen; this YAML is the only place ground truth may change.
 #
+# `golden_categories` (Phase 8, see docs/decisions/0014-phase8-e2e-validation.md): this same
+# file doubles as Phase 8's golden E2E dataset -- reusing this real, already-evidenced dataset
+# rather than fabricating a second, parallel one. Each sample's `golden_categories` lists which
+# of the Phase 8 brief's 10 required coverage categories
+# (manga_animation.evaluation.GOLDEN_DATASET_CATEGORIES) it demonstrates, based on real evidence
+# already documented elsewhere in this project (cited per sample below) -- never a guess. Two
+# categories have ZERO real coverage in this dataset, disclosed here rather than hidden:
+# `partially_occluded_object` (no sample's documented evidence establishes occlusion) and
+# `scale_or_deformation` (SCALE/MESH_WARP were only ever exercised via ad hoc, uncommitted Phase
+# 7 driver scripts against sample_page_01.png's hair -- see docs/phase7-results.md section
+# 6.5 -- never added as a real dataset sample). `object_near_boundary` has exactly one sample
+# (verified_action_1), and only as an incidental by-product of a real geometry-validation
+# rejection (a dropped candidate's own reported reason), not a sample deliberately chosen to
+# exercise boundary proximity -- see that sample's own note below.
+#
 # `examples/verified_action/` (Pre-Phase-3.4, see ADR 0009's revision section): a small set of
 # images the project owner manually placed and personally, independently confirmed contain real
 # animation/action -- NOT derived from any VLM run, not even indirectly via a rendered output
@@ -73,6 +88,12 @@ samples:
       that property (see the Phase 3.3 "VLM nondeterminism" repeated-run harness), not to
       assert a single correct answer.
     annotation_version: 1
+    golden_categories: [single_animatable_object, translation]
+    # single_animatable_object/translation: the one real candidate this page has ever produced
+    # (Phase 3.2, ADR 0010's Phase 5 audit, section 6.4 above) is a single character_hair/
+    # TRANSLATE target -- real IoU 0.974 segmentation, real LaMa reconstruction. NOT tagged
+    # should_not_animate: ground_truth_uncertain=true means this is not a confident negative
+    # control (contrast eval_static_dialogue below).
 
   - sample_id: sample_page_02
     image_path: examples/sample_page_02.png
@@ -121,6 +142,10 @@ samples:
       treated the same way sample_page_01 already is: genuinely uncertain, not a positive
       control -- not deleted, not silently relabeled "no".
     annotation_version: 2
+    golden_categories: [single_animatable_object, translation]
+    # Same real basis as sample_page_01: a single character_hair/TRANSLATE candidate is this
+    # page's only documented real target (this sample's own notes above). Not should_not_animate
+    # for the same reason -- ground_truth_uncertain=true, not a confident negative.
 
   - sample_id: phase3_action_page
     image_path: examples/phase3_action_page.png
@@ -151,11 +176,24 @@ samples:
       ACCEPT whose grounded crop is actually a face/dialogue-box region is the one outcome
       this sample must never reproduce again.
     ground_truth_uncertain: false
+    honest_failure_acceptable: true
     notes: >
       Chosen originally (Phase 3.1) specifically for an unambiguous drawn motion cue; the
       exact best single target among several real candidates is genuinely open, which is why
       expected_target_category is left null rather than guessed.
-    annotation_version: 1
+    annotation_version: 2
+    golden_categories:
+      [multiple_animatable_objects, weapon_or_effect, rotation, translation, complex_background]
+    # Real Phase 7 evidence (docs/phase7-results.md section 6.2): a real automatic panel-mode
+    # run produced a fully rendered PRIMARY blood_splatter/TRANSLATE + SECONDARY character_hair/
+    # MICRO output. Real ADR 0011 evidence separately grounds/validates/renders a PRIMARY
+    # weapon/ROTATE target on this same page in a different session. complex_background: a dark
+    # action panel with speed-line effects, per this sample's own diversity_tag/notes.
+    # annotation_version bumped to 2 (Phase 8.3): honest_failure_acceptable=true formalizes
+    # what acceptable_outcome above already said ("an honest grounding/validation failure...
+    # are both acceptable outcomes") into a structured field -- classify_outcome previously
+    # ignored this prose and classified a real attributed failure as ERROR on real Kaggle GPU
+    # output (docs/phase8-results.md 6.2), contradicting this sample's own written contract.
 
   - sample_id: eval_static_dialogue
     image_path: examples/eval_static_dialogue.png
@@ -182,6 +220,10 @@ samples:
       a dataset that was otherwise 100% one action-fantasy MangaDex series
       (docs/phase3.2-results.md's own flagged cross-series-generalization gap).
     annotation_version: 1
+    golden_categories: [should_not_animate]
+    # This dataset's one confident (ground_truth_uncertain=false) negative control -- the
+    # cleanest real case for the Phase 8 brief's item 10 ("a case where an object should NOT be
+    # animated").
 
   - sample_id: eval_weapon_effects
     image_path: examples/eval_weapon_effects.png
@@ -205,13 +247,26 @@ samples:
       already guards against, now on a second, visually distinct series/art style).
     regression_reference: null
     ground_truth_uncertain: false
+    honest_failure_acceptable: true
     notes: >
       A second, real, cross-series weapon/action/effects sample -- distinct series and art
       style from phase3_action_page, specifically to start giving the semantic-validation
       false-positive/false-negative measurement more than one series' worth of real evidence
       (docs/decisions/0006-grounding-target-validation.md's own flagged "untested on a second,
       visually distinct series" open question).
-    annotation_version: 1
+    annotation_version: 2
+    golden_categories: [single_animatable_object, weapon_or_effect, rotation, complex_background]
+    # Real evidence (docs/phase7-results.md section 8, ADR 0011): every real session's grounding
+    # candidate for this page's one target (`weapon`) has been geometrically evaluated against
+    # ROTATE's bound ("27.6% of its reference region, exceeding ROTATE's 15% cap") and rejected
+    # -- a real, single-target, complex-background action panel, consistently REJECTED to date
+    # (an acceptable outcome per this sample's own acceptable_outcome above, not a defect).
+    # annotation_version bumped to 2 (Phase 8.3): honest_failure_acceptable=true formalizes what
+    # acceptable_outcome above already said into a structured field -- classify_outcome
+    # previously classified this sample's real, attributed, documented-acceptable validation
+    # rejection as ERROR on real Kaggle GPU output (docs/phase8-results.md section 6.2 /
+    # section 13's own disclosed "known issue"), contradicting this sample's own written
+    # contract. This is the section-13 fix the Phase 8.3 brief asked for.
 
   - sample_id: verified_action_1
     image_path: examples/verified_action/action_sample_1.png
@@ -245,6 +300,15 @@ samples:
       shape to the original Phase 3.1 motivating page.
     annotation_provenance: independent_human_verification
     annotation_version: 1
+    golden_categories:
+      [multiple_animatable_objects, weapon_or_effect, rotation, object_near_boundary]
+    # Real Phase 7 evidence (docs/phase7-results.md section 6.2): a real automatic panel-mode
+    # run rendered PRIMARY raised_sword/ROTATE plus 4 real SECONDARY/MICRO objects, and dropped
+    # 4 more via real geometry/edge-margin rejections -- including "bbox sits within 0.1% of its
+    # reference region's edge, closer than the 2% margin a mesh_warp target needs". This is the
+    # dataset's only real evidence touching object-near-boundary behavior, and it is incidental
+    # (a dropped-candidate rejection reason), not a case deliberately selected to test boundary
+    # proximity -- see this file's header note.
 
   - sample_id: verified_action_2
     image_path: examples/verified_action/anction_sample_2.png
@@ -278,3 +342,7 @@ samples:
       every other sample's checksum in this file). Standard portrait-page aspect ratio.
     annotation_provenance: independent_human_verification
     annotation_version: 1
+    golden_categories: [multiple_animatable_objects, translation]
+    # Real Phase 7 evidence (docs/phase7-results.md section 6.2): a real automatic panel-mode
+    # run rendered PRIMARY character_movement/TRANSLATE plus SECONDARY object_interaction, no
+    # dropped objects on this page.

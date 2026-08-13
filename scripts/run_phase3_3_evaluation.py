@@ -20,6 +20,12 @@ Usage (on the GPU worker, after `git pull`):
     uv run python scripts/run_phase3_3_evaluation.py --env kaggle
     uv run python scripts/run_phase3_3_evaluation.py --nondeterminism-runs 5
 
+Phase 7.2.2: the nondeterminism check's `--nondeterminism-samples` now defaults to EVERY
+sample_id in the loaded dataset (previously a hardcoded 2-sample subset,
+`sample_page_01`/`sample_page_02` -- the samples the real Phase 3.3/3.3.1/3.3.2 nondeterminism
+finding was based on). Pass it explicitly for a smaller/cheaper subset:
+    uv run python scripts/run_phase3_3_evaluation.py --nondeterminism-samples sample_page_01
+
 Writes `outputs/experiments/phase3_3_evaluation_<timestamp>.json` (per-page, per-mode outcomes;
 both modes' `EvaluationReport`s; nondeterminism summaries) and, for every page/mode that reaches
 rendering, the actual video under `outputs/videos/phase3_3/<mode>/<page-stem>/` (git-ignored
@@ -30,168 +36,61 @@ from __future__ import annotations
 
 import argparse
 import json
-import platform
-import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
-from PIL import Image
-
-from manga_animation.analysis.panels import detect_panels
 from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.evaluation import (
-    EvalSample,
-    NondeterminismSummary,
+    EvaluationReport,
     PageRunOutcome,
-    RepeatedRunRecord,
-    ValidationAttemptOutcome,
+    classify_outcome,
     compute_metrics,
     load_eval_dataset,
-    summarize_repeated_runs,
 )
-from manga_animation.pipeline.orchestrator import build_default_clients, run_pipeline
-from manga_animation.pipeline.types import PipelineStageError
-from manga_animation.schemas.animation_plan import MotionType
+from manga_animation.evaluation.harness import (
+    environment_metadata,
+    panel_detection_evidence,
+    run_nondeterminism_check,
+    run_one_sample,
+)
+from manga_animation.pipeline.orchestrator import build_default_clients
 
+# Phase 7.2.2: previously a hardcoded 2-sample subset (sample_page_01/02) -- the real Phase
+# 3.3/3.3.1/3.3.2 nondeterminism finding these two samples motivated. `main()` now defaults
+# `--nondeterminism-samples` to every sample_id in the LOADED dataset (see the `None` sentinel
+# below), so this constant only documents the historical/minimum floor and is used as a
+# fallback if the dataset somehow loads empty -- it does not silently cap real coverage at 2
+# samples going forward, and automatically includes any sample added later without editing
+# this script.
 DEFAULT_NONDETERMINISM_SAMPLE_IDS = ["sample_page_01", "sample_page_02"]
 
 
-def _git_commit() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except Exception:
-        return "unknown"
+def _render_rates_in_place(
+    reports: dict[str, EvaluationReport], serialized_reports: dict[str, dict[str, Any]]
+) -> None:
+    """Add a human-readable "rendered" string (e.g. "6/10 (60.0%)") to every `Rate`-shaped dict
 
+    inside `serialized_reports` (the `dataclasses.asdict()` output of `reports`) -- `Rate`
+    objects aren't JSON-serializable by default, and `asdict()` alone only keeps their raw
+    `numerator`/`denominator` ints, not `Rate.__str__`'s formatting.
 
-def _environment_metadata(device: str) -> dict[str, Any]:
-    meta: dict[str, Any] = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "git_commit": _git_commit(),
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-        "device": device,
-    }
-    try:
-        import torch
-
-        meta["torch_version"] = torch.__version__
-        if device == "cuda" and torch.cuda.is_available():
-            gpu_count = torch.cuda.device_count()
-            meta["gpu_count"] = gpu_count
-            meta["gpu_names"] = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
-    except ImportError:
-        meta["torch_version"] = None
-    return meta
-
-
-def _panel_detection_evidence(image_path: Path) -> tuple[int, list[str]]:
-    image = np.asarray(Image.open(image_path).convert("RGB"))
-    panels = detect_panels(image)
-    return len(panels), [p.source for p in panels]
-
-
-def _run_one(
-    sample: EvalSample,
-    mode: Literal["page", "panel"],
-    config: Any,
-    clients: tuple[Any, Any, Any, Any],
-    out_dir: Path,
-    panel_count: int,
-    panel_sources: list[str],
-) -> PageRunOutcome:
-    vlm_client, grounding_client, segmentation_client, reconstruction_client = clients
-    image_path = Path(sample.image_path)
-    try:
-        result = run_pipeline(
-            image_path,
-            config,
-            vlm_client=vlm_client,
-            grounding_client=grounding_client,
-            segmentation_client=segmentation_client,
-            reconstruction_client=reconstruction_client,
-            out_dir=out_dir,
-            analysis_mode=mode,
-        )
-    except PipelineStageError as exc:
-        return PageRunOutcome(
-            sample_id=sample.sample_id,
-            analysis_mode=mode,
-            status="failed",
-            failing_stage=exc.stage,
-            failure_detail=exc.detail,
-            panel_count=panel_count,
-            panel_sources=panel_sources,
-        )
-    except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
-        # the rest of the evaluation run; recorded distinctly from a classified
-        # PipelineStageError (failing_stage="unexpected"), same pattern as
-        # scripts/run_phase3_2_validation.py.
-        return PageRunOutcome(
-            sample_id=sample.sample_id,
-            analysis_mode=mode,
-            status="failed",
-            failing_stage="unexpected",
-            failure_detail=f"{type(exc).__name__}: {exc}",
-            panel_count=panel_count,
-            panel_sources=panel_sources,
-        )
-
-    return PageRunOutcome(
-        sample_id=sample.sample_id,
-        analysis_mode=mode,
-        status="completed",
-        panel_count=panel_count,
-        panel_sources=panel_sources,
-        primary_semantic_label=result.primary_object.semantic_label,
-        primary_motion_type=result.primary_object.motion_type.value,
-        validation_attempts=[
-            ValidationAttemptOutcome(
-                candidate_rank=v.candidate_rank,
-                accepted=v.accepted,
-                grounding_score=v.grounding_score,
-                reason=v.reason,
-            )
-            for v in result.validation_attempts
-        ],
-    )
-
-
-def _run_nondeterminism_check(
-    sample: EvalSample, config: Any, vlm_client: Any, run_count: int
-) -> NondeterminismSummary:
-    from manga_animation.analysis.plan_builder import analyze_page
-    from manga_animation.pipeline.types import PipelineStageError as _PSE
-
-    records: list[RepeatedRunRecord] = []
-    for i in range(run_count):
-        try:
-            plan = analyze_page(Path(sample.image_path), vlm_client, config=config)
-        except _PSE:
-            records.append(
-                RepeatedRunRecord(
-                    sample_id=sample.sample_id, run_index=i, outcome="static_or_unusable"
-                )
-            )
-            continue
-        primaries = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
-        primary = primaries[0] if primaries else None
-        records.append(
-            RepeatedRunRecord(
-                sample_id=sample.sample_id,
-                run_index=i,
-                outcome="usable",
-                primary_semantic_label=primary.semantic_label if primary else None,
-                primary_motion_type=primary.motion_type.value if primary else None,
-                object_count=len(plan.objects),
-            )
-        )
-    return summarize_repeated_runs(records)
+    Phase 7 audit fix: a prior version of this loop iterated `serialized_reports.values()`
+    (discarding the mode key) and looked up `reports[mode]` using a `mode` variable left over
+    from an unrelated, already-finished loop earlier in `main()` (which always held its LAST
+    value, `"panel"`, by the time this ran) -- silently rendering EVERY mode's `Rate` strings
+    from the panel report's own values, corrupting the page report's "rendered" strings in the
+    saved JSON (the underlying `numerator`/`denominator` fields were unaffected, only this
+    display string). Extracted into its own function, taking both dicts as explicit parameters
+    instead of closing over an outer-scope loop variable, so this can't silently reoccur, and so
+    it's independently unit-testable (see `tests/test_run_phase3_3_evaluation_script.py`).
+    """
+    for mode, mode_report in serialized_reports.items():
+        for key, value in list(mode_report.items()):
+            if isinstance(value, dict) and "numerator" in value and "denominator" in value:
+                mode_report[key] = {**value, "rendered": str(reports[mode].__getattribute__(key))}
 
 
 def main() -> None:
@@ -210,12 +109,21 @@ def main() -> None:
     parser.add_argument(
         "--nondeterminism-samples",
         nargs="*",
-        default=DEFAULT_NONDETERMINISM_SAMPLE_IDS,
-        help="sample_ids to repeat-run for the nondeterminism check",
+        default=None,
+        help=(
+            "sample_ids to repeat-run for the nondeterminism check. Defaults to EVERY "
+            "sample_id in the loaded dataset (Phase 7.2.2 -- 'the full currently configured "
+            "evaluation dataset, where practical'), not a fixed subset -- pass this "
+            "explicitly to run a smaller/cheaper subset instead."
+        ),
     )
     args = parser.parse_args()
 
     samples = load_eval_dataset()
+    if args.nondeterminism_samples is None:
+        args.nondeterminism_samples = [s.sample_id for s in samples] or (
+            DEFAULT_NONDETERMINISM_SAMPLE_IDS
+        )
     missing = [s for s in samples if not Path(s.image_path).exists()]
     if missing:
         fetchable = [s.image_path for s in missing if s.fetch_script]
@@ -236,13 +144,14 @@ def main() -> None:
     clients = build_default_clients(config)
     vlm_client = clients[0]
 
-    panel_evidence = {s.sample_id: _panel_detection_evidence(Path(s.image_path)) for s in samples}
+    panel_evidence = {s.sample_id: panel_detection_evidence(Path(s.image_path)) for s in samples}
+    samples_by_id = {s.sample_id: s for s in samples}
 
     outcomes: dict[str, list[PageRunOutcome]] = {"page": [], "panel": []}
     for mode in ("page", "panel"):
         for sample in samples:
             panel_count, panel_sources = panel_evidence[sample.sample_id]
-            outcome = _run_one(
+            outcome = run_one_sample(
                 sample,
                 mode,
                 config,
@@ -252,15 +161,16 @@ def main() -> None:
                 panel_sources,
             )
             outcomes[mode].append(outcome)
+            status = classify_outcome(outcome, samples_by_id.get(sample.sample_id))
             print(
-                f"[{mode}] {sample.sample_id}: {outcome.status} ({outcome.failing_stage or 'ok'})"
+                f"[{mode}] {sample.sample_id}: {status} -- {outcome.status} "
+                f"({outcome.failing_stage or 'ok'})"
             )
 
-    samples_by_id = {s.sample_id: s for s in samples}
     reports = {mode: compute_metrics(outcomes[mode], samples_by_id) for mode in ("page", "panel")}
 
     nondeterminism_summaries = [
-        _run_nondeterminism_check(samples_by_id[sid], config, vlm_client, args.nondeterminism_runs)
+        run_nondeterminism_check(samples_by_id[sid], config, vlm_client, args.nondeterminism_runs)
         for sid in args.nondeterminism_samples
         if sid in samples_by_id
     ]
@@ -268,7 +178,7 @@ def main() -> None:
     args.experiments_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     summary = {
-        "environment": _environment_metadata(device),
+        "environment": environment_metadata(device),
         "config_env": args.env,
         "model_variants": config.model_variants,
         "outcomes": {
@@ -277,11 +187,7 @@ def main() -> None:
         "reports": {mode: asdict(reports[mode]) for mode in reports},
         "nondeterminism": [asdict(s) for s in nondeterminism_summaries],
     }
-    # Rate objects inside `reports` aren't JSON-serializable by default -- render explicitly.
-    for mode_report in summary["reports"].values():
-        for key, value in list(mode_report.items()):
-            if isinstance(value, dict) and "numerator" in value and "denominator" in value:
-                mode_report[key] = {**value, "rendered": str(reports[mode].__getattribute__(key))}
+    _render_rates_in_place(reports, summary["reports"])
 
     out_path = args.experiments_dir / f"phase3_3_evaluation_{timestamp}.json"
     out_path.write_text(json.dumps(summary, indent=2, default=str))
@@ -321,6 +227,14 @@ def main() -> None:
         )
         if r.panel_detection_multi_panel_rate is not None:
             print(f"  panel_detection_multi_panel_rate: {r.panel_detection_multi_panel_rate}")
+        print(f"  secondary_object_render_rate: {r.secondary_object_render_rate}")
+        print(f"  micro_object_render_rate: {r.micro_object_render_rate}")
+        sb = r.status_breakdown
+        print(
+            "  status_breakdown: "
+            f"PASS={sb.pass_count} PASS_WITH_FALLBACK={sb.pass_with_fallback_count} "
+            f"REJECTED={sb.rejected_count} ERROR={sb.error_count} (total={sb.total})"
+        )
     print("\n--- nondeterminism ---")
     for s in nondeterminism_summaries:
         print(

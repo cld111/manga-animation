@@ -8,6 +8,6 @@ requirement, same measurement-based validation approach, now as real stage code 
 a throwaway script.
 """
 
-from manga_animation.rendering.encode import render
+from manga_animation.rendering.encode import compute_loop_metrics, render
 
-__all__ = ["render"]
+__all__ = ["render", "compute_loop_metrics"]

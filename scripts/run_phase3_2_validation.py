@@ -118,6 +118,12 @@ def _run_one_page(
             reconstruction_client=reconstruction_client,
             out_dir=out_dir,
             plan=fallback_plan,
+            # Explicit, not the (Phase 10) default: this script's own purpose is measuring
+            # Phase 3.2's page-level VLM-targeting/grounding metrics specifically (see the
+            # module docstring) -- silently inheriting panel mode would measure something
+            # different while still reporting itself as "Phase 3.2" results. Ignored when
+            # `fallback_plan` is not None (no analysis stage runs on that path).
+            analysis_mode="page",
         )
     except PipelineStageError as exc:
         record["status"] = "FAILED"
