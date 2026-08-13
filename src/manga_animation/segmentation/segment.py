@@ -30,6 +30,33 @@ from manga_animation.segmentation.client import SegmentationClient
 _MIN_COVERAGE_FRACTION = MIN_OBJECT_COVERAGE_FRACTION
 _MAX_COVERAGE_FRACTION = MAX_OBJECT_COVERAGE_FRACTION
 
+# Phase 8.3 (docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md, "Defect B" -- the real
+# "vertical seam" found in `phase3_action_page`): a real SAM 2.1 mask, downloaded from a live
+# Kaggle run and independently re-verified, was found to include a large, roughly-rectangular
+# strip of adjacent wall/panel background alongside the true hair silhouette -- its own tight
+# bbox's LEFT edge was mask-covered for 45.5% of its height, vs. 2.2%-20.2% for five other real
+# masks from the same investigation (a raised sword, two eyes, and a second real hair mask) that
+# showed no visual defect. This is invisible at an object's rest pose (an untransformed layer's
+# pixels are bit-identical to the plate, so mask shape cannot matter there -- confirmed by
+# reproducing this exact real mask + real LaMa reconstruction through this exact production
+# code) and produces a hard, duplicate-looking seam once TRANSLATE displaces it, dragging the
+# erroneously-included background along with the object -- see the ADR for the full repro.
+# `0.3` sits with real margin on both sides of the real evidence above (0.202 highest normal,
+# 0.455 the one confirmed defect), the same "evidenced-but-not-statistically-calibrated" status
+# as every other threshold in this module.
+#
+# Independent review caught a real gap in the first version of this check (which flagged ANY
+# single edge above this bound): a genuinely rectangular real object -- e.g. the "cloth-banner-
+# shaped region" this project's own dataset (`phase3_action_page`/`eval_weapon_effects`) names
+# as an explicitly valid target -- would touch BOTH edges of an axis near 100% together, which
+# is indistinguishable from a one-sided over-segmentation by magnitude alone. The real defect's
+# own measured values disambiguate this: LEFT=45.5% but the OPPOSITE edge, RIGHT, was only
+# 0.56% (TOP=0.2%, BOTTOM=0.4%) -- a real rectangle's opposite edge would ALSO be high, not
+# near-zero. The check below therefore requires ASYMMETRY (one side of an axis high, the other
+# comfortably low), not just one side being high -- a real banner/flag (high on both left+right
+# or both top+bottom) is not flagged; the real, evidenced over-segmentation defect still is.
+_MAX_BBOX_EDGE_TOUCH_FRACTION = 0.3
+
 
 def segment_object(
     image: ImageArray, grounding: GroundingResult, client: SegmentationClient
@@ -54,6 +81,7 @@ def segment_object(
     mask = best.mask
     _validate_mask(mask, object_id=grounding.object_id)
     bbox = _tight_bbox(mask)
+    _validate_mask_shape(mask, bbox, object_id=grounding.object_id)
 
     return SegmentationResult(
         object_id=grounding.object_id,
@@ -98,3 +126,73 @@ def _validate_mask(mask: ImageArray, *, object_id: str) -> None:
 def _tight_bbox(mask: ImageArray) -> BBoxPx:
     ys, xs = np.where(mask > 0)
     return BBoxPx(x0=int(xs.min()), y0=int(ys.min()), x1=int(xs.max()) + 1, y1=int(ys.max()) + 1)
+
+
+def _bbox_edge_touch_fractions(mask: ImageArray, bbox: BBoxPx) -> tuple[float, float, float, float]:
+    """`(left, right, top, bottom)`: the fraction of each of `bbox`'s 4 sides that `mask` covers,
+
+    within `bbox` itself (`bbox` is assumed to be `mask`'s own tight bbox, so every side is
+    touched at least once by construction) -- a SMALL fraction means that side is touched only
+    near one point (e.g. a jagged hair strand grazing it); a LARGE fraction means a long straight
+    run of mask hugging that edge -- see `_MAX_BBOX_EDGE_TOUCH_FRACTION`'s own comment for the
+    real evidence behind this signal.
+    """
+    sub = mask[bbox.y0 : bbox.y1, bbox.x0 : bbox.x1] > 0
+    if sub.shape[0] == 0 or sub.shape[1] == 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (
+        float(sub[:, 0].mean()),
+        float(sub[:, -1].mean()),
+        float(sub[0, :].mean()),
+        float(sub[-1, :].mean()),
+    )
+
+
+def _one_sided_axis(a: float, b: float) -> bool:
+    """True if exactly one of an axis's two opposite edges (`a`, `b`) is hugged while the other
+
+    is not -- the real, evidenced over-segmentation signature (LEFT=45.5% but RIGHT=0.56% for
+    the confirmed real defect), as opposed to a genuinely rectangular object (e.g. a real
+    banner/flag), whose opposite edges would BOTH be near 100% together.
+    """
+    hi, lo = max(a, b), min(a, b)
+    return hi > _MAX_BBOX_EDGE_TOUCH_FRACTION and lo <= _MAX_BBOX_EDGE_TOUCH_FRACTION
+
+
+def _validate_mask_shape(mask: ImageArray, bbox: BBoxPx, *, object_id: str) -> None:
+    left, right, top, bottom = _bbox_edge_touch_fractions(mask, bbox)
+    horizontal_offending = _one_sided_axis(left, right)
+    vertical_offending = _one_sided_axis(top, bottom)
+    if not (horizontal_offending or vertical_offending):
+        return
+
+    if horizontal_offending:
+        side, fraction, opposite = ("left", left, right) if left > right else ("right", right, left)
+    else:
+        side, fraction, opposite = ("top", top, bottom) if top > bottom else ("bottom", bottom, top)
+
+    raise PipelineStageError(
+        stage="segmentation",
+        input_ref=object_id,
+        detail=(
+            f"mask hugs its own tight bbox's {side} edge for {fraction:.1%} of that edge's "
+            f"length while the opposite edge is only {opposite:.1%} -- exceeds the "
+            f"{_MAX_BBOX_EDGE_TOUCH_FRACTION:.0%} bound on one side with no matching coverage "
+            "on the other, unlike a genuinely rectangular object (whose opposite edges would "
+            "both be high together); this asymmetry is consistent with the mask "
+            "over-segmenting into adjacent background/panel content on just one side, rather "
+            "than tightly following the object's own silhouette"
+        ),
+        root_cause=(
+            "the segmentation model's mask extends well beyond the intended object's real "
+            "silhouette along one side of its bbox -- animating it would move that "
+            "erroneously-included background/panel content along with the object, "
+            "invisible at rest but producing a visible hard-edged seam once displaced"
+        ),
+        architectural=False,
+        proposed_fix=(
+            "verify the grounding box is sane and has enough contrast against the "
+            "background on the affected side; consider a different segmentation candidate "
+            "or a more specific semantic_label prompt"
+        ),
+    )

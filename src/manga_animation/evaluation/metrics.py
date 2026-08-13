@@ -185,10 +185,11 @@ def classify_outcome(outcome: PageRunOutcome, sample: EvalSample | None) -> E2ES
       reproduced a sample's own named `regression_reference` (`_check_regression`), OR it
       contradicts the sample's confident (`ground_truth_uncertain=False`) `animation_possible`
       ground truth (a semantic false positive: completed on a confident "no"; or false
-      negative: failed on a confident "yes"), OR the run failed for a reason the harness could
-      not attribute to any real pipeline stage at all (`failing_stage is None` -- see
-      `evaluation.schemas.FailingStage`'s own "unexpected" value for the *attributed* case,
-      which is REJECTED, not ERROR, below).
+      negative: failed on a confident "yes" -- UNLESS the sample's own
+      `honest_failure_acceptable` explicitly allows an attributed failure here, see below), OR
+      the run failed for a reason the harness could not attribute to any real pipeline stage at
+      all (`failing_stage is None` -- see `evaluation.schemas.FailingStage`'s own "unexpected"
+      value for the *attributed* case, which is REJECTED, not ERROR, below).
     - **REJECTED**: the run failed at a specific, identifiable reason (an all-STATIC read, an
       empty grounding result, every validation candidate rejected, or even an unexpected
       exception the harness still recorded as `failing_stage="unexpected"`) and nothing above
@@ -201,13 +202,31 @@ def classify_outcome(outcome: PageRunOutcome, sample: EvalSample | None) -> E2ES
     Order matters: regression/ground-truth violations are checked before `status`, so a
     "completed" run that actually animated the wrong object is never miscategorized as PASS
     just because a video was produced.
+
+    `sample.honest_failure_acceptable` (Phase 8.3): a small, evidenced carve-out of the
+    confident-"yes"-but-failed branch. Two real samples (`phase3_action_page`,
+    `eval_weapon_effects`) have confident ground truth (something real and animatable IS
+    present) but their own `acceptable_outcome` prose has always explicitly allowed an honest
+    grounding/validation failure too, because the target is an effect-heavy motion cue rather
+    than one concrete, easily-prompted object -- a real, previously-undocumented mismatch
+    between that prose and this function's structured-fields-only logic, which classified both
+    as ERROR on real Kaggle GPU output (`docs/phase8-results.md` section 6.2) despite neither
+    being a defect per the sample's own written acceptance criterion. Only an *attributed*
+    failure (`failing_stage is not None`) counts as "honest" here -- a genuinely unattributed
+    failure still falls through to the unconditional ERROR check below, same as any other
+    sample.
     """
     if _check_regression(outcome, sample):
         return "ERROR"
     if sample is not None and not sample.ground_truth_uncertain:
         if sample.animation_possible == "no" and outcome.status == "completed":
             return "ERROR"
-        if sample.animation_possible == "yes" and outcome.status == "failed":
+        honest_failure = (
+            sample.honest_failure_acceptable
+            and outcome.status == "failed"
+            and outcome.failing_stage is not None
+        )
+        if sample.animation_possible == "yes" and outcome.status == "failed" and not honest_failure:
             return "ERROR"
     if outcome.status == "failed":
         return "ERROR" if outcome.failing_stage is None else "REJECTED"

@@ -176,11 +176,12 @@ samples:
       ACCEPT whose grounded crop is actually a face/dialogue-box region is the one outcome
       this sample must never reproduce again.
     ground_truth_uncertain: false
+    honest_failure_acceptable: true
     notes: >
       Chosen originally (Phase 3.1) specifically for an unambiguous drawn motion cue; the
       exact best single target among several real candidates is genuinely open, which is why
       expected_target_category is left null rather than guessed.
-    annotation_version: 1
+    annotation_version: 2
     golden_categories:
       [multiple_animatable_objects, weapon_or_effect, rotation, translation, complex_background]
     # Real Phase 7 evidence (docs/phase7-results.md section 6.2): a real automatic panel-mode
@@ -188,6 +189,11 @@ samples:
     # MICRO output. Real ADR 0011 evidence separately grounds/validates/renders a PRIMARY
     # weapon/ROTATE target on this same page in a different session. complex_background: a dark
     # action panel with speed-line effects, per this sample's own diversity_tag/notes.
+    # annotation_version bumped to 2 (Phase 8.3): honest_failure_acceptable=true formalizes
+    # what acceptable_outcome above already said ("an honest grounding/validation failure...
+    # are both acceptable outcomes") into a structured field -- classify_outcome previously
+    # ignored this prose and classified a real attributed failure as ERROR on real Kaggle GPU
+    # output (docs/phase8-results.md 6.2), contradicting this sample's own written contract.
 
   - sample_id: eval_static_dialogue
     image_path: examples/eval_static_dialogue.png
@@ -241,19 +247,26 @@ samples:
       already guards against, now on a second, visually distinct series/art style).
     regression_reference: null
     ground_truth_uncertain: false
+    honest_failure_acceptable: true
     notes: >
       A second, real, cross-series weapon/action/effects sample -- distinct series and art
       style from phase3_action_page, specifically to start giving the semantic-validation
       false-positive/false-negative measurement more than one series' worth of real evidence
       (docs/decisions/0006-grounding-target-validation.md's own flagged "untested on a second,
       visually distinct series" open question).
-    annotation_version: 1
+    annotation_version: 2
     golden_categories: [single_animatable_object, weapon_or_effect, rotation, complex_background]
     # Real evidence (docs/phase7-results.md section 8, ADR 0011): every real session's grounding
     # candidate for this page's one target (`weapon`) has been geometrically evaluated against
     # ROTATE's bound ("27.6% of its reference region, exceeding ROTATE's 15% cap") and rejected
     # -- a real, single-target, complex-background action panel, consistently REJECTED to date
     # (an acceptable outcome per this sample's own acceptable_outcome above, not a defect).
+    # annotation_version bumped to 2 (Phase 8.3): honest_failure_acceptable=true formalizes what
+    # acceptable_outcome above already said into a structured field -- classify_outcome
+    # previously classified this sample's real, attributed, documented-acceptable validation
+    # rejection as ERROR on real Kaggle GPU output (docs/phase8-results.md section 6.2 /
+    # section 13's own disclosed "known issue"), contradicting this sample's own written
+    # contract. This is the section-13 fix the Phase 8.3 brief asked for.
 
   - sample_id: verified_action_1
     image_path: examples/verified_action/action_sample_1.png

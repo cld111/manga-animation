@@ -729,19 +729,24 @@ def test_repeated_evaluation_never_mutates_the_real_dataset_manifest():
 
 
 def test_real_dataset_ground_truth_changes_carry_an_explicit_annotation_version():
-    """`sample_page_02` is this project's one real, evidenced case of a ground-truth revision --
+    """`sample_page_02` is this project's original real, evidenced case of a ground-truth
 
-    its `annotation_version` must reflect that it was intentionally revised (2), while every
-    unrevised sample stays at the schema's default (1). A version bump is the auditable signal
-    that a human reviewed and changed the annotation, not that a VLM run overwrote it.
+    revision -- its `annotation_version` must reflect that it was intentionally revised (2).
+    Phase 8.3 added a second, real revision reason (`honest_failure_acceptable`, formalizing
+    `phase3_action_page`/`eval_weapon_effects`'s own pre-existing `acceptable_outcome` prose
+    into a structured field) -- those two also sit at version 2. Every other, unrevised sample
+    stays at the schema's default (1). A version bump is the auditable signal that a human
+    reviewed and changed the annotation, not that a VLM run overwrote it.
     """
     samples = {s.sample_id: s for s in load_eval_dataset()}
     assert samples["sample_page_02"].annotation_version == 2
     assert samples["sample_page_02"].animation_possible == "uncertain"
     assert samples["sample_page_02"].ground_truth_uncertain is True
+
+    revised_at_v2 = {"sample_page_02", "phase3_action_page", "eval_weapon_effects"}
     for sample_id, sample in samples.items():
-        if sample_id != "sample_page_02":
-            assert sample.annotation_version == 1
+        expected = 2 if sample_id in revised_at_v2 else 1
+        assert sample.annotation_version == expected, sample_id
 
 
 def test_transform_geometry_failure_does_not_alter_semantic_ground_truth():
@@ -997,6 +1002,60 @@ def test_classify_outcome_uncertain_ground_truth_never_triggers_a_semantic_error
 def test_classify_outcome_handles_a_missing_sample_gracefully():
     outcome = _completed("a")
     assert classify_outcome(outcome, None) == "PASS"
+
+
+def test_classify_outcome_rejected_for_an_honest_attributed_failure_when_sample_allows_it():
+    """Phase 8.3: a real, previously-observed mismatch -- `eval_weapon_effects`/
+
+    `phase3_action_page`'s own `acceptable_outcome` prose has always allowed an honest
+    grounding/validation failure despite confident animation_possible="yes", but
+    `classify_outcome` only consulted structured fields and classified this as ERROR on real
+    Kaggle GPU output (docs/phase8-results.md section 6.2). `honest_failure_acceptable` closes
+    that gap: an attributed failure on such a sample is REJECTED (an honest negative), not
+    ERROR.
+    """
+    sample = _sample("a", animation_possible="yes", honest_failure_acceptable=True)
+    outcome = _failed("a", stage="validation", detail="all candidates failed target validation")
+    assert classify_outcome(outcome, sample) == "REJECTED"
+
+
+def test_classify_outcome_still_errors_on_unattributed_failure_despite_honest_failure_acceptable():
+    """`honest_failure_acceptable` only excuses an *attributed* failure -- a genuinely
+
+    unattributed one (`failing_stage=None`) is never "honest" and must still be ERROR.
+    """
+    sample = _sample("a", animation_possible="yes", honest_failure_acceptable=True)
+    outcome = PageRunOutcome(
+        sample_id="a", analysis_mode="page", status="failed", failing_stage=None
+    )
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_still_errors_on_confident_yes_failure_without_the_opt_in():
+    """Sanity check: `honest_failure_acceptable` defaults to False, so every sample that has
+
+    never opted in (e.g. `verified_action_1`/`verified_action_2`, whose own acceptable_outcome
+    explicitly treats any failure as a false negative) keeps the pre-Phase-8.3 ERROR behavior.
+    """
+    sample = _sample("a", animation_possible="yes")
+    outcome = _failed("a", stage="validation", detail="all candidates failed target validation")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_real_dataset_honest_failure_acceptable_matches_documented_samples():
+    """Locks in exactly which real samples opted into `honest_failure_acceptable`, and that
+
+    every one of them has prose in `acceptable_outcome` that actually says so -- catches a
+    future edit that flips the flag without updating the sample's own written contract, or
+    vice versa.
+    """
+    samples = {s.sample_id: s for s in load_eval_dataset()}
+    opted_in = {sid for sid, s in samples.items() if s.honest_failure_acceptable}
+    assert opted_in == {"phase3_action_page", "eval_weapon_effects"}
+    for sample_id in opted_in:
+        prose = samples[sample_id].acceptable_outcome.lower()
+        assert "honest" in prose
+        assert "acceptable" in prose
 
 
 def test_status_breakdown_rejects_negative_counts():

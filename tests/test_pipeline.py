@@ -252,6 +252,25 @@ class RecordingGroundingClient:
         self.unloaded = True
 
 
+def _region_mask(h: int, w: int, box) -> np.ndarray:
+    """A full-image-shape uint8 0/255 mask: a diamond inscribed in `box`, touching each of its
+
+    4 edges at exactly its midpoint -- same tight-bbox-equals-`box` property a solid rectangle
+    fill has, but without a solid rectangle's 100%-of-every-edge touch fraction. Phase 8.3:
+    `segmentation/segment.py::_validate_mask_shape` now rejects real masks shaped like that (see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md) -- a raw rectangle fill here
+    would trip that same real check, so every fake segmentation mask in this test module needs a
+    shape an actual SAM output could plausibly have.
+    """
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cx, cy = (box.x0 + box.x1 - 1) / 2.0, (box.y0 + box.y1 - 1) / 2.0
+    ax, ay = max((box.x1 - box.x0) / 2.0, 1e-9), max((box.y1 - box.y0) / 2.0, 1e-9)
+    yy, xx = np.mgrid[box.y0 : box.y1, box.x0 : box.x1]
+    local = (np.abs(xx - cx) / ax + np.abs(yy - cy) / ay) <= 1.0
+    mask[box.y0 : box.y1, box.x0 : box.x1] = local.astype(np.uint8) * 255
+    return mask
+
+
 class FakeSegmentationClient:
     model_id = "fake-sam2.1"
 
@@ -260,8 +279,37 @@ class FakeSegmentationClient:
 
     def segment(self, image, box) -> list[MaskCandidate]:
         h, w = image.shape[0], image.shape[1]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        mask[box.y0 : box.y1, box.x0 : box.x1] = 255
+        return [MaskCandidate(mask=_region_mask(h, w, box), iou_score=0.9)]
+
+    def unload(self) -> None:
+        pass
+
+
+class MaskShapeControlledSegmentationClient:
+    """Like `FakeSegmentationClient`, but returns a one-sided mask (Phase 8.3's
+
+    `segmentation/segment.py::_validate_mask_shape` real, evidenced "hugs one bbox edge, but not
+    the opposite one" rejection case -- a diamond silhouette unioned with a solid strip along
+    the box's own left third, matching the real downloaded SAM mask's LEFT=45.5%/RIGHT=0.56%
+    asymmetry) for any box in `bad_boxes`, and a realistic diamond mask (`_region_mask`) for
+    everything else -- lets a test control exactly which object gets a defective real mask
+    shape.
+    """
+
+    model_id = "fake-sam2.1"
+
+    def __init__(self, bad_boxes: set[tuple[int, int, int, int]]):
+        self._bad_boxes = bad_boxes
+
+    def load(self) -> None:
+        pass
+
+    def segment(self, image, box) -> list[MaskCandidate]:
+        h, w = image.shape[0], image.shape[1]
+        mask = _region_mask(h, w, box)
+        if box.as_xyxy() in self._bad_boxes:
+            strip_x1 = box.x0 + max(1, (box.x1 - box.x0) // 3)
+            mask[box.y0 : box.y1, box.x0 : strip_x1] = 255
         return [MaskCandidate(mask=mask, iou_score=0.9)]
 
     def unload(self) -> None:
@@ -1051,12 +1099,14 @@ def test_run_pipeline_multi_object_bbox_and_mask_are_correctly_associated_per_ob
     assert secondary.grounding.bbox.as_xyxy() == box_secondary
 
     # Each object's mask is populated only inside ITS OWN box and is exactly zero inside
-    # the OTHER object's box.
+    # the OTHER object's box. `FakeSegmentationClient` fills a diamond inscribed in its box
+    # (Phase 8.3, not a solid rectangle -- see `_region_mask`'s docstring), so "populated
+    # inside its own box" is `.any()`, not `.all()`.
     px0, py0, px1, py1 = box_primary
     sx0, sy0, sx1, sy1 = box_secondary
-    assert result.segmentation.mask[py0:py1, px0:px1].all()
+    assert result.segmentation.mask[py0:py1, px0:px1].any()
     assert not result.segmentation.mask[sy0:sy1, sx0:sx1].any()
-    assert secondary.segmentation.mask[sy0:sy1, sx0:sx1].all()
+    assert secondary.segmentation.mask[sy0:sy1, sx0:sx1].any()
     assert not secondary.segmentation.mask[py0:py1, px0:px1].any()
 
 
@@ -1142,6 +1192,219 @@ def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loo
     # neither did) -- at least one frame differs from frame 0 within its own padded region.
     assert any(not np.array_equal(f[a_region], frames[0][a_region]) for f in frames[1:])
     assert any(not np.array_equal(f[b_region], frames[0][b_region]) for f in frames[1:])
+
+
+def test_run_pipeline_drops_a_secondary_object_whose_mask_overlaps_an_already_accepted_one(
+    config, tmp_path: Path
+):
+    """Phase 8.3, Defect A regression: `verified_action_1`'s real "duplicate silhouette"
+
+    ghost was traced to two independently-accepted SECONDARY `character_hair` objects whose
+    masks substantially overlapped, each animated with its own MotionSpec -- invisible at
+    rest, a visible double-exposure once their motions diverged (see
+    docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md). This is the exact invariant
+    the fix (`_drop_overlapping_secondary_objects`) protects: two SECONDARY objects whose
+    real segmentation masks overlap far above `_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION` must
+    never both reach the render -- the second one is dropped instead, non-fatally.
+    """
+    box_primary = (110, 130, 160, 200)  # "raised_hand" -- ROTATE, does not overlap either hair box
+    box_hair_left = (10, 10, 60, 90)  # "left_hair" -> TRANSLATE (contains "hair")
+    box_hair_right = (15, 15, 58, 88)  # "right_hair" -- nested almost entirely inside the above
+
+    decisions = [
+        _primary_decision("raised_hand"),
+        _secondary_decision("left_hair"),
+        _secondary_decision("right_hair"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"raised_hand": box_primary, "left_hair": box_hair_left, "right_hair": box_hair_right}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    # The run itself still succeeds -- an overlap conflict between two SECONDARY objects is a
+    # non-fatal drop, exactly like a grounding/validation failure for a non-PRIMARY object.
+    assert result.render.output_path.exists()
+    assert result.primary_object.semantic_label == "raised_hand"
+
+    # Exactly one of the two overlapping hair objects made it into the render...
+    assert len(result.secondary_objects) == 1
+    kept_label = result.secondary_objects[0].object_plan.semantic_label
+    assert kept_label == "left_hair"  # first-encountered-in-plan-order wins, deterministically
+
+    # ...and the other was dropped, attributed to this exact new reason, not silently lost.
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "right_hair"
+    assert dropped.failing_stage == "segmentation"
+    assert "overlaps" in dropped.reason
+
+
+def test_run_pipeline_keeps_two_secondary_objects_with_genuinely_distinct_masks(
+    config, tmp_path: Path
+):
+    """Negative control for the overlap guard above: two real SECONDARY objects whose masks
+
+    do NOT meaningfully overlap must both survive -- the fix must not become an accidental cap
+    on multi-object rendering in general (ADR 0010's core Phase 4 guarantee).
+    """
+    box_primary = (10, 10, 60, 90)
+    box_hair = (70, 10, 110, 60)  # "trailing_cloth" default label -- disjoint from box_hand
+    box_hand = (70, 130, 110, 190)  # "raised_hand" -- disjoint from box_hair too
+
+    decisions = [
+        _primary_decision("character_hair"),
+        _secondary_decision("trailing_cloth"),
+        _secondary_decision("raised_hand"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "trailing_cloth": box_hair, "raised_hand": box_hand}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert len(result.secondary_objects) == 2
+    assert result.dropped_objects == []
+
+
+def test_run_pipeline_keeps_two_secondary_objects_whose_bboxes_intersect_but_masks_do_not(
+    config, tmp_path: Path
+):
+    """Stronger negative control than the one above (found by independent review): the
+
+    previous negative control uses fully disjoint bboxes, which short-circuits at
+    `_bbox_intersects` and never exercises the actual pixel-overlap arithmetic in
+    `_mask_overlap_fraction`. Here `box_hair`/`box_hand`'s bboxes DO intersect (a real 10x10
+    corner overlap), but `_region_mask`'s diamond shape tapers to a point at each bbox corner,
+    so the actual mask intersection in that corner is 0 -- both objects must still survive.
+    """
+    box_primary = (10, 10, 60, 90)
+    box_hair = (70, 10, 120, 90)  # "trailing_cloth" -- bbox-disjoint from box_hand
+    box_hand = (110, 80, 160, 160)  # "raised_hand" -- bbox INTERSECTS box_hair at (110-120, 80-90)
+
+    decisions = [
+        _primary_decision("character_hair"),
+        _secondary_decision("trailing_cloth"),
+        _secondary_decision("raised_hand"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "trailing_cloth": box_hair, "raised_hand": box_hand}
+    )
+
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert len(result.secondary_objects) == 2
+    assert result.dropped_objects == []
+
+
+def test_run_pipeline_raises_stage_segmentation_when_primary_mask_hugs_a_bbox_edge(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 8.3, Defect B regression: a real SAM mask that hugs one edge of its own tight
+
+    bbox (see `test_segment_object_raises_on_a_mask_that_hugs_one_bbox_edge` for the real
+    evidence) is exactly the shape traced to `phase3_action_page`'s real "vertical seam"
+    defect -- when that shape lands on the PRIMARY object, the run must fail outright (stage=
+    "segmentation"), the same hard-failure policy every other PRIMARY-stage defect already
+    gets, rather than silently rendering the defective video.
+    """
+    box_primary = (10, 10, 60, 90)
+    grounding_client = FakeGroundingClient(box=box_primary)
+    segmentation_client = MaskShapeControlledSegmentationClient(bad_boxes={box_primary})
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_primary_decision()]),
+            grounding_client=grounding_client,
+            segmentation_client=segmentation_client,
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert exc_info.value.stage == "segmentation"
+    assert "hugs" in exc_info.value.detail
+
+
+def test_run_pipeline_drops_a_secondary_whose_mask_hugs_a_bbox_edge_without_failing_the_run(
+    config, tmp_path: Path
+):
+    """Same real defect shape as above, but on a SECONDARY object -- must be dropped
+
+    non-fatally (this is the pre-existing orchestration gap Phase 8.3 also found and fixed: the
+    segmentation stage's per-object loop previously had no try/except at all, so a SECONDARY's
+    segmentation failure used to fail the WHOLE run, contradicting this module's own documented
+    policy).
+    """
+    box_primary = (10, 10, 60, 90)
+    box_secondary = (70, 100, 110, 150)  # "raised_hand" -- gets the defective mask shape
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"character_hair": box_primary, "raised_hand": box_secondary}
+    )
+    segmentation_client = MaskShapeControlledSegmentationClient(bad_boxes={box_secondary})
+
+    decisions = [_primary_decision("character_hair"), _secondary_decision("raised_hand")]
+    out_dir = tmp_path / "out"
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=segmentation_client,
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert result.render.output_path.exists()
+    assert result.secondary_objects == []
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "raised_hand"
+    assert dropped.failing_stage == "segmentation"
+    assert "hugs" in dropped.reason
 
 
 def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(

@@ -144,6 +144,20 @@ class EvalSample(BaseModel):
         description="True when even the fields above are a best-effort read, not a confident "
         "one -- e.g. sample_page_01.png's real, evidenced VLM nondeterminism.",
     )
+    honest_failure_acceptable: bool = Field(
+        default=False,
+        description="True when this sample's own acceptable_outcome explicitly allows an "
+        "honest, attributed grounding/validation failure (no video) as a good result, even "
+        "though animation_possible='yes' and ground_truth_uncertain=False -- distinct from "
+        "ground_truth_uncertain, which means the *ground truth itself* is unsettled. Here the "
+        "ground truth is confident (something real and animatable IS present), but the target "
+        "is inherently hard to ground (e.g. an effect-heavy motion cue with no single concrete "
+        "object), so a correct pipeline can still legitimately fail to find/validate it. Only "
+        "an *attributed* failure (PageRunOutcome.failing_stage is not None) counts as honest -- "
+        "see classify_outcome. Phase 8.3: formalizes a distinction phase3_action_page/"
+        "eval_weapon_effects's acceptable_outcome prose already made, into a structured, "
+        "checkable field (docs/decisions/0014's 'Open questions').",
+    )
     notes: str = Field(default="", description="Free-text reasoning behind the labels above.")
     annotation_provenance: AnnotationProvenance | None = Field(
         default=None,
@@ -157,7 +171,8 @@ class EvalSample(BaseModel):
         description="Bumped whenever this sample's ground-truth fields (animation_possible, "
         "expected_target_category, expected_motion_category, expected_region_note, "
         "acceptable_outcome, regression_reference, ground_truth_uncertain, "
-        "annotation_provenance) change intentionally -- an explicit, auditable signal that this "
+        "honest_failure_acceptable, annotation_provenance) change intentionally -- an explicit, "
+        "auditable signal that this "
         "specific annotation was reviewed and revised, on top of (not instead of) git's own "
         "commit history. Never bumped by any code path in this project; only by a human editing "
         "configs/phase3_3_eval_dataset.yaml.",
