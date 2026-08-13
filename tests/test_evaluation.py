@@ -10,12 +10,25 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from manga_animation.evaluation.dataset import EvalSample, load_eval_dataset
-from manga_animation.evaluation.metrics import Rate, compute_metrics
+from manga_animation.evaluation.dataset import (
+    GOLDEN_DATASET_CATEGORIES,
+    EvalSample,
+    golden_category_coverage,
+    load_eval_dataset,
+    uncovered_golden_categories,
+)
+from manga_animation.evaluation.metrics import (
+    Rate,
+    StatusBreakdown,
+    classify_outcome,
+    compute_metrics,
+)
 from manga_animation.evaluation.nondeterminism import RepeatedRunRecord, summarize_repeated_runs
 from manga_animation.evaluation.schemas import (
+    LoopMetricsOutcome,
     ObjectAttemptOutcome,
     PageRunOutcome,
+    RenderSummary,
     ValidationAttemptOutcome,
 )
 
@@ -563,6 +576,59 @@ def test_eval_dataset_uncertain_samples_are_explicitly_flagged():
         assert sample.ground_truth_uncertain is True
 
 
+# --- Phase 8: golden E2E dataset category coverage -----------------------------------------
+
+
+def test_eval_sample_defaults_to_no_golden_categories():
+    sample = _sample("a")
+    assert sample.golden_categories == []
+
+
+def test_golden_category_coverage_maps_every_required_category():
+    samples = [
+        _sample("a", golden_categories=["single_animatable_object", "translation"]),
+        _sample("b", golden_categories=["translation"]),
+    ]
+    coverage = golden_category_coverage(samples)
+    assert set(coverage.keys()) == set(GOLDEN_DATASET_CATEGORIES)
+    assert coverage["translation"] == ["a", "b"]
+    assert coverage["single_animatable_object"] == ["a"]
+    assert coverage["rotation"] == []  # a real, honest gap -- empty, not absent
+
+
+def test_uncovered_golden_categories_lists_only_empty_ones():
+    samples = [_sample("a", golden_categories=["translation"])]
+    uncovered = uncovered_golden_categories(samples)
+    assert "translation" not in uncovered
+    assert "rotation" in uncovered
+    assert set(uncovered) == set(GOLDEN_DATASET_CATEGORIES) - {"translation"}
+
+
+def test_golden_category_coverage_rejects_an_unknown_category_at_load_time():
+    with pytest.raises(ValidationError):
+        _sample("a", golden_categories=["not_a_real_category"])
+
+
+def test_real_golden_dataset_has_exactly_the_two_disclosed_coverage_gaps():
+    """The real dataset's own header comment (configs/phase3_3_eval_dataset.yaml) discloses
+
+    two categories with zero real coverage -- locks that honest disclosure in as a checkable
+    fact instead of only prose, and would fail loudly if a future edit silently covered (or
+    silently dropped coverage for) one of these without updating the header note.
+    """
+    samples = load_eval_dataset()
+    assert set(uncovered_golden_categories(samples)) == {
+        "partially_occluded_object",
+        "scale_or_deformation",
+    }
+
+
+def test_real_golden_dataset_every_sample_has_at_least_one_category():
+    samples = load_eval_dataset()
+    for sample in samples:
+        assert sample.golden_categories, f"{sample.sample_id} has no golden_categories"
+
+
 def test_eval_sample_loader_roundtrips_a_minimal_yaml(tmp_path):
     manifest = tmp_path / "mini.yaml"
     manifest.write_text(
@@ -846,3 +912,156 @@ def test_verified_action_samples_do_not_invent_target_or_region_ground_truth():
         assert sample.expected_target_category is None
         assert sample.expected_motion_category is None
         assert sample.expected_region_note is None
+
+
+# --- Phase 8: E2E status classification (PASS / PASS_WITH_FALLBACK / REJECTED / ERROR) -----
+
+
+def _render_summary(**overrides) -> RenderSummary:
+    defaults = dict(
+        frame_count=96,
+        fps=24.0,
+        resolution=(720, 1000),
+        duration_s=4.0,
+        codec="h264",
+        pixel_format="yuv420p",
+        seamless_loop_verified=True,
+    )
+    defaults.update(overrides)
+    return RenderSummary(**defaults)
+
+
+def test_classify_outcome_pass_for_a_fully_automatic_completion():
+    outcome = _completed("a")
+    assert classify_outcome(outcome, _sample("a")) == "PASS"
+
+
+def test_classify_outcome_pass_with_fallback_when_a_controlled_plan_was_used():
+    outcome = _completed("a", used_fallback_plan=True)
+    assert classify_outcome(outcome, _sample("a")) == "PASS_WITH_FALLBACK"
+
+
+def test_classify_outcome_rejected_for_an_attributed_failure_with_no_ground_truth_conflict():
+    outcome = _failed("a", stage="analysis", detail="every object STATIC")
+    assert classify_outcome(outcome, _sample("a", animation_possible="uncertain")) == "REJECTED"
+
+
+def test_classify_outcome_rejected_for_a_harness_attributed_unexpected_exception():
+    """`failing_stage="unexpected"` (the evaluation harness's own catch-all attribution, see
+
+    `evaluation.schemas.FailingStage`) is still an attributed reason -- REJECTED, not ERROR.
+    """
+    outcome = _failed("a", stage="unexpected", detail="RuntimeError: boom")
+    assert classify_outcome(outcome, None) == "REJECTED"
+
+
+def test_classify_outcome_error_for_a_completely_unattributed_failure():
+    outcome = PageRunOutcome(
+        sample_id="a", analysis_mode="page", status="failed", failing_stage=None
+    )
+    assert classify_outcome(outcome, None) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_semantic_false_positive():
+    sample = _sample("a", animation_possible="no")
+    outcome = _completed("a")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_semantic_false_negative():
+    sample = _sample("a", animation_possible="yes")
+    outcome = _failed("a", stage="analysis", detail="every object STATIC")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_error_for_a_reproduced_regression():
+    sample = _sample(
+        "a",
+        regression_reference="must never accept the bad crop",
+        expected_target_category="weapon",
+    )
+    outcome = _completed("a", primary_semantic_label="hair")
+    assert classify_outcome(outcome, sample) == "ERROR"
+
+
+def test_classify_outcome_uncertain_ground_truth_never_triggers_a_semantic_error():
+    """A confident-looking "yes"/"no" on a sample explicitly marked `ground_truth_uncertain`
+
+    must not be used to flag ERROR -- mirrors compute_metrics's own fp/fn exclusion.
+    """
+    sample = _sample("a", animation_possible="no", ground_truth_uncertain=True)
+    outcome = _completed("a")
+    assert classify_outcome(outcome, sample) == "PASS"
+
+
+def test_classify_outcome_handles_a_missing_sample_gracefully():
+    outcome = _completed("a")
+    assert classify_outcome(outcome, None) == "PASS"
+
+
+def test_status_breakdown_rejects_negative_counts():
+    with pytest.raises(ValueError):
+        StatusBreakdown(-1, 0, 0, 0)
+
+
+def test_status_breakdown_total_sums_all_four_buckets():
+    breakdown = StatusBreakdown(
+        pass_count=2, pass_with_fallback_count=1, rejected_count=3, error_count=1
+    )
+    assert breakdown.total == 7
+
+
+def test_compute_metrics_status_breakdown_sums_to_sample_count():
+    samples = {
+        "pass": _sample("pass"),
+        "fallback": _sample("fallback"),
+        "rejected": _sample("rejected", animation_possible="uncertain"),
+        "error": _sample("error", animation_possible="no"),
+    }
+    outcomes = [
+        _completed("pass"),
+        _completed("fallback", used_fallback_plan=True),
+        _failed("rejected", stage="analysis", detail="every object STATIC"),
+        _completed("error"),  # semantic false positive against animation_possible="no"
+    ]
+    report = compute_metrics(outcomes, samples)
+    assert report.status_breakdown == StatusBreakdown(
+        pass_count=1, pass_with_fallback_count=1, rejected_count=1, error_count=1
+    )
+    assert report.status_breakdown.total == report.sample_count == 4
+
+
+# --- Phase 8: RenderSummary / LoopMetricsOutcome round-tripping ----------------------------
+
+
+def test_render_summary_round_trips_through_json_with_loop_metrics():
+    summary = _render_summary(
+        loop_metrics=LoopMetricsOutcome(
+            ordinary_adjacent_step_mean_abs_diff=1.5,
+            wrap_step_mean_abs_diff=1.8,
+            wrap_step_within_2x_ordinary=True,
+            ordinary_adjacent_step_ssim=0.98,
+            wrap_step_ssim=0.97,
+            wrap_ssim_within_tolerance=True,
+        )
+    )
+    restored = RenderSummary.model_validate_json(summary.model_dump_json())
+    assert restored == summary
+
+
+def test_render_summary_loop_metrics_defaults_to_none():
+    summary = _render_summary()
+    assert summary.loop_metrics is None
+
+
+def test_page_run_outcome_render_summary_defaults_to_none_and_schema_version_1():
+    outcome = _failed("a", stage="analysis")
+    assert outcome.render_summary is None
+    assert outcome.schema_version == 1
+
+
+def test_page_run_outcome_accepts_a_populated_render_summary():
+    outcome = _completed("a", render_summary=_render_summary(), schema_version=3)
+    assert outcome.render_summary is not None
+    assert outcome.render_summary.frame_count == 96
+    assert outcome.schema_version == 3

@@ -52,17 +52,20 @@ from manga_animation.core.logging import setup_logging
 from manga_animation.evaluation import (
     EvalSample,
     EvaluationReport,
+    LoopMetricsOutcome,
     NondeterminismSummary,
     ObjectAttemptOutcome,
     PageRunOutcome,
+    RenderSummary,
     RepeatedRunRecord,
     ValidationAttemptOutcome,
+    classify_outcome,
     compute_metrics,
     load_eval_dataset,
     summarize_repeated_runs,
 )
 from manga_animation.pipeline.orchestrator import build_default_clients, run_pipeline
-from manga_animation.pipeline.types import PipelineStageError
+from manga_animation.pipeline.types import PipelineStageError, RenderResult
 from manga_animation.schemas.animation_plan import MotionType
 
 # Phase 7.2.2: previously a hardcoded 2-sample subset (sample_page_01/02) -- the real Phase
@@ -131,6 +134,35 @@ def _object_outcome_motion_type(motion_type: MotionType) -> Literal["secondary",
     )
 
 
+def _render_summary_from_result(render: RenderResult) -> RenderSummary:
+    """`pipeline.types.RenderResult` (carries a `Path`, not JSON-serializable as-is) ->
+
+    `evaluation.schemas.RenderSummary` (Phase 8) -- mirrors `_object_outcome_motion_type`'s
+    role for the render side of a `PageRunOutcome`.
+    """
+    loop_metrics = None
+    if render.loop_metrics is not None:
+        lm = render.loop_metrics
+        loop_metrics = LoopMetricsOutcome(
+            ordinary_adjacent_step_mean_abs_diff=lm.ordinary_adjacent_step_mean_abs_diff,
+            wrap_step_mean_abs_diff=lm.wrap_step_mean_abs_diff,
+            wrap_step_within_2x_ordinary=lm.wrap_step_within_2x_ordinary,
+            ordinary_adjacent_step_ssim=lm.ordinary_adjacent_step_ssim,
+            wrap_step_ssim=lm.wrap_step_ssim,
+            wrap_ssim_within_tolerance=lm.wrap_ssim_within_tolerance,
+        )
+    return RenderSummary(
+        frame_count=render.frame_count,
+        fps=render.fps,
+        resolution=render.resolution,
+        duration_s=render.duration_s,
+        codec=render.codec,
+        pixel_format=render.pixel_format,
+        seamless_loop_verified=render.seamless_loop_verified,
+        loop_metrics=loop_metrics,
+    )
+
+
 def _run_one(
     sample: EvalSample,
     mode: Literal["page", "panel"],
@@ -156,9 +188,10 @@ def _run_one(
     except PipelineStageError as exc:
         # No PipelineRunResult exists on this path (run_pipeline raised before returning), so
         # there is no visibility into which SECONDARY/MICRO objects might have been attempted
-        # -- object_outcomes stays empty here, same as any other schema_version=2 page that
-        # genuinely had none. schema_version is still bumped: this producer supports the
-        # field, it just has nothing to report for a failed run.
+        # -- object_outcomes/render_summary stay empty/None here, same as any other
+        # schema_version=3 page that genuinely had none/nothing rendered. schema_version is
+        # still bumped: this producer supports both fields, it just has nothing to report for
+        # a failed run.
         return PageRunOutcome(
             sample_id=sample.sample_id,
             analysis_mode=mode,
@@ -167,7 +200,7 @@ def _run_one(
             failure_detail=exc.detail,
             panel_count=panel_count,
             panel_sources=panel_sources,
-            schema_version=2,
+            schema_version=3,
         )
     except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
         # the rest of the evaluation run; recorded distinctly from a classified
@@ -181,7 +214,7 @@ def _run_one(
             failure_detail=f"{type(exc).__name__}: {exc}",
             panel_count=panel_count,
             panel_sources=panel_sources,
-            schema_version=2,
+            schema_version=3,
         )
 
     object_outcomes = [
@@ -249,7 +282,8 @@ def _run_one(
             for v in result.validation_attempts
         ],
         object_outcomes=object_outcomes,
-        schema_version=2,
+        render_summary=_render_summary_from_result(result.render),
+        schema_version=3,
     )
 
 
@@ -362,6 +396,7 @@ def main() -> None:
     vlm_client = clients[0]
 
     panel_evidence = {s.sample_id: _panel_detection_evidence(Path(s.image_path)) for s in samples}
+    samples_by_id = {s.sample_id: s for s in samples}
 
     outcomes: dict[str, list[PageRunOutcome]] = {"page": [], "panel": []}
     for mode in ("page", "panel"):
@@ -377,11 +412,12 @@ def main() -> None:
                 panel_sources,
             )
             outcomes[mode].append(outcome)
+            status = classify_outcome(outcome, samples_by_id.get(sample.sample_id))
             print(
-                f"[{mode}] {sample.sample_id}: {outcome.status} ({outcome.failing_stage or 'ok'})"
+                f"[{mode}] {sample.sample_id}: {status} -- {outcome.status} "
+                f"({outcome.failing_stage or 'ok'})"
             )
 
-    samples_by_id = {s.sample_id: s for s in samples}
     reports = {mode: compute_metrics(outcomes[mode], samples_by_id) for mode in ("page", "panel")}
 
     nondeterminism_summaries = [
@@ -444,6 +480,12 @@ def main() -> None:
             print(f"  panel_detection_multi_panel_rate: {r.panel_detection_multi_panel_rate}")
         print(f"  secondary_object_render_rate: {r.secondary_object_render_rate}")
         print(f"  micro_object_render_rate: {r.micro_object_render_rate}")
+        sb = r.status_breakdown
+        print(
+            "  status_breakdown: "
+            f"PASS={sb.pass_count} PASS_WITH_FALLBACK={sb.pass_with_fallback_count} "
+            f"REJECTED={sb.rejected_count} ERROR={sb.error_count} (total={sb.total})"
+        )
     print("\n--- nondeterminism ---")
     for s in nondeterminism_summaries:
         print(

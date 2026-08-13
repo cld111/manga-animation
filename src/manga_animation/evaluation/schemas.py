@@ -16,6 +16,20 @@ from pydantic import BaseModel, Field
 
 from manga_animation.pipeline.types import Stage
 
+FailingStage = Stage | Literal["unexpected"]
+"""`Stage` (the exact 8 real `PipelineStageError.stage` values) plus one evaluation-harness-only
+
+value: `"unexpected"`, for a bare (non-`PipelineStageError`) exception the harness could not
+attribute to a specific pipeline stage at all (`scripts/run_phase3_3_evaluation.py`'s
+`except Exception` path). Phase 8 fix: `PageRunOutcome.failing_stage` was previously typed as
+plain `Stage | None`, which does not include `"unexpected"` -- a real, disclosed, latent bug
+(see docs/phase7-results.md section 13): constructing `PageRunOutcome(failing_stage=
+"unexpected", ...)` would have raised `pydantic.ValidationError` the first time that exception
+path actually fired for real, masking the original exception with an unrelated validation
+error. Never fixed in `pipeline.types.Stage` itself -- that type stays exact/closed, since every
+real `PipelineStageError.stage` value genuinely is one of the 8 real stages; this is a strictly
+evaluation-reporting concern, kept local to this module."""
+
 
 class ValidationAttemptOutcome(BaseModel):
     """Mirrors the fields of `pipeline.types.ValidationResult` that matter for evaluation --
@@ -60,6 +74,37 @@ class ObjectAttemptOutcome(BaseModel):
     validation_attempts: list[ValidationAttemptOutcome] = []
 
 
+class LoopMetricsOutcome(BaseModel):
+    """Mirrors `pipeline.types.LoopMetrics` for JSON round-tripping -- see this module's
+
+    docstring for why a serializable mirror type is used instead of the dataclass itself.
+    """
+
+    ordinary_adjacent_step_mean_abs_diff: float
+    wrap_step_mean_abs_diff: float
+    wrap_step_within_2x_ordinary: bool
+    ordinary_adjacent_step_ssim: float
+    wrap_step_ssim: float
+    wrap_ssim_within_tolerance: bool
+
+
+class RenderSummary(BaseModel):
+    """Mirrors the fields of `pipeline.types.RenderResult` that matter for evaluation -- the
+
+    Phase 8 brief's required "output dimensions; frame count; FPS; duration; codec/container;
+    loop metrics" fields, for one completed `PageRunOutcome`.
+    """
+
+    frame_count: int
+    fps: float
+    resolution: tuple[int, int]
+    duration_s: float
+    codec: str
+    pixel_format: str
+    seamless_loop_verified: bool
+    loop_metrics: LoopMetricsOutcome | None = None
+
+
 class PageRunOutcome(BaseModel):
     """One real (or faked, in tests) `run_pipeline` invocation's outcome for one evaluation
 
@@ -69,7 +114,7 @@ class PageRunOutcome(BaseModel):
     sample_id: str
     analysis_mode: Literal["page", "panel"]
     status: Literal["completed", "failed"]
-    failing_stage: Stage | None = None
+    failing_stage: FailingStage | None = None
     failure_detail: str | None = None
     used_fallback_plan: bool = False
     panel_count: int | None = None
@@ -85,6 +130,13 @@ class PageRunOutcome(BaseModel):
     single-object plan with no SECONDARY/MICRO candidates at all -- `schema_version`
     distinguishes those two empty-list cases; this field alone cannot.
     """
+    render_summary: RenderSummary | None = None
+    """Phase 8: what was actually measured about the rendered output, for every `status ==
+
+    "completed"` outcome -- `None` for a failed run (nothing was rendered) and for every
+    outcome recorded before this field existed (`schema_version < 3`, see below). Populated
+    from `PipelineRunResult.render` (`pipeline/types.py::RenderResult`) at the same point
+    `primary_semantic_label`/`validation_attempts`/etc. already are."""
     schema_version: int = Field(
         default=1,
         ge=1,
@@ -93,10 +145,11 @@ class PageRunOutcome(BaseModel):
             "only reporting, matching every PageRunOutcome recorded before this field "
             "existed). 2 = Phase 7.2.1 onward: a producer that populates object_outcomes for "
             "every SECONDARY/MICRO object the plan proposed, even when the resulting list is "
-            "empty because none existed. This is a PREDICTION-schema version a producer sets "
-            "when it constructs a record -- unlike EvalSample.annotation_version (ADR 0009), "
-            "which is a ground-truth-revision signal only a human bumps by hand -- so it is "
-            "set programmatically wherever a PageRunOutcome is actually constructed (see "
-            "scripts/run_phase3_3_evaluation.py), not left to drift."
+            "empty because none existed. 3 = Phase 8 onward: a producer that also populates "
+            "render_summary for every completed outcome. This is a PREDICTION-schema version "
+            "a producer sets when it constructs a record -- unlike EvalSample."
+            "annotation_version (ADR 0009), which is a ground-truth-revision signal only a "
+            "human bumps by hand -- so it is set programmatically wherever a PageRunOutcome is "
+            "actually constructed (see scripts/run_phase3_3_evaluation.py), not left to drift."
         ),
     )

@@ -8,6 +8,7 @@ present a percentage without its denominator."
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from manga_animation.evaluation.dataset import EvalSample
 from manga_animation.evaluation.schemas import PageRunOutcome
@@ -128,6 +129,89 @@ class EvaluationReport:
     two cases are NOT distinguished by this rate alone."""
     micro_object_render_rate: Rate
     """Same as `secondary_object_render_rate`, for `motion_type == "micro"`."""
+    status_breakdown: StatusBreakdown
+    """Phase 8: every outcome in this report classified into the brief's required PASS /
+
+    PASS_WITH_FALLBACK / REJECTED / ERROR vocabulary -- see `classify_outcome`. Counts sum to
+    `sample_count` exactly (`StatusBreakdown.total`)."""
+
+
+E2EStatus = Literal["PASS", "PASS_WITH_FALLBACK", "REJECTED", "ERROR"]
+
+
+@dataclass(frozen=True, slots=True)
+class StatusBreakdown:
+    """How many outcomes in one `EvaluationReport` fell into each `E2EStatus` bucket -- the
+
+    Phase 8 brief's explicit requirement ("must clearly distinguish PASS; PASS WITH FALLBACK;
+    REJECTED; ERROR. Do not hide rejected cases."), built from per-outcome `classify_outcome`
+    calls rather than a new parallel counting pass.
+    """
+
+    pass_count: int
+    pass_with_fallback_count: int
+    rejected_count: int
+    error_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            c < 0
+            for c in (
+                self.pass_count,
+                self.pass_with_fallback_count,
+                self.rejected_count,
+                self.error_count,
+            )
+        ):
+            raise ValueError(f"StatusBreakdown counts cannot be negative: {self}")
+
+    @property
+    def total(self) -> int:
+        return (
+            self.pass_count + self.pass_with_fallback_count + self.rejected_count
+            + self.error_count
+        )
+
+
+def classify_outcome(outcome: PageRunOutcome, sample: EvalSample | None) -> E2EStatus:
+    """The Phase 8 brief's required PASS/PASS_WITH_FALLBACK/REJECTED/ERROR vocabulary for one
+
+    outcome, built entirely from signals this module already computes elsewhere
+    (`_check_regression`, and the same semantic false-positive/false-negative logic
+    `compute_metrics` uses) -- no new ground-truth interpretation invented for this function
+    alone.
+
+    - **ERROR**: real, structured evidence of a wrong or broken result -- this outcome
+      reproduced a sample's own named `regression_reference` (`_check_regression`), OR it
+      contradicts the sample's confident (`ground_truth_uncertain=False`) `animation_possible`
+      ground truth (a semantic false positive: completed on a confident "no"; or false
+      negative: failed on a confident "yes"), OR the run failed for a reason the harness could
+      not attribute to any real pipeline stage at all (`failing_stage is None` -- see
+      `evaluation.schemas.FailingStage`'s own "unexpected" value for the *attributed* case,
+      which is REJECTED, not ERROR, below).
+    - **REJECTED**: the run failed at a specific, identifiable reason (an all-STATIC read, an
+      empty grounding result, every validation candidate rejected, or even an unexpected
+      exception the harness still recorded as `failing_stage="unexpected"`) and nothing above
+      flags it as contradicting ground truth -- a correct, honest negative result per this
+      project's "Static Is a Valid Result" principle (docs/architecture.md), not a defect.
+    - **PASS_WITH_FALLBACK**: the run completed using a human-authored controlled-fallback plan
+      (`used_fallback_plan=True`) rather than fully automatic operation.
+    - **PASS**: the run completed fully automatically, with nothing above flagging a problem.
+
+    Order matters: regression/ground-truth violations are checked before `status`, so a
+    "completed" run that actually animated the wrong object is never miscategorized as PASS
+    just because a video was produced.
+    """
+    if _check_regression(outcome, sample):
+        return "ERROR"
+    if sample is not None and not sample.ground_truth_uncertain:
+        if sample.animation_possible == "no" and outcome.status == "completed":
+            return "ERROR"
+        if sample.animation_possible == "yes" and outcome.status == "failed":
+            return "ERROR"
+    if outcome.status == "failed":
+        return "ERROR" if outcome.failing_stage is None else "REJECTED"
+    return "PASS_WITH_FALLBACK" if outcome.used_fallback_plan else "PASS"
 
 
 def _is_static_failure(outcome: PageRunOutcome) -> bool:
@@ -271,6 +355,14 @@ def compute_metrics(
     secondary_rendered = sum(1 for oo in secondary_outcomes if oo.status == "rendered")
     micro_rendered = sum(1 for oo in micro_outcomes if oo.status == "rendered")
 
+    statuses = [classify_outcome(o, samples.get(o.sample_id)) for o in outcomes]
+    status_breakdown = StatusBreakdown(
+        pass_count=statuses.count("PASS"),
+        pass_with_fallback_count=statuses.count("PASS_WITH_FALLBACK"),
+        rejected_count=statuses.count("REJECTED"),
+        error_count=statuses.count("ERROR"),
+    )
+
     return EvaluationReport(
         analysis_mode=analysis_mode,
         sample_count=n,
@@ -289,4 +381,5 @@ def compute_metrics(
         panel_detection_multi_panel_rate=panel_rate,
         secondary_object_render_rate=Rate(secondary_rendered, len(secondary_outcomes)),
         micro_object_render_rate=Rate(micro_rendered, len(micro_outcomes)),
+        status_breakdown=status_breakdown,
     )

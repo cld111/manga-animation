@@ -23,7 +23,12 @@ import numpy as np
 from PIL import Image
 
 from manga_animation.core.logging import get_logger
-from manga_animation.pipeline.types import FrameSequence, PipelineStageError, RenderResult
+from manga_animation.pipeline.types import (
+    FrameSequence,
+    LoopMetrics,
+    PipelineStageError,
+    RenderResult,
+)
 
 logger = get_logger(__name__)
 
@@ -95,7 +100,7 @@ def render(
     # for the same reason a `mask < 8` threshold was wrong for static-region checks (see ADR
     # 0005) -- it flags healthy periodic motion as "not seamless".
     first_frame = frames.frames[0]
-    source_loop_continuity = _loop_continuity(frames.frames)
+    source_loop_metrics = compute_loop_metrics(frames.frames)
 
     work_dir, cleanup = _resolve_work_dir(out_path, frames_dir, keep_frames)
     try:
@@ -187,25 +192,41 @@ def render(
         )
 
     seamless_loop_verified = True
-    if source_loop_continuity is not None and not source_loop_continuity[
-        "wrap_step_within_2x_ordinary"
-    ]:
+    if source_loop_metrics is not None and not source_loop_metrics.wrap_step_within_2x_ordinary:
         seamless_loop_verified = False
         logger.warning(
             "source FrameSequence wrap-step diff (%.3f) exceeds 2x the ordinary adjacent-frame "
             "step (%.3f) -- the loop is not seamless before encoding is even involved",
-            source_loop_continuity["wrap_step_mean_abs_diff"],
-            source_loop_continuity["ordinary_adjacent_step_mean_abs_diff"],
+            source_loop_metrics.wrap_step_mean_abs_diff,
+            source_loop_metrics.ordinary_adjacent_step_mean_abs_diff,
         )
-    loop_continuity = validation.get("loop_continuity")
-    if loop_continuity is not None and not loop_continuity["wrap_step_within_2x_ordinary"]:
+    elif source_loop_metrics is not None and not source_loop_metrics.wrap_ssim_within_tolerance:
         seamless_loop_verified = False
         logger.warning(
-            "post-encode wrap-step diff (%.3f) exceeds 2x the ordinary adjacent-frame step "
-            "(%.3f) -- H.264 encoding may have introduced a visible seam",
-            loop_continuity["wrap_step_mean_abs_diff"],
-            loop_continuity["ordinary_adjacent_step_mean_abs_diff"],
+            "source FrameSequence wrap-step SSIM (%.3f) falls short of the ordinary "
+            "adjacent-frame step's SSIM (%.3f) by more than the tolerance -- structurally, the "
+            "wrap transition does not resemble an ordinary motion step",
+            source_loop_metrics.wrap_step_ssim,
+            source_loop_metrics.ordinary_adjacent_step_ssim,
         )
+    loop_metrics: LoopMetrics | None = validation.get("loop_metrics")
+    if loop_metrics is not None and not loop_metrics.seamless:
+        seamless_loop_verified = False
+        logger.warning(
+            "post-encode loop metrics failed: wrap-step diff %.3f (ordinary %.3f), wrap-step "
+            "SSIM %.3f (ordinary %.3f) -- H.264 encoding may have introduced a visible seam",
+            loop_metrics.wrap_step_mean_abs_diff,
+            loop_metrics.ordinary_adjacent_step_mean_abs_diff,
+            loop_metrics.wrap_step_ssim,
+            loop_metrics.ordinary_adjacent_step_ssim,
+        )
+
+    # Prefer the post-encode, real-decoded measurement (what a viewer actually sees) as the
+    # attached evidence -- falls back to the pre-encode source measurement only when the
+    # decoded file somehow yielded too few frames to compute one (shouldn't happen once the
+    # frame-count validation above has already passed, but avoids discarding real source
+    # evidence over a defensive edge case).
+    attached_loop_metrics = loop_metrics if loop_metrics is not None else source_loop_metrics
 
     return RenderResult(
         output_path=out_path,
@@ -219,6 +240,7 @@ def render(
         # an independently re-measured fact. See the module docstring.
         pixel_format="yuv420p",
         seamless_loop_verified=seamless_loop_verified,
+        loop_metrics=attached_loop_metrics,
     )
 
 
@@ -240,22 +262,75 @@ def _round_up_even(value: int) -> int:
     return value + (value % 2)
 
 
-def _loop_continuity(frames: list[np.ndarray]) -> dict | None:
-    """Is the transition from the last frame back to the first the same order of magnitude as
+_SSIM_C1 = (0.01 * 255) ** 2
+_SSIM_C2 = (0.03 * 255) ** 2
+_SSIM_WRAP_TOLERANCE = 0.05
+"""How far below the ordinary adjacent-step SSIM the wrap-step SSIM may fall before the loop is
 
-    an ordinary adjacent-frame step? That -- not `frames[0] == frames[-1]` -- is what "the
-    loop is seamless" actually means for a sequence sampled at t_frac = i / N (see the note in
-    `render()`). `None` when there aren't enough frames to compare (fewer than 3).
+flagged as structurally discontinuous. An absolute (not relative) tolerance on SSIM's own
+[-1, 1] scale, deliberately conservative (small) rather than tuned for maximum acceptance --
+same "documented, evidenced choice, not a statistically calibrated set" status as every other
+threshold in this codebase (e.g. ADR 0008's transform-geometry bounds). Verified against both a
+genuine periodic sequence and a deliberately non-periodic one in
+`tests/test_rendering.py::test_compute_loop_metrics_*`."""
+
+
+def _ssim(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean structural similarity (Wang et al. 2004) between two same-shape uint8 images,
+
+    windowed with an 11x11 Gaussian (the original paper's own window), averaged over color
+    channels for an RGB image. 1.0 = structurally identical; lower values mean the local
+    luminance/contrast/pattern correlation between `a` and `b` is weaker, independent of (and
+    not derivable from) their raw pixel-magnitude difference -- see `LoopMetrics`'s docstring
+    for why this project wants both signals, not just one. Pure `cv2`/`numpy`, no new
+    dependency (`cv2.getGaussianKernel`/`cv2.filter2D` are core `imgproc`, not `contrib`).
+    """
+    a64 = a.astype(np.float64)
+    b64 = b.astype(np.float64)
+    kernel_1d = cv2.getGaussianKernel(11, 1.5)
+    window = kernel_1d @ kernel_1d.T
+
+    def _windowed(x: np.ndarray) -> np.ndarray:
+        return cv2.filter2D(x, -1, window, borderType=cv2.BORDER_REPLICATE)
+
+    channel_scores = []
+    for c in range(a64.shape[2]):
+        x, y = a64[..., c], b64[..., c]
+        mu_x, mu_y = _windowed(x), _windowed(y)
+        mu_x_sq, mu_y_sq, mu_xy = mu_x * mu_x, mu_y * mu_y, mu_x * mu_y
+        sigma_x_sq = _windowed(x * x) - mu_x_sq
+        sigma_y_sq = _windowed(y * y) - mu_y_sq
+        sigma_xy = _windowed(x * y) - mu_xy
+        numerator = (2 * mu_xy + _SSIM_C1) * (2 * sigma_xy + _SSIM_C2)
+        denominator = (mu_x_sq + mu_y_sq + _SSIM_C1) * (sigma_x_sq + sigma_y_sq + _SSIM_C2)
+        channel_scores.append(float((numerator / denominator).mean()))
+    return sum(channel_scores) / len(channel_scores)
+
+
+def compute_loop_metrics(frames: list[np.ndarray]) -> LoopMetrics | None:
+    """Is the transition from the last frame back to the first the same order of magnitude, and
+
+    as structurally continuous, as an ordinary adjacent-frame step? That -- not
+    `frames[0] == frames[-1]` -- is what "the loop is seamless" actually means for a sequence
+    sampled at t_frac = i / N (see the note in `render()`): frame[-1] (at t=(N-1)/N) is one
+    step *before* the wrap back to frame[0] (at t=0), so it is not expected to equal frame[0]
+    pixel-for-pixel for any real periodic motion, only to *transition* the same way an ordinary
+    step does. `None` when there aren't enough frames to compare (fewer than 3).
     """
     if len(frames) < 3:
         return None
     ordinary_step = float(cv2.absdiff(frames[1], frames[0]).mean())
     wrap_step = float(cv2.absdiff(frames[0], frames[-1]).mean())
-    return {
-        "ordinary_adjacent_step_mean_abs_diff": ordinary_step,
-        "wrap_step_mean_abs_diff": wrap_step,
-        "wrap_step_within_2x_ordinary": wrap_step <= 2.0 * max(ordinary_step, 1e-6),
-    }
+    ordinary_ssim = _ssim(frames[1], frames[0])
+    wrap_ssim = _ssim(frames[0], frames[-1])
+    return LoopMetrics(
+        ordinary_adjacent_step_mean_abs_diff=ordinary_step,
+        wrap_step_mean_abs_diff=wrap_step,
+        wrap_step_within_2x_ordinary=wrap_step <= 2.0 * max(ordinary_step, 1e-6),
+        ordinary_adjacent_step_ssim=ordinary_ssim,
+        wrap_step_ssim=wrap_ssim,
+        wrap_ssim_within_tolerance=wrap_ssim >= ordinary_ssim - _SSIM_WRAP_TOLERANCE,
+    )
 
 
 def _validate(
@@ -287,7 +362,7 @@ def _validate(
         ok, frame = cap.read()
     cap.release()
 
-    loop_continuity = _loop_continuity(frames)
+    loop_metrics = compute_loop_metrics(frames)
 
     return {
         "demuxable": True,
@@ -297,5 +372,5 @@ def _validate(
         "fps_matches_expected": abs(fps - expected_fps) < 0.1,
         "frame_count_within_one": abs(frame_count - expected_frame_count) <= 1,
         "resolution_matches_expected": (width, height) == expected_resolution,
-        "loop_continuity": loop_continuity,
+        "loop_metrics": loop_metrics,
     }

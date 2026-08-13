@@ -33,7 +33,7 @@ this module's stored ground truth, never the reverse.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -62,6 +62,27 @@ The one real value that exists so far: `"independent_human_verification"` -- the
 directly confirmed action/animation presence, independent of any VLM inference or of inspecting
 a pipeline's own downstream render (the exact failure `sample_page_02`'s original, since-revised
 annotation did not avoid -- see this module's top-level docstring)."""
+
+
+GoldenCategory = Literal[
+    "single_animatable_object",
+    "multiple_animatable_objects",
+    "partially_occluded_object",
+    "object_near_boundary",
+    "complex_background",
+    "weapon_or_effect",
+    "rotation",
+    "translation",
+    "scale_or_deformation",
+    "should_not_animate",
+]
+"""Phase 8: the 10 failure-mode/coverage categories the Phase 8 brief's golden E2E dataset must
+
+represent (its section 6, items 1-10). A closed `Literal`, not a free-form string, so a typo in
+`configs/phase3_3_eval_dataset.yaml`'s `golden_categories` fails loudly at load time rather than
+silently creating an uncounted category -- see `golden_category_coverage`."""
+
+GOLDEN_DATASET_CATEGORIES: tuple[GoldenCategory, ...] = get_args(GoldenCategory)
 
 
 class EvalSample(BaseModel):
@@ -141,6 +162,15 @@ class EvalSample(BaseModel):
         "commit history. Never bumped by any code path in this project; only by a human editing "
         "configs/phase3_3_eval_dataset.yaml.",
     )
+    golden_categories: list[GoldenCategory] = Field(
+        default_factory=list,
+        description="Phase 8: which of the golden E2E dataset's required coverage categories "
+        "(GOLDEN_DATASET_CATEGORIES) this sample demonstrates, based on real evidence already "
+        "documented for it (see docs/phase7-results.md section 6.2, docs/decisions/0011, ADR "
+        "0010's Phase 5 audit). Descriptive coverage metadata, like diversity_tag -- NOT a "
+        "ground-truth claim, so changing it does not require bumping annotation_version (see "
+        "that field's own docstring for the exact list of fields that do).",
+    )
 
 
 def load_eval_dataset(path: Path = DEFAULT_DATASET_PATH) -> list[EvalSample]:
@@ -168,3 +198,28 @@ def load_eval_dataset(path: Path = DEFAULT_DATASET_PATH) -> list[EvalSample]:
         seen_paths[sample.image_path] = sample.sample_id
 
     return samples
+
+
+def golden_category_coverage(samples: list[EvalSample]) -> dict[GoldenCategory, list[str]]:
+    """Phase 8: which `sample_id`s cover each of `GOLDEN_DATASET_CATEGORIES` -- an empty list
+
+    for a category is a real, honest coverage gap, not an error (see
+    `uncovered_golden_categories` and configs/phase3_3_eval_dataset.yaml's header note on the
+    two categories this dataset genuinely does not cover yet: `partially_occluded_object` and
+    `scale_or_deformation`).
+    """
+    coverage: dict[GoldenCategory, list[str]] = {c: [] for c in GOLDEN_DATASET_CATEGORIES}
+    for sample in samples:
+        for category in sample.golden_categories:
+            coverage[category].append(sample.sample_id)
+    return coverage
+
+
+def uncovered_golden_categories(samples: list[EvalSample]) -> list[GoldenCategory]:
+    """Every `GoldenCategory` with zero samples covering it, in `GOLDEN_DATASET_CATEGORIES`
+
+    order -- the Phase 8 brief's own instruction not to hide gaps, made directly checkable
+    instead of only prose in a doc.
+    """
+    coverage = golden_category_coverage(samples)
+    return [c for c in GOLDEN_DATASET_CATEGORIES if not coverage[c]]
