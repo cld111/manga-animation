@@ -138,6 +138,36 @@ Verdict: **PASS-WITH-NOTES** — no logic bugs found; two documentation gaps (th
 exist yet at audit time, and `README.md`'s phase table wasn't yet updated for Phase 7) are
 resolved by this document and the README update accompanying it.
 
+**Second, closing `qa-agent` audit** (after all real-model evidence in section 6 was gathered
+and written up), cross-checking every real-model claim in this document against the actual raw
+artifacts (the downloaded JSON, the real logs, the independently-decoded video, the visually-
+inspected crops) rather than trusting the prose. Verdict: **PASS-WITH-NOTES**, with two real,
+concrete findings, both fixed in response (not merely documented around):
+
+1. **A real bug**: `scripts/run_phase3_3_evaluation.py`'s JSON-summary rate-rendering loop
+   indexed the wrong report (a stale loop variable left over from an earlier, unrelated loop,
+   always evaluating to `"panel"` by the time it ran) — silently corrupting the page report's
+   human-readable `"rendered"` strings in the saved JSON with the panel report's own values.
+   The raw `numerator`/`denominator` fields were unaffected; only the display string was wrong.
+   **Fixed**: extracted into `_render_rates_in_place`, indexed correctly by `dict.items()`, and
+   protected by two new regression tests (`tests/test_run_phase3_3_evaluation_script.py`),
+   confirmed via mutation testing to actually catch the original bug.
+2. **A documentation provenance overclaim**: this document and ADR 0011 both originally
+   attributed section 6.4's real LaMa evidence to the committed
+   `scripts/run_reconstruction_visual_qa.py`. It was actually produced by an ad hoc,
+   session-local, uncommitted driver script — the committed script was written afterward as
+   reusable infrastructure and has not itself been run against real models. The underlying
+   numbers (IoU 0.974, hole coverage 4.2%, etc.) were independently re-verified as real and
+   accurate against `phase7_3_2_v2.log` — only the *provenance attribution* was wrong, not the
+   data. **Fixed**: corrected in section 6.4, section 11, and ADR 0011.
+
+The same audit also flagged, as a secondary/lower-severity finding, that dropped SECONDARY/
+MICRO objects' `validation_attempts` were always serialized empty even when a real rejection
+reason was known (`DroppedObjectResult.reason`) — **fixed** by populating a single synthetic
+`ValidationAttemptOutcome` (`candidate_rank=-1`) from that reason when the drop happened at the
+validation stage specifically (a grounding-stage drop genuinely has no validation attempt to
+report, so stays empty, correctly).
+
 ## 5. Evaluation-schema changes
 
 Covered in section 3 above (ADR 0013). Deterministic test coverage:
@@ -251,11 +281,16 @@ Two real attempts against `sample_page_01.png`'s `character_hair` region:
    `used_fallback_plan=True`): PRIMARY `character_hair`/TRANSLATE, matching the plan a real
    session DID produce 6/6 times in ADR 0010's Phase 5 audit for this exact page — used only to
    isolate real LaMa reconstruction quality from this run's own analysis-stage flakiness, per
-   this project's established controlled-fallback convention (see `docs/phase7-results.md`
-   section 11 and `scripts/run_reconstruction_visual_qa.py`'s docstring). Real grounding (score
-   n/a logged, IoU-independent), real semantic+geometry validation (both ACCEPT), real
-   segmentation (**IoU 0.974**), real reconstruction (**ran**, hole coverage **4.2%** of the
-   mask — a real, non-trivial hole, not a vacuous one), real render (96 frames,
+   this project's established controlled-fallback convention. **Provenance correction** (found
+   by this phase's own closing audit): this specific real evidence was produced by an ad hoc,
+   session-local driver script (`phase7_3_2_driver_v2.py`, not committed — see section 11),
+   *not* by the committed `scripts/run_reconstruction_visual_qa.py`. That script was written
+   afterward, as reusable infrastructure following the same approach, but has not itself been
+   executed against real models yet (`uv run ruff check`/`uv run mypy` clean, logic reviewed,
+   but no real GPU run backs it specifically) — see section 10's known-limitations note. Real
+   grounding (score n/a logged, IoU-independent), real semantic+geometry validation (both
+   ACCEPT), real segmentation (**IoU 0.974**), real reconstruction (**ran**, hole coverage
+   **4.2%** of the mask — a real, non-trivial hole, not a vacuous one), real render (96 frames,
    `seamless_loop_verified=True`).
 
 **Visual QA (direct inspection of saved crops — source, segmentation mask, hole mask, raw LaMa
@@ -347,6 +382,14 @@ PASS):
   spot-check evidence, not exhaustive frame-by-frame verification.
 - CUDA OOM pressure was observed (see section 8) under a large real multi-object page; this
   phase did not investigate or tune GPU memory/batch behavior further (out of scope).
+- `scripts/run_reconstruction_visual_qa.py` (committed) has not itself been executed against
+  real models — see section 4's second audit note and section 6.4's provenance correction. Its
+  logic mirrors the ad hoc script that DID produce real section 6.4 evidence closely enough
+  that this is a low-risk gap, but it is a genuine, disclosed one: `ruff`/`mypy`-clean and
+  logic-reviewed is not the same claim as real-GPU-verified.
+- `mypy` was never run against `scripts/` as a whole in this phase (only the one file touched
+  by the closing audit fix) — other scripts may carry similar undetected type issues; out of
+  scope to audit exhaustively here (see section 12/13).
 
 ## 10. Deferred work
 
@@ -384,24 +427,32 @@ uv run python scripts/fetch_phase3_3_eval_pages.py
 uv run pytest -q
 uv run python scripts/run_phase3_3_evaluation.py --env kaggle
 ```
-Plus:
+**Provenance note (corrected by this phase's own closing audit)**: section 6.2/6.4/6.5's real
+evidence was gathered by three small, session-local driver scripts (NOT committed — genuinely
+ad hoc, one-shot evidence gathering), not by a single committed script, despite an earlier
+version of this document claiming otherwise for section 6.4. All three mirrored
+`scripts/run_phase3_pipeline.py`'s real automatic-operation pattern to get evidence not already
+exposed by an existing committed script's own summary:
+- one real automatic panel-mode run against `examples/phase3_action_page.png` reporting
+  `secondary_objects`/`dropped_objects` explicitly (`run_phase3_pipeline.py` itself only
+  summarizes the PRIMARY object) — section 6.2's `phase3_action_page` row;
+- one real controlled-fallback run against `sample_page_01.png`'s `character_hair` target,
+  saving debug crops — section 6.4's real LaMa evidence;
+- one supplemental controlled-fallback run trying `SCALE`/`MESH_WARP` against the same target —
+  section 6.5.
+
+`scripts/run_reconstruction_visual_qa.py` (committed after the fact, as reusable infrastructure
+following the same approach as the second script above) has NOT itself been run against real
+models — only `uv run ruff check`/`uv run mypy` and manual logic review back it. The equivalent
+future invocation would be:
 ```
 uv run python scripts/run_reconstruction_visual_qa.py --page examples/sample_page_01.png \
     --semantic-label character_hair --transform-kind translate --amplitude 0.03 --env kaggle
 ```
-(section 6.4's real LaMa visual QA — this script IS committed, reusable infrastructure, not an
-ad hoc script; see its own docstring). Two further small, session-local driver scripts (NOT
-committed — genuinely ad hoc, one-shot evidence gathering, superseded for the reconstruction-QA
-case by the committed script above) mirrored `scripts/run_phase3_pipeline.py`'s real
-automatic-operation pattern to get evidence not already exposed by an existing committed
-script's own summary: one real automatic panel-mode run against `examples/phase3_action_page.png`
-reporting `secondary_objects`/`dropped_objects` explicitly (`run_phase3_pipeline.py` itself only
-summarizes the PRIMARY object), and one supplemental controlled-fallback run trying
-`SCALE`/`MESH_WARP` against `sample_page_01.png`'s known-good `character_hair` target (section
-6.5). Both are reproducible by any future session using `run_pipeline` directly (real automatic
-operation for the first, `run_pipeline(..., plan=...)` with a controlled single-object
-`AnimationPlan` for the second) — the exact code isn't preserved since neither is reusable
-infrastructure beyond what section 6 already documents.
+None of the three ad hoc scripts' exact code is preserved (none is reusable infrastructure
+beyond what section 6 already documents) — each is reproducible by any future session using
+`run_pipeline` directly, real automatic operation for the first, `run_pipeline(...,
+plan=...)` with a controlled single-object `AnimationPlan` for the second and third.
 
 The two `examples/verified_action/*.png` samples (no `fetch_script` — manually provided,
 non-reproducible by design, see ADR 0009's revision) were copied to the remote worker via the
@@ -417,14 +468,25 @@ script) rather than inventing a new distribution mechanism for them.
 - After Phase 7.2: 440 passed, 2 deselected.
 - Remote worker (fresh clone, same commit): 439 passed, 1 skipped (missing example file at
   that point in the session, since fixed by fetching it), 2 deselected.
-- Final local re-verification (after all Phase 7 commits, including
-  `scripts/run_reconstruction_visual_qa.py`): 440 passed, 2 deselected — unchanged, since that
-  addition is a script, not a test.
+- After `scripts/run_reconstruction_visual_qa.py`: 440 passed, 2 deselected — unchanged, since
+  that addition is a script, not a test.
+- After this phase's own closing audit fixes (stale-loop-variable bug in
+  `scripts/run_phase3_3_evaluation.py`'s JSON rate-rendering, plus two real `mypy` type errors
+  in code this phase introduced): **442 passed**, 2 deselected —
+  `tests/test_run_phase3_3_evaluation_script.py` (new, 2 tests) regression-protects the bug fix,
+  confirmed via mutation testing (bug reintroduced -> both new tests fail with the exact
+  corrupted value predicted; fix restored -> both pass again).
 
 ## 13. ruff/mypy status
 
-Clean throughout, both locally and on the remote worker, at every commit in section 3's table
-and after the final `scripts/run_reconstruction_visual_qa.py` addition.
+Clean throughout, both locally and on the remote worker, at every commit in section 3's table,
+after the `scripts/run_reconstruction_visual_qa.py` addition, and after this phase's own
+closing audit fixes. Note: `uv run mypy src` (the project's gating command) never included
+`scripts/` — running `mypy` against `scripts/run_phase3_3_evaluation.py` directly surfaced one
+further, genuinely pre-existing type mismatch (`failing_stage="unexpected"`, present since
+before this phase, unrelated to any Phase 7 change) left as a disclosed, out-of-scope
+observation rather than fixed, per this phase's explicit scope boundaries (not introduced by,
+not blocking, and not part of Phase 7's own acceptance criteria).
 
 ## 14. Git/commit state
 

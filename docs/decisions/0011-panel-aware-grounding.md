@@ -185,10 +185,13 @@ ADR implements explicitly required this: no weapon-specific or prompt-specific l
   section 6.4 performed real LaMa visual QA (a different real page,
   `examples/sample_page_01.png`'s hair region — not this ADR's specific
   `phase3_action_page.png` render) and found a genuinely clean result (hole confined to
-  background, no seam/ghosting/line-art damage). `phase3_action_page.png`'s own specific
-  reconstruction output still hasn't been separately visually inspected, but the general
-  model-quality question this bullet raised now has real, positive evidence behind it, via
-  `scripts/run_reconstruction_visual_qa.py` (committed, reusable for any future page).
+  background, no seam/ghosting/line-art damage), via an ad hoc session-local driver script (not
+  committed — see `docs/phase7-results.md` section 11's provenance note). `phase3_action_page.png`'s
+  own specific reconstruction output still hasn't been separately visually inspected, but the
+  general model-quality question this bullet raised now has real, positive evidence behind it.
+  `scripts/run_reconstruction_visual_qa.py` (committed afterward, as reusable infrastructure
+  following the same approach) has not itself been run against real models yet — see
+  `docs/phase7-results.md` section 9.
 - **Minor DRY duplication, not a correctness issue**: `grounding/ground.py::_grounding_region`
   and `validation/transform_geometry.py::_reference_region` independently implement the same
   "`panel_bbox_px` when given, else the whole page/image as a `BBoxPx`" fallback. Both are

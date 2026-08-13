@@ -51,6 +51,7 @@ from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.evaluation import (
     EvalSample,
+    EvaluationReport,
     NondeterminismSummary,
     ObjectAttemptOutcome,
     PageRunOutcome,
@@ -110,6 +111,26 @@ def _panel_detection_evidence(image_path: Path) -> tuple[int, list[str]]:
     return len(panels), [p.source for p in panels]
 
 
+def _object_outcome_motion_type(motion_type: MotionType) -> Literal["secondary", "micro"]:
+    """Narrows `MotionType` to `ObjectAttemptOutcome.motion_type`'s literal type -- every real
+
+    call site here reads `motion_type` off an object drawn from `PipelineRunResult.
+    secondary_objects`/`dropped_objects`, which by `pipeline/orchestrator.py`'s own construction
+    (`objects_to_animate` minus `primary`, itself already filtered to non-STATIC) never contains
+    a PRIMARY or STATIC object -- so this can't actually raise on any real input; the ValueError
+    is a defensive backstop against a future orchestrator change silently breaking that
+    invariant, not a case this script expects to hit.
+    """
+    if motion_type == MotionType.SECONDARY:
+        return "secondary"
+    if motion_type == MotionType.MICRO:
+        return "micro"
+    raise ValueError(
+        f"unexpected motion_type={motion_type!r} for a secondary/dropped object -- "
+        "only SECONDARY/MICRO objects should ever reach this point"
+    )
+
+
 def _run_one(
     sample: EvalSample,
     mode: Literal["page", "panel"],
@@ -167,7 +188,7 @@ def _run_one(
         ObjectAttemptOutcome(
             object_id=obj.object_plan.object_id,
             semantic_label=obj.object_plan.semantic_label,
-            motion_type=obj.object_plan.motion_type.value,
+            motion_type=_object_outcome_motion_type(obj.object_plan.motion_type),
             status="rendered",
             validation_attempts=[
                 ValidationAttemptOutcome(
@@ -184,8 +205,28 @@ def _run_one(
         ObjectAttemptOutcome(
             object_id=dropped.object_plan.object_id,
             semantic_label=dropped.object_plan.semantic_label,
-            motion_type=dropped.object_plan.motion_type.value,
+            motion_type=_object_outcome_motion_type(dropped.object_plan.motion_type),
             status="dropped",
+            # Phase 7 audit fix: DroppedObjectResult.reason already carries a real, human-
+            # readable summary of why this object was dropped -- surfacing it here (instead of
+            # leaving validation_attempts empty) means the saved JSON alone explains a drop,
+            # not just full_eval.log's live stdout. Only meaningful when the drop actually
+            # happened AT validation (`dropped.reason` is validation-attempt prose in that case,
+            # per orchestrator.py's construction) -- a grounding-stage drop never reached
+            # validation at all, so there is nothing validation-shaped to report; leaving the
+            # list empty there is accurate, not a gap.
+            validation_attempts=(
+                [
+                    ValidationAttemptOutcome(
+                        candidate_rank=-1,
+                        accepted=False,
+                        grounding_score=None,
+                        reason=dropped.reason,
+                    )
+                ]
+                if dropped.failing_stage == "validation"
+                else []
+            ),
         )
         for dropped in result.dropped_objects
     ]
@@ -242,6 +283,31 @@ def _run_nondeterminism_check(
             )
         )
     return summarize_repeated_runs(records)
+
+
+def _render_rates_in_place(
+    reports: dict[str, EvaluationReport], serialized_reports: dict[str, dict[str, Any]]
+) -> None:
+    """Add a human-readable "rendered" string (e.g. "6/10 (60.0%)") to every `Rate`-shaped dict
+
+    inside `serialized_reports` (the `dataclasses.asdict()` output of `reports`) -- `Rate`
+    objects aren't JSON-serializable by default, and `asdict()` alone only keeps their raw
+    `numerator`/`denominator` ints, not `Rate.__str__`'s formatting.
+
+    Phase 7 audit fix: a prior version of this loop iterated `serialized_reports.values()`
+    (discarding the mode key) and looked up `reports[mode]` using a `mode` variable left over
+    from an unrelated, already-finished loop earlier in `main()` (which always held its LAST
+    value, `"panel"`, by the time this ran) -- silently rendering EVERY mode's `Rate` strings
+    from the panel report's own values, corrupting the page report's "rendered" strings in the
+    saved JSON (the underlying `numerator`/`denominator` fields were unaffected, only this
+    display string). Extracted into its own function, taking both dicts as explicit parameters
+    instead of closing over an outer-scope loop variable, so this can't silently reoccur, and so
+    it's independently unit-testable (see `tests/test_run_phase3_3_evaluation_script.py`).
+    """
+    for mode, mode_report in serialized_reports.items():
+        for key, value in list(mode_report.items()):
+            if isinstance(value, dict) and "numerator" in value and "denominator" in value:
+                mode_report[key] = {**value, "rendered": str(reports[mode].__getattribute__(key))}
 
 
 def main() -> None:
@@ -336,11 +402,7 @@ def main() -> None:
         "reports": {mode: asdict(reports[mode]) for mode in reports},
         "nondeterminism": [asdict(s) for s in nondeterminism_summaries],
     }
-    # Rate objects inside `reports` aren't JSON-serializable by default -- render explicitly.
-    for mode_report in summary["reports"].values():
-        for key, value in list(mode_report.items()):
-            if isinstance(value, dict) and "numerator" in value and "denominator" in value:
-                mode_report[key] = {**value, "rendered": str(reports[mode].__getattribute__(key))}
+    _render_rates_in_place(reports, summary["reports"])
 
     out_path = args.experiments_dir / f"phase3_3_evaluation_{timestamp}.json"
     out_path.write_text(json.dumps(summary, indent=2, default=str))
