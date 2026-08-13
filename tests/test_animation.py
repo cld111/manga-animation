@@ -148,6 +148,140 @@ def test_opacity_scales_mask_without_moving_it():
     assert warped_mask[25, 35] < mask[25, 35]  # dimmed
 
 
+# --- Phase 10: mesh_warp's direction=None fallback follows mask shape ---------------------
+#
+# Real defect this section guards against (docs/decisions/0017-phase10-meshwarp-direction-
+# default-and-panel-default.md, docs/phase10-results.md): `_MOTION_HEURISTICS`'s flag/cloth
+# entry never sets `MotionSpec.direction`, and `_mesh_warp_frame` used to default an unset
+# direction to a hardcoded `(1.0, 0.0)` regardless of the object's own shape. For a mask taller
+# than it is wide (hair, a sleeve, a cloth panel), that hardcoded default applied the SAME
+# horizontal displacement to every row from the mask's top to its bottom -- a rigid sideways
+# shear uncorrelated with the object's own height, producing a hard, page-aligned vertical
+# discontinuity once `strength` grew large. The fix ties the fallback axis to the mask's own
+# bbox: taller-than-wide sways downward from a top anchor; wider-than-tall keeps the original
+# left-anchored horizontal sway (the real, already-validated flag/banner case).
+
+
+def _mesh_warp_mask(x0: int, y0: int, x1: int, y1: int) -> tuple[np.ndarray, np.ndarray]:
+    h, w = PAGE_SHAPE
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    image[y0:y1, x0:x1] = (200, 100, 50)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    return image, mask
+
+
+def _row_x_ranges(mask: np.ndarray, rows: list[int]) -> list[tuple[int, int] | None]:
+    out: list[tuple[int, int] | None] = []
+    for row in rows:
+        xs = np.where(mask[row] > 0)[0]
+        out.append((int(xs.min()), int(xs.max())) if xs.size else None)
+    return out
+
+
+def test_mesh_warp_default_direction_is_vertical_for_a_tall_mask():
+    """A taller-than-wide mask (e.g. a sleeve/cloth panel) with no explicit `direction` must
+
+    sway top-to-bottom, not shear sideways -- its warped bbox's x-extent stays exactly the
+    original mask's x-extent (no horizontal displacement at all), unlike the old hardcoded
+    `(1.0, 0.0)` default.
+    """
+    image, mask = _mesh_warp_mask(30, 5, 40, 55)  # width=10, height=50 -- tall
+    motion = make_motion(
+        transform_kind=TransformKind.MESH_WARP, direction=None, amplitude=0.3, phase=0.25
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    assert warped_bbox.x0 == orig_bbox.x0
+    assert warped_bbox.x1 == orig_bbox.x1
+    assert warped_bbox.y1 != orig_bbox.y1  # vertical displacement DID happen
+
+
+def test_mesh_warp_tall_mask_has_no_uniform_horizontal_shear_regression():
+    """Regression test for the real Phase 9 defect mechanism (`realworld_villainess_ending_
+
+    scuffle`): under the OLD hardcoded `(1.0, 0.0)` default, every row of a tall mask shifted
+    its x-range by the identical amount regardless of row position -- a rigid shear. With the
+    fix, a tall mask's x-range is identical to the ORIGINAL mask's x-range at every row (all
+    displacement happens vertically instead), proving the shear is gone.
+    """
+    image, mask = _mesh_warp_mask(30, 5, 40, 55)
+    motion = make_motion(
+        transform_kind=TransformKind.MESH_WARP, direction=None, amplitude=0.3, phase=0.25
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    rows_with_content = [r for r in range(5, 55) if np.any(warped_mask[r] > 0)]
+    assert rows_with_content  # the fix must not have warped the mask out of existence
+    x_ranges = _row_x_ranges(warped_mask, rows_with_content)
+    assert all(rng == (30, 39) for rng in x_ranges)
+
+
+def test_mesh_warp_explicit_direction_still_shears_a_tall_mask_uniformly():
+    """Sanity/contrast check: when `direction` IS explicitly given (a real "flow hint"), the
+
+    old, unchanged per-row-uniform horizontal-shear behavior is exactly what should happen --
+    the Phase 10 fix only changes the *unset*-direction fallback, never an explicit one.
+    """
+    image, mask = _mesh_warp_mask(30, 5, 40, 55)
+    motion = make_motion(
+        transform_kind=TransformKind.MESH_WARP,
+        direction=Vector2(x=1.0, y=0.0),
+        amplitude=0.3,
+        phase=0.25,
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    rows = [6, 15, 25, 35, 45, 54]
+    x_ranges = _row_x_ranges(warped_mask, rows)
+    assert all(rng == (30, 33) for rng in x_ranges)
+
+
+def test_mesh_warp_default_direction_is_horizontal_for_a_wide_mask():
+    """A wider-than-tall mask (a real flag/banner, this codebase's own already-validated
+
+    mesh_warp use case) keeps its original left-anchored horizontal sway when `direction` is
+    unset -- Phase 10's fix must not change this, only the taller-than-wide fallback.
+    """
+    image, mask = _mesh_warp_mask(10, 20, 70, 30)  # width=60, height=10 -- wide
+    motion = make_motion(
+        transform_kind=TransformKind.MESH_WARP, direction=None, amplitude=0.3, phase=0.25
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    assert warped_bbox.y0 == orig_bbox.y0
+    assert warped_bbox.y1 == orig_bbox.y1
+    assert warped_bbox.x1 != orig_bbox.x1  # horizontal displacement DID happen
+
+
+def test_mesh_warp_default_direction_ties_toward_vertical_for_a_square_mask():
+    """Boundary condition: a square mask (height == width) ties toward the vertical
+
+    (top-anchored) branch -- documents the `>=` tie-break deliberately rather than leaving it
+    to accident.
+    """
+    image, mask = _mesh_warp_mask(30, 20, 50, 40)  # 20x20 square
+    motion = make_motion(
+        transform_kind=TransformKind.MESH_WARP, direction=None, amplitude=0.3, phase=0.25
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    assert warped_bbox.x0 == orig_bbox.x0
+    assert warped_bbox.x1 == orig_bbox.x1
+    assert warped_bbox.y1 != orig_bbox.y1
+
+
 # --- periodic trajectory / seamless loop --------------------------------------
 
 

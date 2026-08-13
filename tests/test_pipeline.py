@@ -731,10 +731,18 @@ def test_run_pipeline_analysis_mode_panel_still_rejects_semantically_wrong_candi
     assert not (tmp_path / "out" / "output.mp4").exists()
 
 
-def test_run_pipeline_analysis_mode_defaults_to_page_level(page_path: Path, config, tmp_path: Path):
-    """`analysis_mode` defaults to `"page"` -- every pre-existing Phase 3.1/3.2 caller/test
+def test_run_pipeline_analysis_mode_defaults_to_panel_level(
+    page_path: Path, config, tmp_path: Path
+):
+    """`analysis_mode` defaults to `"panel"` as of Phase 10 (see
 
-    (which never passes `analysis_mode`) is unaffected by this phase (acceptance criterion #2).
+    docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md) -- real Phase 9
+    evidence (docs/phase9-results.md section 5.3: end_to_end_completion_rate 20%->60%,
+    grounding_success_rate 50%->100%, ERROR outcomes 5->0) and a real Phase 9/10 mid-cycle
+    visual defect traced to page-level analysis specifically (`realworld_marika_love_meter`,
+    docs/phase10-results.md) together superseded Phase 3.3's original "default stays
+    page-level" acceptance criterion. Every pre-existing caller/test that explicitly passes
+    `analysis_mode="page"` is unaffected (see the sibling test below).
     """
     with pytest.raises(PipelineStageError) as excinfo:
         run_pipeline(
@@ -746,10 +754,33 @@ def test_run_pipeline_analysis_mode_defaults_to_page_level(page_path: Path, conf
             reconstruction_client=FakeReconstructionClient(),
             out_dir=tmp_path / "out",
         )
-    # the page-level all-STATIC error message (not a panel-aware one) proves the default path
-    # was actually taken
+    # the panel-aware all-STATIC error message ("...across every analyzed panel", not the plain
+    # page-level one) proves the default path actually taken was panel-aware analysis
     assert excinfo.value.stage == "analysis"
-    assert "every object STATIC" in excinfo.value.detail
+    assert "every object STATIC across every analyzed panel" in excinfo.value.detail
+
+
+def test_run_pipeline_analysis_mode_page_still_available_explicitly(
+    page_path: Path, config, tmp_path: Path
+):
+    """`analysis_mode="page"` (Phase 3.1/3.2's original default) remains fully available and
+
+    behaviorally unchanged for any caller that asks for it explicitly -- only the *default*
+    changed in Phase 10, not the page-level path itself.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_static_decision(), _static_decision("other")]),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+            analysis_mode="page",
+        )
+    assert excinfo.value.stage == "analysis"
+    assert excinfo.value.detail.startswith("VLM marked every object STATIC --")
 
 
 # --- controlled-fallback plan override (Phase 3.1 failure policy escape hatch) -------------
@@ -1156,6 +1187,11 @@ def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loo
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
         out_dir=out_dir,
+        # Explicit, not the (Phase 10) default: FakeVLMClient returns the same canned
+        # `decisions` regardless of which panel it's asked about, so panel-mode's one-call-
+        # per-detected-panel behavior would pool duplicate objects across arbitrary panel_ids
+        # -- a fixture-simplification mismatch, not something this test is meant to exercise.
+        analysis_mode="page",
     )
     primary_motion = result.primary_object.motion
     secondary_motion = result.secondary_objects[0].object_plan.motion
@@ -1542,6 +1578,9 @@ def test_run_pipeline_multi_object_e2e_encode_decode_regression(config, tmp_path
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
         out_dir=out_dir,
+        # Explicit, not the (Phase 10) default -- see the sibling color-bleed test's own
+        # comment for why: FakeVLMClient isn't panel-crop-aware.
+        analysis_mode="page",
     )
 
     # -- successful render, expected frame count/resolution -----------------------------------

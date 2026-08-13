@@ -160,13 +160,41 @@ def _mesh_warp_frame(
     by `|strength| * max(|dir_x|, |dir_y|)` in each axis, since `local` ∈ [0, 1] and `direction`
     is not schema-normalized for mesh_warp) — the ROI below uses that bound, not the tighter
     (but direction-normalized-only) `|strength|` alone.
+
+    Phase 10 fix (docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md):
+    when `motion.direction` is unset (the real, common case — `analysis/plan_builder.py`'s
+    `_MOTION_HEURISTICS` flag/cloth/cape entry never sets it), the anchor/flow axis now follows
+    the object's own bbox elongation instead of a hardcoded `(1.0, 0.0)`. A real Phase 9 defect
+    (`realworld_villainess_ending_scuffle`, a tall `cloth` SECONDARY object) was traced to
+    exactly the old hardcoded default: since `local` below only varies along whichever axis
+    `dir_x`/`dir_y` selects, a horizontal-only default applied the SAME horizontal displacement
+    to every row of a tall object regardless of its own height — a rigid sideways shear
+    uncorrelated with the object's actual vertical extent, producing a hard, page-aligned
+    vertical discontinuity once `strength` (which scales with the object's own longest bbox
+    dimension) grew large. Reproduced deterministically against this exact function with a real
+    Phase 9 source image and a constructed tall mask (Phase 9's own GPU session and real
+    SAM mask are gone — no live re-verification of the *exact* original instance was possible,
+    only the mechanism): a tall mask's right-edge column shifted by the identical amount at
+    every sampled row from `y0` to `y1` under the old default. The fix ties the fallback to the
+    mask's own shape — taller-than-wide anchors at the top and sways downward (matching this
+    heuristic's own `pivot=(0.5, 0.0, object_bbox)` convention, "hangs from a fixed point");
+    wider-than-tall keeps the previous left-anchored horizontal sway unchanged (the real,
+    already-validated flag/banner case is not touched, since `direction=None` widely-shaped
+    masks take the same branch as before).
     """
     h, w = page_shape
     x0, y0, x1, y1 = object_bbox_px.as_xyxy()
 
     direction = motion.direction
-    dir_x = direction.x if direction is not None else 1.0
-    dir_y = direction.y if direction is not None else 0.0
+    if direction is not None:
+        dir_x, dir_y = direction.x, direction.y
+    elif (y1 - y0) >= (x1 - x0):
+        # No explicit flow hint and the mask is taller than (or as tall as) it is wide: default
+        # to a downward sway anchored at the top, not the old fixed (1.0, 0.0) — see this
+        # function's own docstring for the real defect this replaces.
+        dir_x, dir_y = 0.0, 1.0
+    else:
+        dir_x, dir_y = 1.0, 0.0
 
     strength = value * motion.amplitude * max(x1 - x0, y1 - y0)
     margin = math.ceil(abs(strength) * max(abs(dir_x), abs(dir_y))) + _ROI_SAFETY_MARGIN_PX

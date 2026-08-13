@@ -500,7 +500,10 @@ def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig)
 #
 # Everything below analyzes a page panel-by-panel instead of as one whole-page VLM call (see
 # docs/decisions/0007-panel-aware-analysis.md). `analyze_page` above is completely untouched --
-# it remains the default, always-available page-level path (Phase 3.3 acceptance criterion #2).
+# it remains the always-available page-level path, no longer `run_pipeline`'s default as of
+# Phase 10 (see docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md;
+# Phase 3.3's original acceptance criterion #2, "default stays page-level," was superseded by
+# real Phase 9/10 evidence that panel-level analysis is substantially more reliable).
 # The same `ANALYSIS_PROMPT` is deliberately reused unmodified for panel-level calls: its five
 # evidence categories (deformation, motion lines, panel/page-level effect lines, pose, implied
 # force) are already phrased relative to "the scene"/"the panel", not specifically "the whole

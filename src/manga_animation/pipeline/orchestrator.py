@@ -358,7 +358,7 @@ def run_pipeline(
     reconstruction_client: ReconstructionClient,
     out_dir: Path,
     plan: AnimationPlan | None = None,
-    analysis_mode: Literal["page", "panel"] = "page",
+    analysis_mode: Literal["page", "panel"] = "panel",
 ) -> PipelineRunResult:
     """Run the complete pipeline (analysis through rendering, with Phase 3.2's grounding-
     validation gate) on one real manga page.
@@ -377,14 +377,22 @@ def run_pipeline(
     object) -- this skips the analysis stage's VLM call entirely, so the caller is responsible
     for recording that substitution honestly wherever this run's results are reported.
 
-    `analysis_mode`: `"page"` (default, unchanged Phase 3.2 behavior -- one whole-page VLM
-    call, `analyze_page`) or `"panel"` (Phase 3.3 -- deterministic panel detection followed by
-    one VLM call per detected panel, `analyze_page_panels`; see
-    docs/decisions/0007-panel-aware-analysis.md). Ignored when `plan` is already supplied
-    (there is no analysis stage to mode-switch on the controlled-fallback path). Everything
-    downstream of analysis (grounding, validation, segmentation, animation, compositing,
-    rendering) is identical either way -- this switch only changes how the `AnimationPlan` was
-    produced, per ADR 0007's explicit decoupling from grounding/segmentation/animation.
+    `analysis_mode`: `"panel"` (default since Phase 10, see
+    docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md -- deterministic
+    panel detection followed by one VLM call per detected panel, `analyze_page_panels`; see
+    docs/decisions/0007-panel-aware-analysis.md) or `"page"` (one whole-page VLM call,
+    `analyze_page` -- the default through Phase 9). Real Phase 9 evidence
+    (docs/phase9-results.md section 5.3) found panel mode dramatically more reliable on a
+    10-sample real-world set (`end_to_end_completion_rate` 20%->60%, `grounding_success_rate`
+    50%->100%, ERROR-classified outcomes 5->0) and, per Phase 10's own forensics
+    (docs/phase10-results.md), page mode's single whole-page VLM call was the proximate cause of
+    a real mid-cycle visual defect (`realworld_marika_love_meter`) that panel mode's independent,
+    per-panel grounding correctly rejected instead of silently rendering. Ignored when `plan` is
+    already supplied (there is no analysis stage to mode-switch on the controlled-fallback path).
+    Everything downstream of analysis (grounding, validation, segmentation, animation,
+    compositing, rendering) is identical either way -- this switch only changes how the
+    `AnimationPlan` was produced, per ADR 0007's explicit decoupling from
+    grounding/segmentation/animation. Pass `analysis_mode="page"` explicitly for the old default.
     """
     device = config.resolve_device()
     out_dir.mkdir(parents=True, exist_ok=True)
