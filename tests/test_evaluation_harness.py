@@ -15,10 +15,11 @@ from pathlib import Path
 import pytest
 
 from manga_animation.evaluation.harness import (
+    mask_semantics_outcome_from_result,
     object_outcome_motion_type,
     render_summary_from_result,
 )
-from manga_animation.pipeline.types import LoopMetrics, RenderResult
+from manga_animation.pipeline.types import LoopMetrics, MaskSemanticResult, RenderResult
 from manga_animation.schemas.animation_plan import MotionType
 
 
@@ -114,3 +115,31 @@ def test_object_outcome_motion_type_rejects_primary_and_static():
         object_outcome_motion_type(MotionType.PRIMARY)
     with pytest.raises(ValueError, match="unexpected motion_type"):
         object_outcome_motion_type(MotionType.STATIC)
+
+
+def test_mask_semantics_outcome_from_result_returns_none_for_none():
+    """The gate didn't run for this object (disabled, or a stage before it dropped the
+
+    object) -- `None` in, `None` out, not a fabricated outcome.
+    """
+    assert mask_semantics_outcome_from_result(None) is None
+
+
+def test_mask_semantics_outcome_from_result_mirrors_the_real_result():
+    result = MaskSemanticResult(
+        object_id="obj_1",
+        verdict="reject",
+        vlm_matches=False,
+        vlm_confidence=0.82,
+        reason="mask also covers a speech bubble",
+        model_id="fake-qwen",
+        method="vlm_mask_crop_v1",
+        unexpected_content=("speech bubble", "hand"),
+        geometric_signals={"bbox_density": 0.9},
+    )
+    outcome = mask_semantics_outcome_from_result(result)
+    assert outcome is not None
+    assert outcome.verdict == "reject"
+    assert outcome.vlm_confidence == pytest.approx(0.82)
+    assert outcome.unexpected_content == ["speech bubble", "hand"]
+    assert outcome.geometric_signals == {"bbox_density": 0.9}

@@ -63,20 +63,57 @@ asking whether one cropped candidate matches its target" without needing two sep
 parameters threaded through every test.
 """
 
+_MASK_SEMANTICS_PROMPT_MARKER = "Does the bright region show"
+"""Distinctive substring of validation/mask_semantics.py's verification prompt (Phase 12) --
+
+same role as `_VALIDATION_PROMPT_MARKER`, but for the post-segmentation semantic mask gate.
+Every fake VLM client in this module defaults to ACCEPTing this prompt (the gate is enabled by
+default -- `PipelineConfig.enable_semantic_mask_validation=True` -- so every pre-existing test
+in this file that doesn't care about mask_semantics still needs a passing response for it, not
+just for the pre-segmentation `_VALIDATION_PROMPT_MARKER` check); dedicated mask_semantics tests
+override this via each fake's `mask_semantics_matches` parameter.
+"""
+
+
+def _fake_mask_semantics_response(matches: bool, *, confidence: float | None = None) -> str:
+    resolved_confidence = confidence if confidence is not None else (0.9 if matches else 0.1)
+    return json.dumps(
+        {
+            "mask_matches_object": matches,
+            "confidence": resolved_confidence,
+            "unexpected_content": [] if matches else ["fake unrelated content"],
+            "reason": "fake mask semantics response",
+        }
+    )
+
 
 class FakeVLMClient:
-    """Answers both the analysis-stage prompt (returns canned `decisions`) and the Phase 3.2
+    """Answers the analysis-stage prompt (returns canned `decisions`), the Phase 3.2
 
-    validation-stage prompt (defaults to accepting every candidate) -- see
-    `_VALIDATION_PROMPT_MARKER`. `verification_matches=False` lets a test make validation
+    pre-segmentation validation-stage prompt, and the Phase 12 post-segmentation mask_semantics
+    prompt -- see `_VALIDATION_PROMPT_MARKER`/`_MASK_SEMANTICS_PROMPT_MARKER`.
+    `verification_matches=False`/`mask_semantics_matches=False` let a test make either gate
     reject instead, without needing a second fake class.
     """
 
-    def __init__(self, decisions: list[dict], *, verification_matches: bool = True):
+    def __init__(
+        self,
+        decisions: list[dict],
+        *,
+        verification_matches: bool = True,
+        mask_semantics_matches: bool = True,
+        mask_semantics_confidence: float | None = None,
+    ):
         self._decisions = decisions
         self._verification_matches = verification_matches
+        self._mask_semantics_matches = mask_semantics_matches
+        self._mask_semantics_confidence = mask_semantics_confidence
 
     def generate(self, image, prompt: str) -> str:
+        if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+            return _fake_mask_semantics_response(
+                self._mask_semantics_matches, confidence=self._mask_semantics_confidence
+            )
         if _VALIDATION_PROMPT_MARKER in prompt:
             return json.dumps(
                 {
@@ -92,7 +129,8 @@ class ValidationSequenceVLMClient:
     """Like `FakeVLMClient`, but rejects the first `reject_first_n` validation calls and
 
     accepts every one after -- exercises the orchestrator's "try the next ranked grounding
-    candidate" retry path deterministically.
+    candidate" retry path deterministically. Always ACCEPTs mask_semantics prompts (that stage
+    is not what these tests exercise).
     """
 
     def __init__(self, decisions: list[dict], *, reject_first_n: int = 0):
@@ -101,6 +139,8 @@ class ValidationSequenceVLMClient:
         self._validation_calls = 0
 
     def generate(self, image, prompt: str) -> str:
+        if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+            return _fake_mask_semantics_response(True)
         if _VALIDATION_PROMPT_MARKER in prompt:
             self._validation_calls += 1
             matches = self._validation_calls > self._reject_first_n
@@ -120,7 +160,7 @@ class RejectFromNthValidationVLMClient:
     validation call onward (1-based) instead of the first N -- lets a Phase 4 multi-object test
     make an EARLIER object's (e.g. PRIMARY's) validation succeed while a LATER object's (e.g. a
     SECONDARY's) fails, deterministically, by call order (`objects_to_animate` always processes
-    PRIMARY first).
+    PRIMARY first). Always ACCEPTs mask_semantics prompts (not what these tests exercise).
     """
 
     def __init__(self, decisions: list[dict], *, reject_from_call: int):
@@ -129,6 +169,8 @@ class RejectFromNthValidationVLMClient:
         self._validation_calls = 0
 
     def generate(self, image, prompt: str) -> str:
+        if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+            return _fake_mask_semantics_response(True)
         if _VALIDATION_PROMPT_MARKER in prompt:
             self._validation_calls += 1
             matches = self._validation_calls < self._reject_from_call
@@ -789,16 +831,18 @@ def test_run_pipeline_analysis_mode_page_still_available_explicitly(
 class ExplodingVLMClient:
     """Proves the fallback path genuinely skips the ANALYSIS stage's VLM call.
 
-    Phase 3.2's validation stage still legitimately calls the VLM (a cheap crop-verification
-    check, not a full-page analysis call, see `_VALIDATION_PROMPT_MARKER`) even on the
-    fallback path -- "never silently animate an unvalidated candidate" applies to a
-    human-authored fallback plan too, not only to automatic analysis output. This fake accepts
-    validation-stage calls and only explodes on an analysis-stage one, so it still proves what
-    its name says (analysis is skipped) without a false failure from the new, deliberate
-    validation call.
+    Phase 3.2's validation stage and Phase 12's mask_semantics stage still legitimately call
+    the VLM (cheap crop-verification checks, not a full-page analysis call, see
+    `_VALIDATION_PROMPT_MARKER`/`_MASK_SEMANTICS_PROMPT_MARKER`) even on the fallback path --
+    "never silently animate an unvalidated candidate" applies to a human-authored fallback plan
+    too, not only to automatic analysis output. This fake accepts both of those and only
+    explodes on an analysis-stage call, so it still proves what its name says (analysis is
+    skipped) without a false failure from either deliberate validation call.
     """
 
     def generate(self, image, prompt: str) -> str:
+        if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+            return _fake_mask_semantics_response(True)
         if _VALIDATION_PROMPT_MARKER in prompt:
             return json.dumps(
                 {"matches": True, "confidence": 0.9, "reason": "fallback target confirmed"}
@@ -2045,3 +2089,147 @@ def test_run_pipeline_grounds_two_panel_objects_on_distinct_crops_without_identi
     # top panel offset (0, 0), bottom panel offset (0, 80) -- never crop-local, never swapped.
     assert result.grounding.bbox.as_xyxy() == (5, 5, 25, 25)
     assert secondary.grounding.bbox.as_xyxy() == (5, 85, 25, 105)
+
+
+# --- Phase 12: post-segmentation semantic mask validation gate -----------------------------
+#
+# See docs/decisions/0018-semantic-mask-validation.md and docs/phase11-results.md section 6.4
+# for the real defect this stage exists to catch: a mask that passes every existing geometric
+# check (bbox coverage, edge-asymmetry, cross-object overlap) but whose actual pixel content
+# does not match its semantic_label.
+
+
+@requires_ffmpeg
+def test_run_pipeline_renders_when_mask_semantics_accepts_the_primary_object(
+    page_path: Path, config, tmp_path: Path
+):
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision()], mask_semantics_matches=True),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    assert result.render.output_path.exists()
+    assert result.mask_semantics is not None
+    assert result.mask_semantics.verdict == "accept"
+
+
+def test_run_pipeline_raises_stage_mask_semantics_when_primary_mask_content_is_rejected(
+    page_path: Path, config, tmp_path: Path
+):
+    """The real Phase 11 finding, end to end: a mask that is geometrically fine (passes
+
+    grounding/validation/segmentation's own checks) but whose real content the VLM says does
+    not match its label must fail the run, not silently reach the renderer -- the same
+    "never silently animate an unvalidated candidate" policy grounding/validation already have,
+    extended to the mask's own content instead of just its bounding box.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_primary_decision("cloth")], mask_semantics_matches=False),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert excinfo.value.stage == "mask_semantics"
+    assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+def test_run_pipeline_raises_stage_mask_semantics_on_primary_abstain(
+    page_path: Path, config, tmp_path: Path
+):
+    """ABSTAIN is treated identically to REJECT for a PRIMARY object (fail-closed, per
+
+    Workstream 6's "UNKNOWN -> REJECT" conservative default) -- a near-coin-flip VLM read must
+    not silently pass a PRIMARY object through to the renderer either.
+    """
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(
+                [_primary_decision()],
+                mask_semantics_matches=True,
+                mask_semantics_confidence=0.5,  # inside the [0.4, 0.6] abstain band
+            ),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert excinfo.value.stage == "mask_semantics"
+    assert "ABSTAIN" in excinfo.value.detail
+
+
+@requires_ffmpeg
+def test_run_pipeline_drops_a_secondary_whose_mask_semantics_is_rejected_without_failing_the_run(
+    config, tmp_path: Path
+):
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+
+    class PerObjectMaskSemanticsVLMClient:
+        """Accepts every prompt except a mask_semantics check for "trailing_cloth"."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+                matches = "trailing cloth" not in prompt
+                return _fake_mask_semantics_response(matches)
+            if _VALIDATION_PROMPT_MARKER in prompt:
+                return json.dumps({"matches": True, "confidence": 0.9, "reason": "ok"})
+            return json.dumps(decisions)
+
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=PerObjectMaskSemanticsVLMClient(),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()  # the run still completed
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert result.secondary_objects == []
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "trailing_cloth"
+    assert dropped.failing_stage == "mask_semantics"
+    assert dropped.reason  # non-empty, human-readable
+
+
+@requires_ffmpeg
+def test_run_pipeline_can_disable_the_mask_semantics_gate_via_config(
+    page_path: Path, config, tmp_path: Path
+):
+    """`PipelineConfig.enable_semantic_mask_validation=False` skips the gate entirely -- a
+
+    caller that has separately characterized this gate's real false-rejection rate for its own
+    dataset can opt out deliberately (see docs/decisions/0018-semantic-mask-validation.md).
+    """
+    disabled_config = config.model_copy(update={"enable_semantic_mask_validation": False})
+
+    result = run_pipeline(
+        page_path,
+        disabled_config,
+        vlm_client=FakeVLMClient([_primary_decision()], mask_semantics_matches=False),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    assert result.render.output_path.exists()
+    assert result.mask_semantics is None
