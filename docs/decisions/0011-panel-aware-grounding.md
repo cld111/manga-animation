@@ -171,18 +171,24 @@ ADR implements explicitly required this: no weapon-specific or prompt-specific l
 - Only two real pages and two real semantic categories (`weapon`, `character_hair`) were used as
   live evidence this phase — the same "small honest dataset" caveat every prior phase's real
   evaluation already carries (see `docs/phase3.3-results.md`).
-- **The real end-to-end render described above animated a single PRIMARY object only** (a
-  controlled one-object `AnimationPlan`). It demonstrates that this ADR's grounding fix unblocks
-  a real PRIMARY render on `phase3_action_page.png`; it does **not** demonstrate a real,
-  simultaneous multi-object (PRIMARY + SECONDARY/MICRO, each potentially on a different panel)
-  render against live GPU models — that combination is currently verified only by deterministic
-  fake-client tests (`tests/test_pipeline.py`'s identity/multi-object-safety tests), not by a
-  live run. Not claimed as demonstrated; real future work if needed.
-- The live E2E run confirmed `reconstruction` *ran* (not `None`) but its actual inpainted pixel
-  content was not visually inspected this phase (unlike Phase 4's own real-data hole-mask visual
-  check) — this ADR's evidence covers that reconstruction executes, not that its output quality
-  is correct; that remains the same open, model-quality question ADR 0010's "Revision" section
-  already flagged.
+- ~~The real end-to-end render described above animated a single PRIMARY object only... it does
+  NOT demonstrate a real, simultaneous multi-object render against live GPU models...~~
+  **Resolved (Phase 7)**: `docs/phase7-results.md` section 6.2 records a real, fully automatic
+  (no controlled plan), simultaneous multi-object render — `phase3_action_page.png` itself
+  (PRIMARY `blood splatter` + MICRO `character_hair`), plus two further real pages with up to 5
+  simultaneously-animated real objects. See ADR 0010's own "Revision (Phase 7...)" section for
+  the full evidence; this ADR's panel-aware grounding fix is a direct precondition for that
+  result on `phase3_action_page.png` specifically, unchanged since this ADR's original accepted
+  design.
+- ~~The live E2E run confirmed reconstruction ran but its actual inpainted pixel content was not
+  visually inspected this phase...~~ **Resolved generically (Phase 7)**: `docs/phase7-results.md`
+  section 6.4 performed real LaMa visual QA (a different real page,
+  `examples/sample_page_01.png`'s hair region — not this ADR's specific
+  `phase3_action_page.png` render) and found a genuinely clean result (hole confined to
+  background, no seam/ghosting/line-art damage). `phase3_action_page.png`'s own specific
+  reconstruction output still hasn't been separately visually inspected, but the general
+  model-quality question this bullet raised now has real, positive evidence behind it, via
+  `scripts/run_reconstruction_visual_qa.py` (committed, reusable for any future page).
 - **Minor DRY duplication, not a correctness issue**: `grounding/ground.py::_grounding_region`
   and `validation/transform_geometry.py::_reference_region` independently implement the same
   "`panel_bbox_px` when given, else the whole page/image as a `BBoxPx`" fallback. Both are
