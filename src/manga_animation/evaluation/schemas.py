@@ -103,6 +103,16 @@ class RenderSummary(BaseModel):
     pixel_format: str
     seamless_loop_verified: bool
     loop_metrics: LoopMetricsOutcome | None = None
+    seam_artifact_suspected: bool | None = None
+    """Phase 9: `evaluation.artifacts.detect_seam_like_artifacts` run on the actual decoded
+
+    rendered frames -- `True`/`False` when computed, `None` when not (e.g. a producer with
+    `schema_version < 4`, or a decode failure). A real, evidence-validated signal for one
+    specific, narrow defect class only (a rigid, axis-aligned changed-region edge -- the real
+    "vertical seam" defect `docs/phase8.3-results.md` root-caused and fixed at the segmentation
+    stage) -- NOT a general artifact-free claim, and does not replace `seamless_loop_verified`
+    (loop-wrap continuity) or human visual QA. See `evaluation.artifacts`'s own module
+    docstring for the real validation evidence behind this check."""
 
 
 class PageRunOutcome(BaseModel):
@@ -146,10 +156,13 @@ class PageRunOutcome(BaseModel):
             "existed). 2 = Phase 7.2.1 onward: a producer that populates object_outcomes for "
             "every SECONDARY/MICRO object the plan proposed, even when the resulting list is "
             "empty because none existed. 3 = Phase 8 onward: a producer that also populates "
-            "render_summary for every completed outcome. This is a PREDICTION-schema version "
-            "a producer sets when it constructs a record -- unlike EvalSample."
-            "annotation_version (ADR 0009), which is a ground-truth-revision signal only a "
-            "human bumps by hand -- so it is set programmatically wherever a PageRunOutcome is "
-            "actually constructed (see scripts/run_phase3_3_evaluation.py), not left to drift."
+            "render_summary for every completed outcome. 4 = Phase 9 onward: a producer that "
+            "also populates render_summary.seam_artifact_suspected for every completed "
+            "outcome (see manga_animation.evaluation.harness.run_one_sample). This is a "
+            "PREDICTION-schema version a producer sets when it constructs a record -- unlike "
+            "EvalSample.annotation_version (ADR 0009), which is a ground-truth-revision signal "
+            "only a human bumps by hand -- so it is set programmatically wherever a "
+            "PageRunOutcome is actually constructed (see "
+            "manga_animation.evaluation.harness.run_one_sample), not left to drift."
         ),
     )

@@ -168,8 +168,7 @@ class StatusBreakdown:
     @property
     def total(self) -> int:
         return (
-            self.pass_count + self.pass_with_fallback_count + self.rejected_count
-            + self.error_count
+            self.pass_count + self.pass_with_fallback_count + self.rejected_count + self.error_count
         )
 
 

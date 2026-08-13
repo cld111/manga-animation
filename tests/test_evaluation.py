@@ -11,9 +11,13 @@ import pytest
 from pydantic import ValidationError
 
 from manga_animation.evaluation.dataset import (
+    DEFAULT_DATASET_PATH,
     GOLDEN_DATASET_CATEGORIES,
+    REALWORLD_DATASET_PATH,
     EvalSample,
+    dataset_composition,
     golden_category_coverage,
+    load_combined_eval_dataset,
     load_eval_dataset,
     uncovered_golden_categories,
 )
@@ -238,9 +242,7 @@ def test_ground_truth_uncertain_flag_excludes_a_sample_even_with_a_resolved_anim
     `animation_possible == "uncertain"` value was excluded, so this exact case would have
     counted as a known positive.
     """
-    samples = {
-        "hedged": _sample("hedged", animation_possible="yes", ground_truth_uncertain=True)
-    }
+    samples = {"hedged": _sample("hedged", animation_possible="yes", ground_truth_uncertain=True)}
     outcomes = [_failed("hedged", stage="analysis", detail="all STATIC")]
     report = compute_metrics(outcomes, samples)
     assert report.semantic_false_negative_rate == Rate(0, 0)
@@ -629,6 +631,121 @@ def test_real_golden_dataset_every_sample_has_at_least_one_category():
         assert sample.golden_categories, f"{sample.sample_id} has no golden_categories"
 
 
+# --- Phase 9: Real-World Evaluation Dataset tag fields -------------------------------------
+
+
+def test_eval_sample_defaults_to_no_phase9_tags():
+    sample = _sample("a")
+    assert sample.scene_complexity_tags == []
+    assert sample.potential_motion_tags == []
+    assert sample.geometric_difficulty_tags == []
+    assert sample.motion_type_tags == []
+    assert sample.expected_difficulty is None
+
+
+def test_eval_sample_rejects_an_unknown_phase9_tag():
+    with pytest.raises(ValidationError):
+        _sample("a", scene_complexity_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", potential_motion_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", geometric_difficulty_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", motion_type_tags=["not_a_real_tag"])
+    with pytest.raises(ValidationError):
+        _sample("a", expected_difficulty="impossible")
+
+
+def test_dataset_composition_counts_every_taxonomy_value_including_zero():
+    samples = [
+        _sample(
+            "a",
+            scene_complexity_tags=["crowded_scene", "multiple_panels"],
+            potential_motion_tags=["weapon"],
+            expected_difficulty="hard",
+            animation_possible="yes",
+        ),
+        _sample(
+            "b",
+            scene_complexity_tags=["crowded_scene"],
+            expected_difficulty="hard",
+            animation_possible="no",
+        ),
+    ]
+    composition = dataset_composition(samples)
+    assert composition["sample_count"] == {"total": 2}
+    assert composition["scene_complexity_tags"]["crowded_scene"] == 2
+    assert composition["scene_complexity_tags"]["multiple_panels"] == 1
+    assert composition["scene_complexity_tags"]["sparse_scene"] == 0  # a real gap, not absent
+    assert composition["potential_motion_tags"]["weapon"] == 1
+    assert composition["expected_difficulty"] == {"easy": 0, "medium": 0, "hard": 2}
+    assert composition["animation_possible"] == {"yes": 1, "no": 1, "uncertain": 0}
+
+
+def test_dataset_composition_of_empty_dataset_is_all_zero_not_an_error():
+    composition = dataset_composition([])
+    assert composition["sample_count"] == {"total": 0}
+    assert all(v == 0 for v in composition["scene_complexity_tags"].values())
+
+
+# --- Phase 9: Real-World Evaluation Dataset (configs/phase9_realworld_eval_dataset.yaml) ---
+
+
+def test_real_realworld_dataset_loads_and_has_ten_samples():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    assert len(samples) == 10
+    assert len({s.sample_id for s in samples}) == 10  # every sample_id is unique
+
+
+def test_real_realworld_dataset_every_sample_has_at_least_one_phase9_tag():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    for sample in samples:
+        has_any_tag = (
+            sample.scene_complexity_tags
+            or sample.potential_motion_tags
+            or sample.geometric_difficulty_tags
+            or sample.motion_type_tags
+        )
+        assert has_any_tag, f"{sample.sample_id} has no Phase 9 tags at all"
+
+
+def test_real_realworld_dataset_has_a_mix_of_confident_and_uncertain_ground_truth():
+    samples = load_eval_dataset(REALWORLD_DATASET_PATH)
+    certain = [s for s in samples if not s.ground_truth_uncertain]
+    uncertain = [s for s in samples if s.ground_truth_uncertain]
+    assert certain and uncertain  # a real dataset, not one uniform label
+    assert any(s.animation_possible == "yes" for s in certain)
+    assert any(s.animation_possible == "no" for s in certain)
+
+
+def test_load_combined_eval_dataset_concatenates_golden_and_realworld():
+    golden = load_eval_dataset(DEFAULT_DATASET_PATH)
+    realworld = load_eval_dataset(REALWORLD_DATASET_PATH)
+    combined = load_combined_eval_dataset()
+    assert len(combined) == len(golden) + len(realworld)
+    assert {s.sample_id for s in combined} == {s.sample_id for s in golden} | {
+        s.sample_id for s in realworld
+    }
+
+
+def test_load_combined_eval_dataset_rejects_a_cross_file_duplicate_image_path(tmp_path):
+    manifest_a = tmp_path / "a.yaml"
+    manifest_b = tmp_path / "b.yaml"
+    entry = """
+samples:
+  - sample_id: {sid}
+    image_path: examples/shared.png
+    source_citation: test
+    diversity_tag: test
+    fetch_script: scripts/fetch_sample_pages.py
+    acceptable_outcome: anything
+"""
+    manifest_a.write_text(entry.format(sid="a"))
+    manifest_b.write_text(entry.format(sid="b"))
+    with pytest.raises(ValueError, match="duplicate image_path"):
+        load_combined_eval_dataset([manifest_a, manifest_b])
+
+
 def test_eval_sample_loader_roundtrips_a_minimal_yaml(tmp_path):
     manifest = tmp_path / "mini.yaml"
     manifest.write_text(
@@ -853,9 +970,7 @@ def test_real_dataset_ground_truth_split_is_visible_and_sums_to_sample_count():
     positive_controls = report.semantic_false_negative_rate.denominator
     negative_controls = report.semantic_false_positive_rate.denominator
     unresolved = report.unresolved_ground_truth_count
-    assert positive_controls + negative_controls + unresolved == report.sample_count == len(
-        samples
-    )
+    assert positive_controls + negative_controls + unresolved == report.sample_count == len(samples)
     # verified_action_1/2 count as resolved positive controls, not unresolved.
     assert positive_controls >= 2
 

@@ -1,6 +1,9 @@
-"""Regression tests for scripts/run_phase3_3_evaluation.py's pure helper functions --
+"""Regression tests for scripts/run_phase3_3_evaluation.py's one remaining script-local pure
 
-`_render_rates_in_place` and (Phase 8) `_render_summary_from_result`.
+helper function, `_render_rates_in_place` (its other former helpers -- `_run_one`,
+`_render_summary_from_result`, etc. -- were extracted to
+`manga_animation.evaluation.harness` in Phase 9 for reuse by
+`scripts/run_phase9_evaluation.py`; see `tests/test_evaluation_harness.py` for their tests).
 
 A Phase 7 closure audit found a real bug in `_render_rates_in_place`: the JSON-summary
 rate-rendering loop indexed `reports` by a `mode` variable left over from an unrelated,
@@ -22,10 +25,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 from manga_animation.evaluation.metrics import Rate, StatusBreakdown
-from manga_animation.pipeline.types import LoopMetrics, RenderResult
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_phase3_3_evaluation.py"
 _spec = importlib.util.spec_from_file_location("run_phase3_3_evaluation", _SCRIPT_PATH)
@@ -35,7 +35,6 @@ sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 
 _render_rates_in_place = _module._render_rates_in_place
-_render_summary_from_result = _module._render_summary_from_result
 EvaluationReport = _module.EvaluationReport
 
 
@@ -108,45 +107,3 @@ def test_render_rates_in_place_only_touches_rate_shaped_dicts():
     assert serialized["page"]["analysis_mode"] == "page"
     assert serialized["page"]["sample_count"] == 3
     assert "rendered" not in str(serialized["page"]["analysis_mode"])
-
-
-def test_render_summary_from_result_carries_loop_metrics_through():
-    render = RenderResult(
-        output_path=Path("out.mp4"),
-        frame_count=48,
-        fps=24.0,
-        resolution=(640, 480),
-        duration_s=2.0,
-        codec="h264",
-        pixel_format="yuv420p",
-        seamless_loop_verified=True,
-        loop_metrics=LoopMetrics(
-            ordinary_adjacent_step_mean_abs_diff=1.2,
-            wrap_step_mean_abs_diff=1.4,
-            wrap_step_within_2x_ordinary=True,
-            ordinary_adjacent_step_ssim=0.99,
-            wrap_step_ssim=0.98,
-            wrap_ssim_within_tolerance=True,
-        ),
-    )
-    summary = _render_summary_from_result(render)
-    assert summary.frame_count == 48
-    assert summary.resolution == (640, 480)
-    assert summary.loop_metrics is not None
-    assert summary.loop_metrics.wrap_step_ssim == pytest.approx(0.98)
-
-
-def test_render_summary_from_result_handles_a_missing_loop_metrics():
-    render = RenderResult(
-        output_path=Path("out.mp4"),
-        frame_count=2,
-        fps=24.0,
-        resolution=(640, 480),
-        duration_s=0.1,
-        codec="h264",
-        pixel_format="yuv420p",
-        seamless_loop_verified=True,
-        loop_metrics=None,
-    )
-    summary = _render_summary_from_result(render)
-    assert summary.loop_metrics is None
