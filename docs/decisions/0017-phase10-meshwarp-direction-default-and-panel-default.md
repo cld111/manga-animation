@@ -34,7 +34,14 @@ evidence — never a pixel-exact reconstruction of the original live-GPU instanc
 
 ## Investigation summary
 
-**`wind_breaker_finish` and `villainess_ending_scuffle` share one proven root cause.** Both
+**`wind_breaker_finish` and `villainess_ending_scuffle` were both hypothesized to share one root
+cause; real post-fix GPU validation (see "Real post-fix GPU validation" below) confirmed this for
+`villainess_ending_scuffle` only** — `wind_breaker_finish` remains defective post-fix, and real
+inspection of its actual post-fix object geometry disconfirms this mechanism as its dominant
+cause (its `mesh_warp` object's real bbox is taller than wide, so it correctly took this fix's new
+branch, yet the visible defect is unchanged). The mechanism below is real and proven for
+`villainess_ending_scuffle`; its extension to `wind_breaker_finish` was a reasonable hypothesis
+at the time it was written, not an established fact — read the paragraph accordingly. Both
 renders include a MESH_WARP object (`obj_character_clothing_1`, `obj_cloth_5`) produced by
 `analysis/plan_builder.py`'s `_MOTION_HEURISTICS` flag/banner/cloth/cape/cloak/drape/curtain
 entry — which never sets `MotionSpec.direction` (only `transform_kind`, `amplitude`, `speed`,
@@ -82,6 +89,57 @@ phase does not close (see "Deferred" below), and panel mode's own INDEPENDENT gr
 for the same page WAS caught by that exact check (`realworld_marika_love_meter`, panel mode:
 segmentation REJECTED, "mask hugs its own tight bbox's bottom edge for 70.8%... while the
 opposite edge is only 7.7%").
+
+## Real post-fix GPU validation (updates the above with real evidence)
+
+A real GPU E2E validation run (`scripts/run_phase10_gpu_validation.py`, live Kaggle worker, 2x
+Tesla T4, same real Qwen2.5-VL-7B-Instruct/Grounding DINO/SAM 2.1/LaMa, commit `72af0ca`) was
+executed against exactly the three defect samples after this ADR's fix landed. Real results
+(`outputs/experiments/phase10_gpu_validation_20260813T200422Z.json`, downloaded videos visually
+inspected frame-by-frame at native resolution — see `docs/phase10-results.md` section 11 for the
+full evidence):
+
+- **`villainess_ending_scuffle` (panel mode) — CONFIRMED FIXED.** Grounding/segmentation
+  reproduced byte-identical to Phase 9's original run (same `raised_sword`/`cloth` objects, same
+  grounding scores). Direct visual inspection of the real post-fix video at native resolution
+  (frame 0/24/95, tightly cropped around the `cloth` object's real changed region) found **no
+  hard vertical seam or duplicate silhouette** — the sleeve/torso/skirt region that showed the
+  original defect is now clean; the only visible frame-24 change is a subtle diagonal-streak
+  ripple consistent with the intended `mesh_warp` motion. The automated
+  `seam_artifact_suspected` flag still fired (`True`) — a confirmed false positive on this
+  sample post-fix, consistent with the detector's already-disclosed ~50% real-world precision
+  (`docs/phase9-results.md` section 7.2), not evidence the defect persists.
+- **`wind_breaker_finish` (panel mode) — NOT FIXED; original hypothesis disconfirmed by real
+  data.** Grounding/segmentation again reproduced byte-identical to Phase 9. Direct visual
+  inspection of the real post-fix video found the vertical streaking/warping distortion around
+  the bicycle wheel **unchanged** from the original defect. Real, live inspection of the actual
+  post-fix `SegmentationResult.bbox` for every animated object (via a one-off diagnostic script
+  run on the same live worker) found: `obj_character_clothing_1` (the `mesh_warp` object this
+  ADR's fix targets) has a real bbox of `398x543` (taller than wide), so it correctly took this
+  fix's NEW vertical-anchor branch, not the old horizontal-shear bug — the fix demonstrably did
+  apply, and did not resolve the visible defect. The PRIMARY object, `obj_object_in_motion`
+  (`translate`, unaffected by this ADR's fix), has a real bbox of `389x1381` (unusually tall for
+  "a bicycle wheel") at `amplitude=0.02` against a panel diagonal of ~4343px, i.e. a real ~87px
+  peak horizontal displacement of a very elongated, fine-structured (spokes) region — a
+  plausible, evidenced-by-this-one-real-instance (not independently confirmed as a general
+  pattern) alternative mechanism, left as `UNKNOWN`/deferred (see "Deferred" below), not fixed
+  in this phase.
+- **`marika_love_meter` — behaves exactly as predicted.** `page` mode reproduced the identical
+  defect (same grounding score `0.4292887...`, same dropped `obj_greeting_1`, byte-identical
+  visual ghosting at frame 24) — expected, since no code-level fix was implemented for its
+  `UNKNOWN` root cause. `panel` mode (the new default) reproduced the identical honest
+  REJECTION at segmentation (same 70.8%/7.7% figures) — confirming the panel-mode-default
+  mitigation holds deterministically on a fresh real run, not just Phase 9's original one.
+
+**Honest summary**: this phase's fix is confirmed, with real re-verified GPU evidence, to fix
+exactly one of the three original defects (`villainess_ending_scuffle`) outright, and to
+correctly mitigate a second (`marika_love_meter`, via the panel-mode default, not a mask-level
+fix) by removing the defective page-mode path from default operation while leaving it available
+and unchanged for any caller that asks for it explicitly. The third
+(`wind_breaker_finish`) remains a real, open, disclosed defect — the original mesh_warp
+hypothesis is real-data-disconfirmed as this sample's dominant cause, and a new, real-evidenced
+but not-yet-confirmed lead (an oversized PRIMARY `translate` bbox) is recorded for future work
+rather than converted into an unproven fix.
 
 **The compositing/reconstruction invariant itself holds.** Direct reading of
 `compositing/__init__.py::composite_frame_stack` and `reconstruction/__init__.py::
@@ -160,14 +218,22 @@ compositing/reconstruction/rendering, no change to any Phase 8/8.3 validation ga
   `_validate_mask_shape`'s edge-asymmetry-only check, remains unimplemented — deliberately, since
   no real mask/bbox pair for this defect exists to evidence a calibrated threshold, and the Phase
   10 brief explicitly forbids introducing "speculative heuristics without evidence."
-- **MESH_WARP's `strength = value * amplitude * max(bbox_width, bbox_height)` has no upper bound**
-  relative to the panel/page — a legitimately large mesh_warp object (or one with an inflated
-  bbox from a scattered/disconnected mask) can still produce an arbitrarily large per-pixel
-  displacement even after Decision 1's axis fix. This is a plausible *contributing* factor to
-  `wind_breaker_finish`'s severity specifically, but not independently confirmed (no real mask
-  data for that sample) — left open pending real calibration evidence, same status as this
-  codebase's other deterministic thresholds before they had real defect data behind them (see
-  ADR 0015's own thresholds' history).
+- **`wind_breaker_finish`'s real root cause is now `UNKNOWN` with a real, but unconfirmed, new
+  lead** (updated after real post-fix GPU validation — see "Real post-fix GPU validation" above,
+  which superseded this bullet's original, purely-hypothetical framing). The mesh_warp direction
+  fix demonstrably applied (`obj_character_clothing_1`'s real post-fix bbox, `398x543`, took the
+  new vertical branch) but did not resolve the visible defect. Live inspection of the real
+  post-fix `SegmentationResult.bbox` for every object found the PRIMARY `obj_object_in_motion`
+  (`translate`, `amplitude=0.02`, unaffected by any Phase 10 change) has a real bbox of
+  `389x1381` — unusually tall/elongated for "a bicycle wheel" — giving a real ~87px peak
+  horizontal displacement (`0.02 * panel_diag_px(~4343) ≈ 87`) of a fine-structured (spoke-heavy)
+  region. This is a plausible new mechanism, evidenced by exactly one real instance, not
+  confirmed as a general pattern and not fixed this phase (implementing a fix — e.g. capping
+  TRANSLATE displacement relative to bbox detail, or a general oversized-mask detector — would be
+  exactly the "speculative heuristic without evidence" the Phase 10 brief forbids from one data
+  point). MESH_WARP's own `strength = value * amplitude * max(bbox_width, bbox_height)` still has
+  no upper bound relative to the panel/page either, and remains a separate, still-unconfirmed,
+  still-open concern independent of this specific sample's now-real evidence.
 - **The `_MOTION_HEURISTICS` "cloth" keyword substring also matches "clothing"/"clothes"** (e.g.
   `character_clothing`), giving a general garment object the same `amplitude=0.12` tuned for a
   flag/banner. Plausibly not ideal, but not independently evidenced as wrong (clothing sway is

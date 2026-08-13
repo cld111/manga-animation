@@ -78,8 +78,12 @@ engine — none of those stages change or become panel-aware:
    VLM call) whenever `detect_panels` returns zero panels, or when every detected panel's VLM
    read is STATIC or unusable and the page-level path might still find something (see that
    function's docstring for the exact fallback trigger). `analyze_page` itself is completely
-   unchanged — Phase 3.2's behavior remains the default, always-available path
-   (`run_pipeline(..., analysis_mode="page")`, the unchanged default).
+   unchanged — Phase 3.2's behavior remains an always-available path
+   (`run_pipeline(..., analysis_mode="page")`). **No longer `run_pipeline`'s default as of Phase
+   10** (see `docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md`) —
+   real Phase 9/10 evidence found panel-level analysis substantially more reliable; this
+   historical note is left as originally written above it, not edited to pretend the default
+   never changed.
 
 ## Consequences
 
