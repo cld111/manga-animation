@@ -53,7 +53,7 @@ ffmpeg -y -framerate <fps> -i frame_%04d.png \
   manga pages are not guaranteed to have either (confirmed by a real Phase 2 encode failure
   on an 800x2305 sample page: `height not divisible by 2`); the `pad` filter above rounds
   up to the nearest even dimension rather than cropping, so no source content is lost. See
-  [ADR 0005](../../docs/decisions/0005-phase2-model-selection.md)'s `video-rendering`
+  [ADR 0005](../../../docs/decisions/0005-phase2-model-selection.md)'s `video-rendering`
   section.
 - `-crf 18` — visually near-lossless; raise toward 23 if file size matters more than
   fidelity to the (already lightly-modified) source frames.
