@@ -138,16 +138,16 @@ conclusion. Candidates without implemented adapters remain research entries.
   validation, so the Phase 9 completion metrics are not a post-gate quality claim.
 - Phase 13's panel-first implementation has local behavioral coverage and fake-client end-to-end
   coverage for multiple outputs, crop bounds, failure isolation, manifest fields, resumability,
-  and cross-panel rejection. Representative real GPU validation and native-resolution visual
-  review for the new runner are still pending because the supplied Jupyter proxy URL returned
-  `404` and did not expose a usable notebook endpoint.
+  and cross-panel rejection. The supplied Jupyter API is reachable and exposes a Tesla T4
+  kernel, but representative real GPU validation and native-resolution video review for the new
+  runner were deferred by the user; no GPU result is claimed.
 
 ## Immediate Priorities
 
 These are future work, not implemented capabilities:
 
-1. Run targeted real GPU panel validation on a reachable remote worker and inspect representative
-   panel videos/crops at native resolution.
+1. Run the deferred targeted real GPU panel validation and inspect representative panel
+   videos/crops at native resolution.
 2. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
    before changing thresholds or claiming generalization.
 3. Run a bounded context-size study for mask verification and establish a genuine development/

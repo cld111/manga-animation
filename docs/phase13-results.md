@@ -1,8 +1,9 @@
 # Phase 13 results: panel extraction and independent scene animation
 
 Status: **PARTIALLY COMPLETED.** The local panel-first architecture, deterministic scene crops,
-independent outputs, manifest, failure isolation and regression coverage are implemented. Real
-GPU validation is blocked by the supplied Jupyter proxy returning `404`; no GPU result is claimed.
+independent outputs, manifest, failure isolation and regression coverage are implemented. The
+supplied Jupyter API and Tesla T4 kernel were verified, but real GPU validation was deferred by
+the user; no GPU result is claimed.
 
 ## Architecture change
 
@@ -30,7 +31,7 @@ Local tests pass for crop containment, page-edge and adjacent-panel behavior, al
 coordinate translation, cross-panel rejection, multiple panel videos, manifest contents, failure
 isolation and resumability behavior. Fake-client end-to-end rendering produced one H.264 output
 per panel. Real example pages were used for local detector/crop inspection; targeted native-
-resolution GPU validation remains pending.
+resolution GPU validation remains deferred.
 
 ## Performance and limitations
 
