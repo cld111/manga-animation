@@ -18,14 +18,31 @@ from manga_animation.analysis import VLMClient, analyze_page, detect_panels
 from manga_animation.analysis.panels import derive_scene_crop_bbox
 from manga_animation.core.config import PipelineConfig
 from manga_animation.grounding import GroundingClient
-from manga_animation.pipeline.orchestrator import run_pipeline
+from manga_animation.pipeline.lifecycle import ModelStage
+from manga_animation.pipeline.orchestrator import (
+    DroppedObjectResult,
+    _animate_objects,
+    _composite_and_render,
+    _ground_objects,
+    _mask_semantics_objects,
+    _reconstruct_objects,
+    _segment_objects,
+    _select_objects,
+    _select_primary,
+    _validate_objects,
+)
 from manga_animation.pipeline.types import (
+    BBoxPx,
+    GroundingResult,
+    MaskSemanticResult,
     PanelStatus,
     PanelUnit,
     PipelineStageError,
+    SegmentationResult,
+    ValidationResult,
 )
 from manga_animation.reconstruction import ReconstructionClient
-from manga_animation.schemas.animation_plan import MotionType
+from manga_animation.schemas.animation_plan import AnimationPlan, MotionType, ObjectPlan
 from manga_animation.segmentation import SegmentationClient
 
 
@@ -42,10 +59,12 @@ class PagePanelsResult:
 _SAFE_REJECTION_STAGES = {"grounding", "validation", "segmentation", "mask_semantics"}
 
 
-def _unload(client: object) -> None:
-    unload = getattr(client, "unload", None)
-    if callable(unload):
-        unload()
+def _failure_status(stage: str) -> PanelStatus:
+    """Map a failing stage to the panel's status: safe model-gate rejections are REJECTED,
+    everything else (including analysis) is ERROR -- same mapping the pre-Phase-14 panel
+    runner used.
+    """
+    return "REJECTED" if stage in _SAFE_REJECTION_STAGES else "ERROR"
 
 
 def _write_manifest(
@@ -116,8 +135,16 @@ def run_page_panels(
 ) -> PagePanelsResult:
     """Detect and process every panel independently on its scene-crop canvas.
 
+    Panel processing is **stage-level** (Phase 14, docs/decisions/0020-stage-level-model-
+    lifecycle.md): each model-backed stage loads its client once, processes every eligible
+    panel, then deterministically releases the client via `ModelStage` before the next stage
+    loads its own model. The four model families never co-reside, and a panel failure in one
+    stage cannot leave a model resident to poison later panels (the old per-panel load/unload
+    path leaked Qwen's ~16 GiB until an opportunistic `gc.collect()`, racing the next load into
+    a CUDA OOM -- reproduced on a real 2xT4 Kaggle run before this change).
+
     A panel failure is recorded and processing continues. The manifest is written after each
-    panel, making completed PASS/STATIC panels reusable on a later invocation.
+    stage, making completed PASS/STATIC panels reusable on a later invocation.
     """
     image_path = image_path.resolve()
     page_id = image_path.stem
@@ -142,6 +169,8 @@ def run_page_panels(
 
     panel_bboxes = tuple(candidate.panel_bbox for candidate in candidates)
     panels: list[PanelUnit] = []
+    crops: dict[str, np.ndarray] = {}
+    panel_started_at: dict[str, float] = {}
     for index, candidate in enumerate(candidates, start=1):
         panel_id = f"panel_{index:03d}"
         panel_bbox = candidate.panel_bbox
@@ -152,9 +181,9 @@ def run_page_panels(
         )
         crop_path = page_dir / "crops" / f"{panel_id}.png"
         crop_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(image[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]).save(
-            crop_path
-        )
+        crop = image[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]
+        crops[panel_id] = crop
+        Image.fromarray(crop).save(crop_path)
         panel = PanelUnit(
             page_id=page_id,
             panel_id=panel_id,
@@ -178,59 +207,216 @@ def run_page_panels(
             panel.status = resumed
             output = existing[panel_id].get("output_video")
             panel.output_video = Path(output) if isinstance(output, str) else None
-            _write_manifest(
-                manifest_path, page_id, image_path, panels, started_at=started_at
-            )
-            continue
 
-        panel_started_at = time.perf_counter()
-        try:
+    def write_manifest() -> None:
+        _write_manifest(manifest_path, page_id, image_path, panels, started_at=started_at)
+
+    def finalize(panel: PanelUnit, status: PanelStatus, stage: str, reason: str) -> None:
+        _set_failure(panel, status, stage, reason)
+        start = panel_started_at.get(panel.panel_id)
+        if start is not None:
+            panel.metrics["runtime_s"] = round(time.perf_counter() - start, 6)
+        panel_started_at.pop(panel.panel_id, None)
+
+    # -------------------------------------------------------------------------------------
+    # Stage 1: panel/scene analysis -- the VLM processes every eligible panel, then releases.
+    # -------------------------------------------------------------------------------------
+    plans: dict[str, AnimationPlan] = {}
+    with ModelStage(vlm_client, name="analysis"):
+        for panel in panels:
+            if panel.status in ("PASS", "STATIC"):
+                continue  # resumed from an earlier manifest
+            panel_started_at[panel.panel_id] = time.perf_counter()
             try:
                 plan = analyze_page(
-                    crop_path,
+                    panel.scene_crop_path,
                     vlm_client,
                     config=config,
                     allow_all_static=True,
                 )
-            finally:
-                _unload(vlm_client)
-
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                continue
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                continue
             if not any(obj.motion_type != MotionType.STATIC for obj in plan.objects):
                 panel.status = "STATIC"
-                panel.metrics["runtime_s"] = round(time.perf_counter() - panel_started_at, 6)
-                _write_manifest(
-                    manifest_path, page_id, image_path, panels, started_at=started_at
+                panel.metrics["runtime_s"] = round(
+                    time.perf_counter() - panel_started_at.pop(panel.panel_id), 6
                 )
                 continue
+            plans[panel.panel_id] = plan
+    write_manifest()
 
-            run_result = run_pipeline(
-                crop_path,
-                config,
-                vlm_client=vlm_client,
-                grounding_client=grounding_client,
-                segmentation_client=segmentation_client,
-                reconstruction_client=reconstruction_client,
-                out_dir=page_dir,
-                plan=plan,
-                global_origin=(scene_bbox.x0, scene_bbox.y0),
-                logical_panel_bbox_px=panel_bbox,
-                neighboring_panel_bboxes=panel_bboxes,
-                video_filename=f"{panel_id}.mp4",
-                frames_dir=page_dir / "frames" / panel_id,
+    # -------------------------------------------------------------------------------------
+    # Stage 2: grounding -- Grounding DINO processes every eligible panel, then releases.
+    # -------------------------------------------------------------------------------------
+    objects_by_panel: dict[str, list[ObjectPlan]] = {}
+    bbox_by_object_by_panel: dict[str, dict[str, BBoxPx]] = {}
+    primary_by_panel: dict[str, ObjectPlan] = {}
+    candidates_by_panel: dict[str, dict[str, list[GroundingResult]]] = {}
+    dropped_by_panel: dict[str, list[DroppedObjectResult]] = {}
+    with ModelStage(grounding_client, name="grounding"):
+        for panel in panels:
+            panel_id = panel.panel_id
+            if panel_id not in plans:
+                continue  # resumed/STATIC, or already failed at analysis
+            plan = plans[panel_id]
+            primary = _select_primary(plan, str(panel.scene_crop_path))
+            objects, bbox_by_object = _select_objects(
+                plan, primary, crops[panel_id].shape[:2]
             )
-            panel.status = "PASS"
-            panel.output_video = run_result.render.output_path
-            panel.metrics["frame_count"] = run_result.render.frame_count
-        except PipelineStageError as exc:
-            status: PanelStatus = "REJECTED" if exc.stage in _SAFE_REJECTION_STAGES else "ERROR"
-            _set_failure(panel, status, exc.stage, exc.detail)
-        except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-            _set_failure(panel, "ERROR", type(exc).__name__, str(exc))
+            try:
+                grounded, dropped = _ground_objects(
+                    crops[panel_id],
+                    objects,
+                    grounding_client,
+                    bbox_by_object,
+                    primary.object_id,
+                )
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                continue
+            objects_by_panel[panel_id] = objects
+            bbox_by_object_by_panel[panel_id] = bbox_by_object
+            primary_by_panel[panel_id] = primary
+            candidates_by_panel[panel_id] = grounded
+            dropped_by_panel[panel_id] = dropped
+    write_manifest()
+    # -------------------------------------------------------------------------------------
+    # Stage 3: target validation -- the VLM validates every eligible panel, then releases.
+    # -------------------------------------------------------------------------------------
+    validation_by_panel: dict[str, dict[str, list[ValidationResult]]] = {}
+    accepted_by_panel: dict[str, dict[str, GroundingResult]] = {}
+    with ModelStage(vlm_client, name="validation"):
+        for panel in panels:
+            panel_id = panel.panel_id
+            if panel_id not in candidates_by_panel:
+                continue
+            try:
+                attempts, accepted, dropped = _validate_objects(
+                    crops[panel_id],
+                    objects_by_panel[panel_id],
+                    candidates_by_panel[panel_id],
+                    vlm_client,
+                    bbox_by_object_by_panel[panel_id],
+                    primary_by_panel[panel_id].object_id,
+                    logical_panel_bbox_px=panel.panel_bbox,
+                    neighboring_panel_bboxes=panel_bboxes,
+                    global_origin=(panel.scene_crop_bbox.x0, panel.scene_crop_bbox.y0),
+                )
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                continue
+            validation_by_panel[panel_id] = attempts
+            accepted_by_panel[panel_id] = accepted
+            dropped_by_panel[panel_id].extend(dropped)
+    write_manifest()
 
-        panel.metrics["runtime_s"] = round(time.perf_counter() - panel_started_at, 6)
-        _write_manifest(manifest_path, page_id, image_path, panels, started_at=started_at)
+    # -------------------------------------------------------------------------------------
+    # Stage 4: segmentation -- SAM processes every eligible panel, then releases.
+    # -------------------------------------------------------------------------------------
+    animated_by_panel: dict[str, list[ObjectPlan]] = {}
+    segmentation_by_panel: dict[str, dict[str, SegmentationResult]] = {}
+    with ModelStage(segmentation_client, name="segmentation"):
+        for panel in panels:
+            panel_id = panel.panel_id
+            if panel_id not in accepted_by_panel:
+                continue
+            try:
+                animated, seg, dropped = _segment_objects(
+                    crops[panel_id],
+                    objects_by_panel[panel_id],
+                    accepted_by_panel[panel_id],
+                    segmentation_client,
+                    primary_by_panel[panel_id].object_id,
+                )
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                continue
+            animated_by_panel[panel_id] = animated
+            segmentation_by_panel[panel_id] = seg
+            dropped_by_panel[panel_id].extend(dropped)
+    write_manifest()
 
-    _write_manifest(manifest_path, page_id, image_path, panels, started_at=started_at)
+    # -------------------------------------------------------------------------------------
+    # Stage 5: semantic mask validation -- the VLM processes every eligible panel, releases.
+    # -------------------------------------------------------------------------------------
+    mask_semantics_by_panel: dict[str, dict[str, MaskSemanticResult]] = {}
+    if config.enable_semantic_mask_validation:
+        with ModelStage(vlm_client, name="mask_semantics"):
+            for panel in panels:
+                panel_id = panel.panel_id
+                if panel_id not in animated_by_panel:
+                    continue
+                try:
+                    kept, seg, msv, dropped = _mask_semantics_objects(
+                        crops[panel_id],
+                        animated_by_panel[panel_id],
+                        segmentation_by_panel[panel_id],
+                        vlm_client,
+                        config,
+                        primary_by_panel[panel_id].object_id,
+                    )
+                except PipelineStageError as exc:
+                    finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                    continue
+                animated_by_panel[panel_id] = kept
+                segmentation_by_panel[panel_id] = seg
+                mask_semantics_by_panel[panel_id] = msv
+                dropped_by_panel[panel_id].extend(dropped)
+        write_manifest()
+
+    # -------------------------------------------------------------------------------------
+    # Stage 6: animation + reconstruction + compositing + rendering. The CV work is CPU-only;
+    # LaMa is loaded once for the whole stage and kept resident only while eligible panels'
+    # motion-revealed holes are filled (its own reconstruction stage), then released.
+    # -------------------------------------------------------------------------------------
+    with ModelStage(reconstruction_client, name="reconstruction"):
+        for panel in panels:
+            panel_id = panel.panel_id
+            if panel_id not in animated_by_panel:
+                continue
+            panel_started_at.setdefault(panel_id, time.perf_counter())
+            try:
+                layers, layers_by_object = _animate_objects(
+                    crops[panel_id],
+                    animated_by_panel[panel_id],
+                    segmentation_by_panel[panel_id],
+                    bbox_by_object_by_panel[panel_id],
+                    plans[panel_id],
+                )
+                reconstructions = _reconstruct_objects(
+                    crops[panel_id],
+                    animated_by_panel[panel_id],
+                    segmentation_by_panel[panel_id],
+                    layers_by_object,
+                    reconstruction_client,
+                    config,
+                )
+                render_result = _composite_and_render(
+                    crops[panel_id],
+                    layers,
+                    reconstructions,
+                    plans[panel_id],
+                    page_dir,
+                    config,
+                    video_filename=f"{panel_id}.mp4",
+                    frames_dir=page_dir / "frames" / panel_id,
+                )
+                panel.status = "PASS"
+                panel.output_video = render_result.output_path
+                panel.metrics["frame_count"] = render_result.frame_count
+                panel.metrics["runtime_s"] = round(
+                    time.perf_counter() - panel_started_at.pop(panel_id), 6
+                )
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+    write_manifest()
+
     return PagePanelsResult(
         page_id=page_id,
         source_image=image_path,

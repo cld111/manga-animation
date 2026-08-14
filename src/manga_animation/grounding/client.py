@@ -71,6 +71,8 @@ class GroundingDinoClient:
         self.processor: Any = None
 
     def load(self) -> None:
+        if self.model is not None:
+            return  # idempotent -- ModelStage may re-enter a stage that is already loaded
         import torch
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 

@@ -1663,7 +1663,7 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
     real_reconstruct_hidden_region = orch.reconstruct_hidden_region
 
     def spy_reconstruct_hidden_region(
-        image, original_mask, transformed_masks, client, *, object_id, model_id
+        image, original_mask, transformed_masks, client, *, object_id, model_id, **kw
     ):
         reconstruction_calls.append((object_id, original_mask.copy()))
         return real_reconstruct_hidden_region(
@@ -1673,6 +1673,7 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
             client,
             object_id=object_id,
             model_id=model_id,
+            **kw,
         )
 
     monkeypatch.setattr(orch, "reconstruct_hidden_region", spy_reconstruct_hidden_region)

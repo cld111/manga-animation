@@ -128,22 +128,32 @@ def reconstruct_hidden_region(
     *,
     object_id: str,
     model_id: str = "lama-large",
+    managed_loaded: bool = False,
 ) -> ReconstructionResult | None:
     """Fill the hole `object_id`'s motion reveals across the loop, or `None` if it never
 
     reveals anything (e.g. a pure in-place rotation/scale whose footprint always covers the
-    original region) — no reconstruction call is made in that case, per "Local Modification"
+    original region) -- no reconstruction call is made in that case, per "Local Modification"
     in docs/architecture.md (don't do work outside the smallest necessary region).
+
+    `managed_loaded=False` (default) keeps this function's original standalone contract: it
+    loads and unloads `client` itself. Phase 14's stage-level lifecycle instead wants LaMa
+    resident across an entire stage of many panels/objects; callers that hold the client inside
+    a `ModelStage` pass `managed_loaded=True` and this function neither loads nor unloads --
+    the stage owns the residency and its deterministic release.
     """
     hole_mask = _compute_hole_mask(original_mask, transformed_masks)
     if not np.any(hole_mask):
         return None
 
-    client.load()
-    try:
+    if managed_loaded:
         raw_output = client.inpaint(Image.fromarray(image), Image.fromarray(hole_mask))
-    finally:
-        client.unload()
+    else:
+        client.load()
+        try:
+            raw_output = client.inpaint(Image.fromarray(image), Image.fromarray(hole_mask))
+        finally:
+            client.unload()
 
     filled_pixels = _normalize_to_source_geometry(raw_output, image.shape[:2])
     return ReconstructionResult(
