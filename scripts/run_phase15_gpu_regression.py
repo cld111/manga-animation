@@ -161,6 +161,7 @@ class _FailAfterGroundingCalls:
         self._fail_on_call = fail_on_call
         self.detect_calls = 0
         self.load_calls = 0
+        self.model_id = getattr(inner, "model_id", "grounding-dino-swin-l")
 
     def load(self) -> None:
         self.load_calls += 1
