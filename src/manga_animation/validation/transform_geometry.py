@@ -89,6 +89,17 @@ _TRANSFORM_GEOMETRY_PROFILES: dict[TransformKind, TransformGeometryProfile] = {
     TransformKind.MESH_WARP: TransformGeometryProfile(
         max_area_fraction=0.35, min_edge_margin_fraction=0.02, max_aspect_ratio=None
     ),
+    # RADIAL_EXPAND is a spatially-varying radial pulse about the object's own center (the
+    # drawn-effect motion model: impact bursts, energy fields, glow). Its mechanism combines
+    # MESH_WARP's "local, continuous, anchored" risk profile (center stays fixed, rim moves
+    # most) with SCALE's "grows the footprint outward" behavior, so it gets the same loose
+    # area bound as MESH_WARP plus a modest edge margin so the rim has room to breathe
+    # outward without clipping the reference region's boundary. No aspect-ratio check: a
+    # legitimately elongated radiating burst (a wide speed-line fan, a tall energy plume) is
+    # a real RADIAL_EXPAND target.
+    TransformKind.RADIAL_EXPAND: TransformGeometryProfile(
+        max_area_fraction=0.35, min_edge_margin_fraction=0.02, max_aspect_ratio=None
+    ),
     # TRANSLATE moves the bbox's content rigidly, but only by a small amplitude in this
     # codebase's real usage (amplitude = fraction of the panel diagonal; e.g. the hair
     # heuristic's amplitude=0.03, see _MOTION_HEURISTICS). No edge-margin requirement:

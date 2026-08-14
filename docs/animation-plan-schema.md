@@ -39,7 +39,7 @@ AnimationPlan
 │     ├── motion_type: STATIC | PRIMARY | SECONDARY | MICRO
 │     ├── parent_id, children_ids  (kinematic hierarchy)
 │     └── motion: MotionSpec | None
-│           ├── transform_kind: translate | rotate | scale | shear | mesh_warp | opacity
+│           ├── transform_kind: translate | rotate | scale | shear | mesh_warp | opacity | radial_expand
 │           ├── direction: Vector2 | None   (unit vector; required for translate/shear)
 │           ├── amplitude                   (meaning depends on transform_kind — see below)
 │           ├── phase, speed, easing
@@ -83,10 +83,19 @@ over-engineer" in the project brief):
 | `scale` | fractional size delta (e.g. `0.05` = ±5% at peak) | optional (axis hint; omitted = uniform) |
 | `opacity` | fractional opacity delta | unused |
 | `mesh_warp` | normalized warp strength | optional (flow hint) |
+| `radial_expand` | peak rim displacement as a fraction of the object bbox's longest side | unused |
 
 `amplitude` must be `> 0` — a "motion" with zero amplitude isn't motion, it's a STATIC
 object with extra steps, so the schema pushes that case toward `motion_type=STATIC`
 instead.
+
+`radial_expand` (Phase 16, Drawn Effect Track) is the drawn-effect motion model for the
+radial class of manga effects — impact bursts, energy fields, radiating focus lines, glow.
+It is a spatially-varying radial pulse about the object's own pivot: the center stays
+effectively fixed while the rim breathes outward/inward, unlike uniform `scale` (which
+moves the whole footprint as one rigid block). `amplitude` is the peak rim displacement as
+a fraction of the object bbox's longest side (e.g. `0.08` = the rim moves 8% of that side
+at peak). It requires no `direction`; the radial axis is derived from the pivot geometry.
 
 ## Kinematic hierarchy: `parent_id` / `children_ids`
 

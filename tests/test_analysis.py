@@ -328,6 +328,70 @@ def test_analysis_prompt_broadens_evidence_beyond_deformation_on_the_object_itse
     assert "pose" in lowered
 
 
+def test_drawn_effects_get_effect_specific_motion_specs():
+    """Phase 16 Drawn Effect Track: effect labels (`impact_burst`, `energy_field`, `smoke`,
+    `rain`, `speed_lines`) must each get a natural effect-specific MotionSpec -- NOT the
+    generic rigid translate that every effect received before this phase (the locally-proven
+    gap: `rain`/`green_fluid`/`speed_lines`/`impact_effect` all collapsed to
+    `_DEFAULT_MOTION` = TRANSLATE amplitude 0.02)."""
+    from manga_animation.analysis.plan_builder import _motion_spec_for, _RawObjectDecision
+    from manga_animation.schemas.animation_plan import MotionType
+
+    cases = {
+        # label, motion_description -> expected transform_kind
+        "impact_burst": ("impact burst radiates outward from the hit point", "radial_expand"),
+        "energy_field": ("the energy field pulses and glows", "radial_expand"),
+        "glow_effect": ("the glow expands in a ring", "radial_expand"),
+        "smoke_cloud": ("smoke drifts upward", "mesh_warp"),
+        "water_splash": ("water splashes outward", "mesh_warp"),
+        "green_fluid": ("fluid flows and ripples", "mesh_warp"),
+        "rain": ("rain falls downward", "translate"),
+        "speed_lines": ("speed lines streak along the motion direction", "mesh_warp"),
+        "spark_shower": ("sparks scatter", "translate"),
+    }
+    for label, (desc, expected_kind) in cases.items():
+        decision = _RawObjectDecision(
+            semantic_label=label,
+            motion_type=MotionType.SECONDARY,
+            confidence=0.7,
+            reason="a drawn effect present in the panel",
+            motion_description=desc,
+        )
+        spec = _motion_spec_for(decision)
+        assert spec.transform_kind.value == expected_kind, (
+            f"{label} should map to {expected_kind}, got {spec.transform_kind.value}"
+        )
+    # The radial class anchors at the object's own center -- the natural burst origin.
+    decision = _RawObjectDecision(
+        semantic_label="impact_burst",
+        motion_type=MotionType.SECONDARY,
+        confidence=0.7,
+        reason="x",
+        motion_description="impact burst radiates outward",
+    )
+    spec = _motion_spec_for(decision)
+    assert spec.pivot.reference == "object_bbox"
+    assert spec.pivot.x == pytest.approx(0.5)
+    assert spec.pivot.y == pytest.approx(0.5)
+
+
+def test_analysis_prompt_explicitly_asks_for_drawn_effects_as_animation_targets():
+    """Phase 16: the analysis prompt must instruct the VLM to list ALREADY-DRAWN effects
+    (speed lines, impact bursts, energy fields, smoke, water, glow) as first-class animation
+    candidates, not just objects -- while keeping speech bubbles/text/panel borders static."""
+    from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT
+
+    lowered = ANALYSIS_PROMPT.lower()
+    assert "speed lines" in lowered or "speed_lines" in lowered
+    assert "impact" in lowered
+    assert "energy" in lowered
+    assert "smoke" in lowered
+    # Artwork preservation is explicit: text/bubbles/borders must stay static.
+    assert "speech bubbles" in lowered
+    assert "panel borders" in lowered
+    assert "must stay static" in lowered
+
+
 # --- Phase 3.3: panel-aware analysis --------------------------------------------------------
 
 

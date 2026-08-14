@@ -240,6 +240,80 @@ def _mesh_warp_frame(
     return warped_layer, warped_mask
 
 
+def _radial_expand_frame(
+    image: ImageArray,
+    mask: MaskArray,
+    motion: MotionSpec,
+    value: float,
+    object_bbox_px: BBoxPx,
+    pivot_px: tuple[float, float],
+    page_shape: tuple[int, int],
+) -> tuple[ImageArray, MaskArray]:
+    """Impact/energy/glow pulse: a spatially-varying radial displacement about `pivot_px`.
+
+    Unlike uniform `SCALE` (every pixel moves by the same factor, so the whole region reads
+    as one rigid block), this applies a displacement whose magnitude grows with distance
+    from the pivot — the center stays effectively fixed while the rim breathes outward on
+    `value > 0` and inward on `value < 0`. That is the natural motion model for drawn
+    impact bursts, radiating focus lines, energy fields, and glow-like effects (see the
+    Drawn Effect Track in the phase brief): the effect's visual origin is anchored and the
+    radiating artwork around it pulses.
+
+    `amplitude` means the peak rim displacement as a fraction of the object bbox's longest
+    side. The per-pixel displacement at radius `r` is
+    `value * amplitude * max_dim * (r / r_max)^1.5`, where `r_max` is the pivot's distance
+    to the farthest bbox corner — a smooth falloff that keeps the center quiet and
+    concentrates motion at the rim (the exponent makes center-region motion negligible
+    rather than linear, which is what reads as "anchored burst" instead of "zooming").
+
+    Output position `p` samples source `p - disp`, so on the positive half of the cycle the
+    rim pulls content from slightly nearer the center (visual expansion) and on the negative
+    half it pushes content outward (visual contraction); at `value = 0` the map is identity.
+    The ROI margin is `|strength|` because that bounds how far any output pixel's sampled
+    source can fall from the object bbox (same bounding argument as `_mesh_warp_frame`).
+    """
+    h, w = page_shape
+    px, py = pivot_px
+    x0, y0, x1, y1 = object_bbox_px.as_xyxy()
+    max_dim = max(x1 - x0, y1 - y0)
+    strength = value * motion.amplitude * max_dim
+    margin = math.ceil(abs(strength)) + _ROI_SAFETY_MARGIN_PX
+
+    rx0 = max(0, x0 - margin)
+    ry0 = max(0, y0 - margin)
+    rx1 = min(w, x1 + margin)
+    ry1 = min(h, y1 + margin)
+    if rx1 <= rx0 or ry1 <= ry0:
+        return np.zeros_like(image), np.zeros_like(mask)
+
+    r_max = math.hypot(max(abs(x0 - px), abs(x1 - px)), max(abs(y0 - py), abs(y1 - py)))
+    if r_max <= 1e-6:
+        # Degenerate: the whole object sits on the pivot. Nothing meaningful to displace —
+        # return the identity (rest) frame rather than dividing by ~zero.
+        return image.copy(), mask.copy()
+
+    grid_y, grid_x = np.mgrid[ry0:ry1, rx0:rx1].astype(np.float32)
+    r = np.hypot(grid_x - px, grid_y - py)
+    falloff = np.clip(r / r_max, 0.0, 1.0) ** 1.5
+    disp = strength * falloff
+    safe_r = np.where(r > 1e-6, r, 1.0)
+    ux = np.where(r > 1e-6, (grid_x - px) / safe_r, 0.0)
+    uy = np.where(r > 1e-6, (grid_y - py) / safe_r, 0.0)
+
+    map_x = grid_x - disp * ux
+    map_y = grid_y - disp * uy
+
+    warped_layer = np.zeros_like(image)
+    warped_mask = np.zeros_like(mask)
+    warped_layer[ry0:ry1, rx0:rx1] = cv2.remap(
+        image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderValue=(0, 0, 0)
+    )
+    warped_mask[ry0:ry1, rx0:rx1] = cv2.remap(
+        mask, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderValue=0
+    )
+    return warped_layer, warped_mask
+
+
 def _opacity_frame(
     image: ImageArray, mask: MaskArray, motion: MotionSpec, value: float, object_bbox_px: BBoxPx
 ) -> tuple[ImageArray, MaskArray]:
@@ -298,6 +372,10 @@ def generate_transformed_layer(
         return _mesh_warp_frame(image, mask, motion, value, object_bbox_px, page_shape)
 
     pivot_px = resolve_pivot_px(motion.pivot, object_bbox_px, panel_bbox_px, page_shape)
+    if kind == TransformKind.RADIAL_EXPAND:
+        return _radial_expand_frame(
+            image, mask, motion, value, object_bbox_px, pivot_px, page_shape
+        )
     panel_diag_px = math.hypot(panel_bbox_px.width, panel_bbox_px.height)
     matrix = _affine_matrix(kind, value, motion, pivot_px, panel_diag_px)
 

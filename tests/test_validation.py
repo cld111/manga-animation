@@ -297,6 +297,25 @@ def test_different_transform_kinds_have_different_geometry_bounds():
     assert translate_ok is True
 
 
+def test_radial_expand_has_a_transform_specific_geometry_profile():
+    """Phase 16: RADIAL_EXPAND (drawn-effect pulse) must have its OWN registered geometry
+    profile -- no KeyError, and the same bbox is evaluated with the radial model's looser
+    MESH_WARP-like bounds rather than ROTATE's strict ones."""
+    from manga_animation.validation.transform_geometry import check_transform_geometry
+
+    # 25% of a 200x200 region: fails ROTATE's 15% bound, passes RADIAL_EXPAND's 35% bound.
+    bbox = BBoxPx(x0=10, y0=10, x1=110, y1=110)
+    rotate_ok, _ = check_transform_geometry(
+        bbox, TransformKind.ROTATE, panel_bbox_px=None, image_shape=(200, 200)
+    )
+    radial_ok, radial_reason = check_transform_geometry(
+        bbox, TransformKind.RADIAL_EXPAND, panel_bbox_px=None, image_shape=(200, 200)
+    )
+    assert rotate_ok is False
+    assert radial_ok is True
+    assert "radial_expand" in radial_reason.lower()
+
+
 def test_translate_accepts_a_bbox_flush_against_the_reference_edge():
     """Real regression guard: a TRANSLATE candidate flush against its reference region's top
 

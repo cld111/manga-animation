@@ -69,6 +69,19 @@ sway)
 - "motion_description": (only if motion_type is not "static") one short sentence describing \
 the physical motion in plain terms, e.g. "banner sways left and right in the wind"
 
+ALSO, and this is important: treat ALREADY-DRAWN visual effects as first-class animation \
+targets, exactly like objects. Speed lines, motion strokes, impact bursts, radiating focus \
+lines, energy fields, glow, sparks, smoke, water splashes, and similar drawn effect artwork \
+are legitimate candidates: list each one as its own JSON entry with a descriptive \
+semantic_label like "speed_lines", "impact_burst", "energy_field", "smoke_cloud", \
+"water_splash", "spark_shower", "glow_effect". For an effect, "motion_type" describes how \
+it should move: "primary" only if the effect itself is the page's main action; otherwise \
+"secondary"/"micro" (e.g. rain is usually "micro"). Give its "motion_description" in \
+effect-specific terms that name the motion model, e.g. "speed lines streak outward from the \
+impact point", "the energy field pulses and radiates", "smoke drifts upward", "water \
+splashes and flows". Do NOT invent an effect that is not actually drawn, and do NOT list \
+speech bubbles, dialogue text, or panel borders as effects -- those must stay static.
+
 A visually justified reason for motion can come from ANY of these, not only deformation \
 drawn on the object itself:
 1. Deformation/distortion drawn directly on the object (wavy linework, a bent/curved shape).
@@ -249,6 +262,69 @@ _MOTION_HEURISTICS: list[tuple[tuple[str, ...], MotionSpec]] = [
             amplitude=0.3,
             speed=1.0,
             easing=Easing.EASE_IN_OUT,
+        ),
+    ),
+    (
+        (
+            "impact",
+            "burst",
+            "explosion",
+            "shockwave",
+            "energy",
+            "glow",
+            "pulse",
+            "aura",
+            "radiat",
+            "flash",
+            "shock wave",
+        ),
+        MotionSpec(
+            transform_kind=TransformKind.RADIAL_EXPAND,
+            amplitude=0.08,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("smoke", "steam"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.1,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("water", "splash", "fluid", "liquid", "wave", "spray"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.1,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("rain",),
+        MotionSpec(
+            transform_kind=TransformKind.TRANSLATE,
+            direction=Vector2(x=0.0, y=1.0),
+            amplitude=0.03,
+            speed=2.0,
+            easing=Easing.EASE_IN_OUT,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("speed_line", "speed line", "motion_line", "motion line", "streak", "slash", "flow line"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.12,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
         ),
     ),
 ]
