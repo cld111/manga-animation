@@ -126,6 +126,14 @@ Panel status: `[REJECTED]`.
   All candidates failed; the panel correctly fail-closed rather than animating a
   nearly-whole-panel burst.
 
+### Run 5: full end-to-end pipeline on `space_monster_hypersenses`
+
+`run_phase16_gpu_effects.py --pages examples/realworld/space_monster_hypersenses.png`.
+
+Panel status: `[STATIC]` -- a valid, informative result: the VLM proposed no animated
+object/effect on this page, so no video was produced and every model stage still released
+correctly. No effect track was exercised.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
