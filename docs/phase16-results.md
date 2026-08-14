@@ -114,6 +114,18 @@ Numerical verification of the rendered PASS video: seamless loop verified on the
 frame sequence (wrap step 0.27 <= 2x ordinary step 0.24); 94.5% of pixels static across
 sampled frames; motion localized to the sword region.
 
+### Run 4: full end-to-end pipeline on `angels_of_war_fleet`
+
+`run_phase16_gpu_effects.py --pages examples/realworld/angels_of_war_fleet.png`.
+
+Panel status: `[REJECTED]`.
+
+- `obj_space_ship_impact_burst_6` (PRIMARY, radial_expand): one candidate semantic ACCEPT
+  but geometry REJECT (bbox 41.0% of reference region > 35% radial_expand bound); the other
+  candidate REJECTed pre-VLM (bbox 98.3% of the image, over the 90% generic bound).
+  All candidates failed; the panel correctly fail-closed rather than animating a
+  nearly-whole-panel burst.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
@@ -124,16 +136,26 @@ analysis signal run above is the informative evidence for it.
 
 ## Classification and next steps
 
-Classified **GOOD** for the drawn-effect and artwork-preservation paths, based on three
-real short runs:
+Classified **GOOD** for the drawn-effect and artwork-preservation paths, based on five real
+short runs:
 
 - speed-lines PRIMARY rendered end-to-end (`wind_breaker_sprint`, seamless loop verified);
 - a secondary speed-lines candidate whose grounding pointed at dialogue text was correctly
   fail-closed rather than animating the text (`omniscient_reader_blade`);
-- ordinary objects still map to their pre-Phase-16 transform kinds on every page tried.
+- ordinary objects still map to their pre-Phase-16 transform kinds on every page tried;
+- real impact/energy bursts (`impact_burst`, `space_ship_impact_burst`) were fail-closed by
+  geometric validation on both pages where the VLM proposed them (bursts covering 41%,
+  86.7%, and 98.3% of their reference region) -- the pipeline never animated a
+  nearly-whole-panel effect.
 
-The RADIAL_EXPAND path was not yet exercised end-to-end on a real render (`impact_burst`
-fail-closed for geometric reasons on the one page where the VLM proposed it).
+The RADIAL_EXPAND path was not yet exercised end-to-end on a real render: on both pages
+where the VLM proposed a radial effect, the burst's own mask was geometrically too large /
+edge-touching for the 35% bound, so it fail-closed (correctly, but without exercising the
+transform). A separate Phase 16 finding -- an effect's `motion_description` often names the
+object it is attached to ("bursts outward from the weapon clash"), which let the object
+heuristics steal the effect -- was fixed by keying effect classification on the
+`semantic_label` alone (`_EFFECT_LABEL_KEYWORDS`, before `_MOTION_HEURISTICS`), with a
+regression test.
 
 Next steps (see `docs/current-status.md` Immediate Priorities):
 1. Exercise RADIAL_EXPAND on a real impact/energy panel whose effect mask passes geometric
