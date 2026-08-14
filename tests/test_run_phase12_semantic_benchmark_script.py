@@ -11,15 +11,17 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import numpy as np
+import pytest
+from PIL import Image
+
 from manga_animation.evaluation.mask_dataset import (
     DEFAULT_MASK_BENCHMARK_PATH,
     MaskSemanticSample,
     load_mask_semantic_benchmark,
 )
 
-_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "run_phase12_semantic_benchmark.py"
-)
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_phase12_semantic_benchmark.py"
 _spec = importlib.util.spec_from_file_location("run_phase12_semantic_benchmark", _SCRIPT_PATH)
 assert _spec is not None and _spec.loader is not None
 _module = importlib.util.module_from_spec(_spec)
@@ -42,6 +44,7 @@ def test_load_mask_semantic_benchmark_parses_the_real_config():
     good = [s for s in samples if s.ground_truth == "good"]
     assert len(bad) == 5
     assert len(good) == 8
+    assert sum(s.difficulty == "difficult" for s in good) == 4
     assert all(s.evidence and s.provenance for s in samples)  # no unlabeled/undocumented entry
 
 
@@ -58,6 +61,37 @@ def test_mask_semantic_sample_artifacts_available_false_for_missing_files(tmp_pa
         provenance="test fixture",
     )
     assert sample.artifacts_available() is False
+
+
+@pytest.mark.parametrize(
+    "mask_factory, expected",
+    [
+        (lambda: np.zeros((8, 8, 1), dtype=np.uint8), "2D"),
+        (lambda: np.zeros((8, 8), dtype=np.float32), "uint8"),
+        (
+            lambda: np.pad(np.ones((2, 2), dtype=np.uint8) * 255, ((2, 4), (2, 4))),
+            "tight bbox",
+        ),
+    ],
+)
+def test_mask_semantic_sample_rejects_invalid_artifacts(tmp_path: Path, mask_factory, expected):
+    source = tmp_path / "page.png"
+    mask_path = tmp_path / "mask.npy"
+    Image.new("RGB", (8, 8), color=(255, 255, 255)).save(source)
+    np.save(mask_path, mask_factory())
+    sample = MaskSemanticSample(
+        sample_id="invalid",
+        source_page=source,
+        mask_path=mask_path,
+        semantic_label="hair",
+        bbox_xyxy=(1, 1, 3, 3),
+        transform_kind="translate",
+        ground_truth="good",
+        evidence="test fixture",
+        provenance="test fixture",
+    )
+    with pytest.raises(ValueError, match=expected):
+        sample.load_mask()
 
 
 def _fake_sample(

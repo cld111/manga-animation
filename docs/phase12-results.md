@@ -19,7 +19,7 @@ ones (section 7). This phase:
 
 1. Audited the real pipeline's semantic/provenance flow end to end (section 2).
 2. Built a real, provenance-cited 13-object semantic-mask benchmark from Phase 8.3's and Phase
-   11's own GPU captures — 5 confirmed-bad, 8 presumed-good (3 tagged difficult) — explicitly
+11's own GPU captures — 5 confirmed-bad, 8 presumed-good (4 tagged difficult) — explicitly
    disclosed as development, not held-out, data (section 3).
 3. Investigated and empirically compared five methods: four geometric single-signal baselines
    (reformalizing Phase 11's own negative finding with fresh numbers) and a new VLM mask-crop
@@ -760,3 +760,12 @@ which is itself the strongest possible evidence of liveness for those windows.
   merged**, per the brief's explicit instruction.
 - **Working tree**: clean at every commit point in this phase; verified via `git status` before
   each push and immediately before opening the PR.
+
+## 18. Post-merge addendum
+
+This report is an immutable Phase 12 snapshot and was written before the branch was merged.
+The implementation is now present on `main` via the Phase 12 merge. Subsequent maintenance
+also added VLM lifecycle cleanup around analysis, target validation and semantic mask validation,
+so section 10.4's statement that the orchestrator never unloads the VLM describes the historical
+snapshot, not the current runtime contract. Current behavior is documented in
+`docs/current-status.md` and `docs/pipeline.md`.

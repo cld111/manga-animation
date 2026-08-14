@@ -14,12 +14,19 @@ from pathlib import Path
 
 import pytest
 
+import manga_animation.evaluation.harness as harness
+from manga_animation.evaluation.dataset import EvalSample
 from manga_animation.evaluation.harness import (
     mask_semantics_outcome_from_result,
     object_outcome_motion_type,
     render_summary_from_result,
 )
-from manga_animation.pipeline.types import LoopMetrics, MaskSemanticResult, RenderResult
+from manga_animation.pipeline.types import (
+    LoopMetrics,
+    MaskSemanticResult,
+    PipelineStageError,
+    RenderResult,
+)
 from manga_animation.schemas.animation_plan import MotionType
 
 
@@ -141,6 +148,7 @@ def test_mask_semantics_outcome_from_result_mirrors_the_real_result():
     assert outcome is not None
     assert outcome.verdict == "reject"
     assert outcome.vlm_confidence == pytest.approx(0.82)
+    assert outcome.model_id == "fake-qwen"
     assert outcome.unexpected_content == ["speech bubble", "hand"]
     assert outcome.geometric_signals == {"bbox_density": 0.9}
 
@@ -165,3 +173,45 @@ def test_mask_semantics_outcome_from_result_mirrors_an_abstain_verdict():
     assert outcome is not None
     assert outcome.verdict == "abstain"
     assert outcome.vlm_confidence == pytest.approx(0.5)
+
+
+def test_run_one_sample_preserves_primary_mask_semantics_on_failure(monkeypatch, tmp_path):
+    result = MaskSemanticResult(
+        object_id="primary",
+        verdict="reject",
+        vlm_matches=False,
+        vlm_confidence=0.9,
+        reason="wrong content",
+        model_id="fake-qwen",
+        method="vlm_mask_crop_v1",
+    )
+
+    def fail(*args, **kwargs):
+        raise PipelineStageError(
+            stage="mask_semantics",
+            input_ref="primary",
+            detail="semantic rejection",
+            mask_semantics=result,
+        )
+
+    monkeypatch.setattr(harness, "run_pipeline", fail)
+    sample = EvalSample(
+        sample_id="sample",
+        image_path="missing.png",
+        source_citation="test",
+        diversity_tag="test",
+        acceptable_outcome="reject",
+    )
+    outcome = harness.run_one_sample(
+        sample,
+        "panel",
+        config=None,
+        clients=(None, None, None, None),
+        out_dir=tmp_path,
+        panel_count=1,
+        panel_sources=["fallback_full_page"],
+    )
+    assert outcome.status == "failed"
+    assert outcome.primary_mask_semantics is not None
+    assert outcome.primary_mask_semantics.verdict == "reject"
+    assert outcome.primary_mask_semantics.model_id == "fake-qwen"

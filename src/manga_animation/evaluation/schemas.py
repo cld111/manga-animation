@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 from manga_animation.pipeline.types import Stage
 
 FailingStage = Stage | Literal["unexpected"]
-"""`Stage` (the exact 8 real `PipelineStageError.stage` values) plus one evaluation-harness-only
+"""`Stage` (the closed set of real `PipelineStageError.stage` values) plus one
+evaluation-harness-only
 
 value: `"unexpected"`, for a bare (non-`PipelineStageError`) exception the harness could not
 attribute to a specific pipeline stage at all (`scripts/run_phase3_3_evaluation.py`'s
@@ -27,7 +28,7 @@ plain `Stage | None`, which does not include `"unexpected"` -- a real, disclosed
 "unexpected", ...)` would have raised `pydantic.ValidationError` the first time that exception
 path actually fired for real, masking the original exception with an unrelated validation
 error. Never fixed in `pipeline.types.Stage` itself -- that type stays exact/closed, since every
-real `PipelineStageError.stage` value genuinely is one of the 8 real stages; this is a strictly
+real `PipelineStageError.stage` value genuinely is one of the real stages; this is a strictly
 evaluation-reporting concern, kept local to this module."""
 
 
@@ -59,6 +60,7 @@ class MaskSemanticOutcome(BaseModel):
     vlm_confidence: float | None
     reason: str
     method: str
+    model_id: str = "unknown"
     unexpected_content: list[str] = []
     geometric_signals: dict[str, float] = {}
 
@@ -93,13 +95,10 @@ class ObjectAttemptOutcome(BaseModel):
     of `PipelineRunResult.dropped_objects`) -- this does NOT mean the whole page run failed."""
     validation_attempts: list[ValidationAttemptOutcome] = []
     mask_semantics: MaskSemanticOutcome | None = None
-    """Phase 12: populated only for a `status="rendered"` object where the gate actually ran
-    (`PipelineConfig.enable_semantic_mask_validation` was `True`) -- mirrors
-    `ObjectRunResult.mask_semantics`. `None` for a `status="dropped"` object (see `reason` on
-    the synthetic `ValidationAttemptOutcome` `run_one_sample` attaches for a mask_semantics-stage
-    drop instead -- there is no structured `MaskSemanticResult` retained for a dropped object,
-    same limitation `validation_attempts` already has for a grounding-stage drop) or when the
-    gate never ran for this object at all."""
+    failing_stage: FailingStage | None = None
+    failure_reason: str | None = None
+    """Phase 12: structured result when the gate ran for this object. A semantic-mask drop
+    retains its result here; other drops may leave this unset."""
 
 
 class LoopMetricsOutcome(BaseModel):
@@ -197,6 +196,8 @@ class PageRunOutcome(BaseModel):
             "outcome (see manga_animation.evaluation.harness.run_one_sample). 5 = Phase 12 "
             "onward: a producer that also populates primary_mask_semantics and "
             "object_outcomes[].mask_semantics when the semantic mask validation gate ran. This "
+            "also retains structured semantic failures and explicit dropped-stage metadata. 6 = "
+            "the same Phase 12 fields plus model provenance for mask verdicts. This "
             "is a PREDICTION-schema version a producer sets when it constructs a record -- "
             "unlike EvalSample.annotation_version (ADR 0009), which is a ground-truth-revision "
             "signal "

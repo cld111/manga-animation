@@ -350,6 +350,11 @@ def test_loop_rejects_a_duration_that_produces_no_frames():
         LoopSpec(duration_s=0.001, fps=1)
 
 
+def test_loop_rejects_unimplemented_crossfade_frames():
+    with pytest.raises(ValidationError, match="less than or equal to 0"):
+        LoopSpec(crossfade_frames=1)
+
+
 def test_source_image_requires_positive_dimensions():
     with pytest.raises(ValidationError):
         SourceImage(path="x.png", width=0, height=100)

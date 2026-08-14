@@ -232,8 +232,8 @@ def verify_mask_semantics(
        response (never a silent accept), and ABSTAIN on a near-50/50 confidence read rather than
        forcing a binary call the evidence doesn't support (see `_ABSTAIN_CONFIDENCE_BAND`).
 
-    Never raises -- REJECT/ABSTAIN are normal, expected outcomes, always returned as a
-    `MaskSemanticResult`.
+    Parse failures become fail-closed REJECT results. Exceptions raised by the model client
+    propagate to the orchestrator, which applies the PRIMARY-fails/SECONDARY-drops stage policy.
     """
     geometric_signals = _compute_geometric_signals(mask, bbox)
     crop = _crop_with_mask_overlay(image, mask, bbox)

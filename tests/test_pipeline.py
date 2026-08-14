@@ -2154,7 +2154,41 @@ def test_run_pipeline_raises_stage_mask_semantics_when_primary_mask_content_is_r
             out_dir=tmp_path / "out",
         )
     assert excinfo.value.stage == "mask_semantics"
+    assert excinfo.value.mask_semantics is not None
+    assert excinfo.value.mask_semantics.verdict == "reject"
     assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+@requires_ffmpeg
+def test_run_pipeline_isolates_a_secondary_mask_semantics_vlm_exception(config, tmp_path: Path):
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    class FailingSecondaryMaskVLM(FakeVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            if _MASK_SEMANTICS_PROMPT_MARKER in prompt and "trailing cloth" in prompt:
+                raise RuntimeError("simulated semantic-mask VLM failure")
+            return super().generate(image, prompt)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FailingSecondaryMaskVLM(decisions),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()
+    assert result.secondary_objects == []
+    assert result.dropped_objects[0].failing_stage == "mask_semantics"
+    assert "simulated semantic-mask VLM failure" in result.dropped_objects[0].reason
 
 
 def test_run_pipeline_raises_stage_mask_semantics_on_primary_abstain(
@@ -2181,6 +2215,8 @@ def test_run_pipeline_raises_stage_mask_semantics_on_primary_abstain(
         )
     assert excinfo.value.stage == "mask_semantics"
     assert "ABSTAIN" in excinfo.value.detail
+    assert excinfo.value.mask_semantics is not None
+    assert excinfo.value.mask_semantics.verdict == "abstain"
 
 
 @requires_ffmpeg
@@ -2225,6 +2261,8 @@ def test_run_pipeline_drops_a_secondary_whose_mask_semantics_is_rejected_without
     assert dropped.object_plan.semantic_label == "trailing_cloth"
     assert dropped.failing_stage == "mask_semantics"
     assert dropped.reason  # non-empty, human-readable
+    assert dropped.mask_semantics is not None
+    assert dropped.mask_semantics.verdict == "reject"
 
 
 @requires_ffmpeg

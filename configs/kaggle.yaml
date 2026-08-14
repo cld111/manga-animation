@@ -2,6 +2,5 @@
 # compute worker, not the canonical project copy — see docs/decisions/0003-remote-compute-workers.md.
 
 device: cuda
-dtype: float16 # halves VRAM/bandwidth on T4/L4; revisit per-model in Phase 2 if quality suffers
-resolution: 2048
-debug: false
+dtype: float16 # VLM only; grounding/segmentation use float32 per verified runtime behavior
+resolution: 2048 # VLM analysis resolution; grounding/segmentation use float32 explicitly

@@ -435,6 +435,7 @@ class PipelineStageError(Exception):
     root_cause: str | None = None
     architectural: bool | None = None
     proposed_fix: str | None = None
+    mask_semantics: MaskSemanticResult | None = None
 
     def __str__(self) -> str:
         return f"[{self.stage}] {self.detail} (input={self.input_ref})"

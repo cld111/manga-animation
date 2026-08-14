@@ -223,7 +223,12 @@ class LoopSpec(BaseModel):
     duration_s: float = Field(gt=0.0, le=30.0, default=4.0)
     fps: int = Field(gt=0, le=60, default=24)
     seamless: bool = True
-    crossfade_frames: int = Field(ge=0, default=0)
+    crossfade_frames: int = Field(
+        ge=0,
+        le=0,
+        default=0,
+        description="Reserved; non-zero crossfade rendering is not implemented.",
+    )
 
     @property
     def frame_count(self) -> int:

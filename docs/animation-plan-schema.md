@@ -17,8 +17,10 @@ Two consequences follow from that split:
    *produced from* the plan by the grounding/segmentation stages, not stored on it.
    `PanelPlan.bbox` is the one exception: panel layout is a property of the page itself,
    decided by the analysis stage, not something later stages derive.
-2. **It is fully resolution-independent.** Every spatial value (`BBox`, `PivotSpec`,
-   `MotionSpec.amplitude`) is normalized to `[0, 1]` or is a unit vector. The same plan is
+2. **It is fully resolution-independent.** Spatial values (`BBox`, `PivotSpec` and direction
+   vectors) are normalized to `[0, 1]` or use a unit vector. `MotionSpec.amplitude` is
+   transform-dependent (for example, degrees for rotation), so it is not universally normalized.
+   The same plan is
    valid whether the image was analyzed at a 1024px local debug resolution or a 2048px
    remote GPU resolution (`configs/local.yaml` vs. `configs/kaggle.yaml`).
 
@@ -88,15 +90,12 @@ instead.
 
 ## Kinematic hierarchy: `parent_id` / `children_ids`
 
-Objects can declare a kinematic parent (`parent_id`) and/or list their children
-(`children_ids`); both directions are cross-validated against each other — if `head` lists
-`hair` as a child, `hair.parent_id` must be exactly `"head"`, and vice versa. This catches
-both outright contradictions and half-specified links (a child left with no `parent_id`
-while its parent claims it) as schema errors rather than silent pipeline bugs. Self-parenting
-and parent cycles are rejected the same way. `AnimationPlan.children_of(object_id)` derives
-the child list from `parent_id` links at query time — `parent_id` is the source of truth;
-`children_ids` is there for the (common) case where it's more natural for a
-generation step to declare children top-down.
+Objects can declare a kinematic parent (`parent_id`) and optionally cache child IDs
+(`children_ids`). `parent_id` is the source of truth: `AnimationPlan.children_of(object_id)`
+derives the effective child list from it. When `children_ids` is supplied, it is checked
+against the corresponding children's `parent_id`; omitting it is valid. This deliberately
+avoids requiring two independently generated fields to be kept synchronized. Self-parenting
+and parent cycles are rejected. Automatic parent-transform inheritance is not implemented.
 
 The current implementation validates these links but does not automatically inherit or
 compose a parent's transform during animation. Callers must provide a separate motion spec

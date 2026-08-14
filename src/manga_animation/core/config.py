@@ -19,7 +19,7 @@ DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 
 Device = Literal["auto", "cpu", "cuda", "mps"]
 DType = Literal["float32", "float16", "bfloat16"]
-Codec = Literal["h264", "h265", "vp9"]
+Codec = Literal["h264"]
 
 
 class PipelineConfig(BaseModel):
@@ -31,17 +31,19 @@ class PipelineConfig(BaseModel):
     """
 
     device: Device = "auto"
-    dtype: DType = "float32"
+    dtype: DType = Field(
+        default="float32",
+        description="VLM model dtype; grounding and segmentation use verified float32 clients.",
+    )
     model_variants: dict[str, str] = Field(default_factory=dict)
 
     resolution: int = Field(
-        gt=0, default=1536, description="Max working long-edge resolution, in pixels."
+        gt=0, default=1536, description="Max VLM analysis long-edge resolution, in pixels."
     )
     fps: int = Field(gt=0, le=60, default=24)
     duration_s: float = Field(gt=0.0, le=30.0, default=4.0)
 
     output_codec: Codec = "h264"
-    debug: bool = False
     seed: int = 42
 
     enable_semantic_mask_validation: bool = Field(

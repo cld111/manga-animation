@@ -77,9 +77,10 @@ bbox-plausibility question but structurally the same kind of gate.
 
 ## Model Lifecycle
 
-Each model-backed stage owns its memory lifecycle. The VLM is released after analysis and
-after target validation; grounding, segmentation and reconstruction release their clients
-in `finally` blocks. A benchmark adapter is also unloaded after success or failure.
+Each model-backed stage owns its memory lifecycle. The VLM is released after analysis, target
+validation and semantic mask validation; grounding, segmentation and reconstruction release
+their clients in `finally` blocks. A benchmark adapter is also unloaded after success or
+failure.
 
 The production client factory accepts only candidates with an implemented adapter. Entries
 in `configs/benchmark_candidates.yaml` without an adapter remain research candidates and

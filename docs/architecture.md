@@ -56,9 +56,9 @@ without adapters remain research entries, not fake runtime substitutions.
 ## GPU Awareness
 
 Models must not remain loaded in VRAM/unified memory longer than the stage that needs them.
-The VLM is used by both analysis and target validation, but each stage releases it before the
-next stage. Grounding, segmentation, reconstruction and benchmark adapters also clean up on
-failure paths.
+The VLM is used by analysis, target validation and semantic mask validation; each stage
+releases it before the next stage. Grounding, segmentation, reconstruction and benchmark
+adapters also clean up on failure paths.
 
 ## Remote Compute Is Disposable
 

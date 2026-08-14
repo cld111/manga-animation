@@ -30,6 +30,7 @@ from manga_animation.evaluation.metrics import (
 from manga_animation.evaluation.nondeterminism import RepeatedRunRecord, summarize_repeated_runs
 from manga_animation.evaluation.schemas import (
     LoopMetricsOutcome,
+    MaskSemanticOutcome,
     ObjectAttemptOutcome,
     PageRunOutcome,
     RenderSummary,
@@ -206,6 +207,34 @@ def test_fallback_rate_and_end_to_end_completion_rate():
     report = compute_metrics(outcomes, {})
     assert report.fallback_rate == Rate(1, 3)
     assert report.end_to_end_completion_rate == Rate(2, 3)
+
+
+def test_mask_semantic_rates_include_primary_and_secondary_verdicts():
+    semantic = MaskSemanticOutcome(
+        verdict="reject",
+        vlm_matches=False,
+        vlm_confidence=0.9,
+        reason="wrong content",
+        model_id="fake-qwen",
+        method="vlm_mask_crop_v1",
+    )
+    abstain = semantic.model_copy(update={"verdict": "abstain", "vlm_confidence": 0.5})
+    outcomes = [
+        _completed("a", primary_mask_semantics=semantic),
+        _completed(
+            "b",
+            schema_version=6,
+            object_outcomes=[
+                _object_outcome("secondary", "dropped").model_copy(
+                    update={"mask_semantics": abstain}
+                )
+            ],
+        ),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.mask_semantic_acceptance_rate == Rate(0, 2)
+    assert report.mask_semantic_rejection_rate == Rate(1, 2)
+    assert report.mask_semantic_abstain_rate == Rate(1, 2)
 
 
 def test_semantic_false_positive_rate_flags_completions_on_no_target_samples():

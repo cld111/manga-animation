@@ -232,6 +232,7 @@ class DroppedObjectResult:
     object_plan: ObjectPlan
     failing_stage: Literal["grounding", "validation", "segmentation", "mask_semantics"]
     reason: str
+    mask_semantics: MaskSemanticResult | None = None
 
 
 @dataclass
@@ -689,7 +690,27 @@ def run_pipeline(
             kept_after_semantics: list[ObjectPlan] = []
             for obj in animated_objects:
                 seg = segmentation_by_object[obj.object_id]
-                mask_result = verify_mask_semantics(image, obj, seg.mask, seg.bbox, vlm_client)
+                try:
+                    mask_result = verify_mask_semantics(image, obj, seg.mask, seg.bbox, vlm_client)
+                except Exception as exc:  # noqa: BLE001 -- apply stage failure policy below
+                    reason = f"semantic mask VLM call failed: {type(exc).__name__}: {exc}"
+                    if _is_primary(obj.object_id):
+                        raise PipelineStageError(
+                            stage="mask_semantics",
+                            input_ref=obj.object_id,
+                            detail=reason,
+                            root_cause="the semantic mask validation model could not complete",
+                            architectural=False,
+                            proposed_fix="retry the VLM call or inspect GPU/model resources",
+                        ) from exc
+                    dropped_objects.append(
+                        DroppedObjectResult(
+                            object_plan=obj,
+                            failing_stage="mask_semantics",
+                            reason=reason,
+                        )
+                    )
+                    continue
                 mask_semantics_by_object[obj.object_id] = mask_result
                 if mask_result.accepted:
                     kept_after_semantics.append(obj)
@@ -713,6 +734,7 @@ def run_pipeline(
                             "retry with a different page/object, or supply a "
                             "controlled-fallback AnimationPlan for a human-verified target"
                         ),
+                        mask_semantics=mask_result,
                     )
                 logger.warning(
                     "semantic mask validation %s for %s object_id=%s semantic_label=%s -- "
@@ -728,6 +750,7 @@ def run_pipeline(
                         object_plan=obj,
                         failing_stage="mask_semantics",
                         reason=f"{mask_result.verdict.upper()}: {mask_result.reason}",
+                        mask_semantics=mask_result,
                     )
                 )
             animated_objects = kept_after_semantics

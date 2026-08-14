@@ -10,7 +10,7 @@ deterministic kinematic motion and are composited back onto the original image.
 
 ## Status
 
-The deterministic pipeline and evaluation infrastructure are implemented through Phase 10.
+The deterministic pipeline and evaluation infrastructure are implemented through Phase 12.
 Panel-aware analysis is the default. Real model inference runs only on a remote GPU worker.
 The project remains an engineering prototype with documented real-world visual limitations.
 

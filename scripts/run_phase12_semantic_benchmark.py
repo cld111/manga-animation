@@ -35,12 +35,14 @@ actually evaluated.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
+from manga_animation.evaluation.harness import environment_metadata, git_commit
 from manga_animation.evaluation.mask_dataset import (
     DEFAULT_MASK_BENCHMARK_PATH,
     MaskSemanticSample,
@@ -67,6 +69,8 @@ _GEOMETRIC_SIGNALS = (
 
 class _VLMClient(Protocol):
     def generate(self, image, prompt: str) -> str: ...
+
+    def unload(self) -> None: ...
 
 
 @dataclass
@@ -268,15 +272,13 @@ def main() -> None:
     skipped = [s.sample_id for s in all_samples if not s.artifacts_available()]
 
     print(
-        f"benchmark: {len(all_samples)} defined, {len(samples)} evaluated, "
-        f"{len(skipped)} skipped"
+        f"benchmark: {len(all_samples)} defined, {len(samples)} evaluated, {len(skipped)} skipped"
     )
     if skipped:
         print(f"  skipped (real local artifacts not present on this checkout): {skipped}")
     if not samples:
         raise SystemExit(
-            "no benchmark samples have real local artifacts on this checkout -- "
-            "nothing to evaluate"
+            "no benchmark samples have real local artifacts on this checkout -- nothing to evaluate"
         )
 
     # Import lazily -- avoids any cv2 dependency at module import time for callers that only
@@ -292,6 +294,8 @@ def main() -> None:
         for signal_name in _GEOMETRIC_SIGNALS
     ]
 
+    candidate_id: str | None = None
+    source: str | None = None
     if args.vlm == "real":
         from manga_animation.analysis import Qwen25VLClient
         from manga_animation.benchmarking.registry import load_candidates
@@ -303,11 +307,12 @@ def main() -> None:
         # "Qwen/Qwen2.5-VL-7B-Instruct") -- same resolution orchestrator.py::_candidate_source
         # already does; model identity is config-driven, never hardcoded (see "Model
         # Abstraction" in docs/architecture.md).
-        source = next(
-            c.source for c in load_candidates()["vlm"] if c.id == candidate_id
-        )
+        source = next(c.source for c in load_candidates()["vlm"] if c.id == candidate_id)
         vlm_client = Qwen25VLClient(source=source, dtype=config.dtype)
-        reports.append(_vlm_method(samples, vlm_client))
+        try:
+            reports.append(_vlm_method(samples, vlm_client))
+        finally:
+            vlm_client.unload()
     else:
         print("--vlm none: skipping the VLM method (run with --vlm real on the GPU worker)")
 
@@ -332,15 +337,24 @@ def main() -> None:
     experiments_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out_path = experiments_dir / f"phase12_semantic_benchmark_{timestamp}.json"
+    dataset_fingerprint = hashlib.sha256(args.dataset.read_bytes()).hexdigest()
+    output = {
+        "git_commit": git_commit(),
+        "dataset_path": str(args.dataset),
+        "dataset_fingerprint": dataset_fingerprint,
+        "environment": environment_metadata("cuda" if args.vlm == "real" else "cpu"),
+        "n_defined": len(all_samples),
+        "n_evaluated": len(samples),
+        "skipped_sample_ids": skipped,
+        "vlm_mode": args.vlm,
+        "reports": [asdict(r) for r in reports],
+    }
+    if args.vlm == "real":
+        output["vlm_candidate_id"] = candidate_id
+        output["vlm_source"] = source
     out_path.write_text(
         json.dumps(
-            {
-                "n_defined": len(all_samples),
-                "n_evaluated": len(samples),
-                "skipped_sample_ids": skipped,
-                "vlm_mode": args.vlm,
-                "reports": [asdict(r) for r in reports],
-            },
+            output,
             indent=2,
             default=str,
         )

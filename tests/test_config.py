@@ -27,6 +27,11 @@ def test_unknown_device_literal_is_rejected():
         PipelineConfig(device="tpu")
 
 
+def test_unverified_codecs_are_rejected_by_config():
+    with pytest.raises(ValidationError):
+        PipelineConfig(output_codec="h265")
+
+
 def test_resolve_device_returns_explicit_choice_without_importing_torch():
     cfg = PipelineConfig(device="cuda")
     assert cfg.resolve_device() == "cuda"
@@ -62,8 +67,8 @@ def test_load_config_layers_environment_profile_over_default():
     assert local.seed == base.seed == 42
     # fields local.yaml does override must win
     assert local.resolution == 1024
-    assert local.debug is True
-    assert base.debug is False
+    assert local.enable_semantic_mask_validation is True
+    assert base.enable_semantic_mask_validation is True
 
 
 def test_load_config_unknown_profile_raises():

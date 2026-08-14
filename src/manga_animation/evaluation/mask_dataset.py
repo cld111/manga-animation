@@ -23,6 +23,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from manga_animation.pipeline.types import BBoxPx, ImageArray, MaskArray
+from manga_animation.schemas.animation_plan import TransformKind
 
 DEFAULT_MASK_BENCHMARK_PATH = Path("configs/phase12_semantic_mask_benchmark.yaml")
 
@@ -42,7 +43,7 @@ class MaskSemanticSample(BaseModel):
     mask_path: Path
     semantic_label: str
     bbox_xyxy: tuple[int, int, int, int]
-    transform_kind: str
+    transform_kind: TransformKind
     ground_truth: MaskGroundTruth
     difficulty: MaskDifficulty = "typical"
     evidence: str = Field(min_length=1)
@@ -62,7 +63,41 @@ class MaskSemanticSample(BaseModel):
         return np.asarray(Image.open(self.source_page).convert("RGB"))
 
     def load_mask(self) -> MaskArray:
-        return np.load(self.mask_path)
+        image = self.load_image()
+        mask = np.load(self.mask_path)
+        self.validate_artifacts(image, mask)
+        return mask
+
+    def validate_artifacts(self, image: ImageArray, mask: MaskArray) -> None:
+        """Validate the on-disk benchmark contract before any method consumes the sample."""
+        if mask.ndim != 2:
+            raise ValueError(f"{self.sample_id}: mask must be 2D, got {mask.shape}")
+        if mask.dtype != np.uint8:
+            raise ValueError(f"{self.sample_id}: mask must be uint8, got {mask.dtype}")
+        if mask.shape != image.shape[:2]:
+            raise ValueError(
+                f"{self.sample_id}: mask shape {mask.shape} does not match image shape "
+                f"{image.shape[:2]}"
+            )
+        if not set(np.unique(mask)).issubset({0, 255}):
+            raise ValueError(f"{self.sample_id}: mask values must be binary uint8 values 0/255")
+
+        x0, y0, x1, y1 = self.bbox_xyxy
+        height, width = image.shape[:2]
+        if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+            raise ValueError(
+                f"{self.sample_id}: bbox {self.bbox_xyxy} is outside image bounds "
+                f"(width={width}, height={height})"
+            )
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0:
+            raise ValueError(f"{self.sample_id}: mask is empty")
+        tight_bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        if tight_bbox != self.bbox_xyxy:
+            raise ValueError(
+                f"{self.sample_id}: bbox {self.bbox_xyxy} does not match mask tight bbox "
+                f"{tight_bbox}"
+            )
 
 
 def load_mask_semantic_benchmark(

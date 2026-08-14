@@ -23,7 +23,7 @@
 #   - 5 BAD (4 from Phase 11's own confirmed-root-cause table, 1 from Phase 8.3's independently
 #     confirmed Defect B -- a different confirmed mechanism, edge-asymmetry rather than
 #     Phase 11's "geometrically unremarkable" signature, kept here as a cross-check case)
-#   - 8 GOOD (real masks from the same GPU captures with no reported visual defect; 3 of these
+#   - 8 GOOD (real masks from the same GPU captures with no reported visual defect; 4 of these
 #     are additionally tagged difficulty: difficult -- genuinely large/irregular/organic
 #     silhouettes -- so this gate's false-rejection behavior on legitimately hard objects can
 #     be inspected, not just its true-positive behavior on the bad ones)

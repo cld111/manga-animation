@@ -7,7 +7,7 @@ pipeline contract.
 ## Maturity
 
 The deterministic pipeline and its local test/evaluation infrastructure are implemented
-through Phase 10. Real model execution remains a remote-GPU operation. The project is an
+through Phase 12. Real model execution remains a remote-GPU operation. The project is an
 engineering prototype with real end-to-end evidence, not a production-quality animation
 service.
 
@@ -50,6 +50,10 @@ not silently accepted by the production client factory until an adapter exists.
 - `analysis_mode="panel"` is the default. Use `analysis_mode="page"` only intentionally.
 - All model-backed stages, including semantic mask validation, release their model after the
   stage completes or fails.
+- `PipelineConfig.resolution` controls VLM analysis resizing only; downstream CV stages use
+  the original source geometry. `dtype` describes the VLM; verified grounding/segmentation
+  clients use `float32`.
+- Only `h264` is a supported output codec. Crossfade frames are reserved and must remain zero.
 
 ## Known Product Gaps
 
@@ -61,6 +65,10 @@ not silently accepted by the production client factory until an adapter exists.
 - `MESH_WARP` has no calibrated upper bound relative to panel/page geometry.
 - The automated seam detector has approximately 50% real-world precision and is not a
   substitute for visual QA.
+- Semantic-mask validation is development-data calibrated only: the current benchmark has
+  13 samples, reported recall is 0.60, and `cloth_5` is a known false negative.
+- ABSTAIN has not yet been observed on a real benchmark call, and same-category instance
+  identity is not checked.
 - Kinematic parent/child fields are structurally validated, but automatic transform
   inheritance is not implemented yet.
 

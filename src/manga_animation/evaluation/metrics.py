@@ -7,7 +7,7 @@ present a percentage without its denominator."
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from manga_animation.evaluation.dataset import EvalSample
@@ -134,6 +134,12 @@ class EvaluationReport:
 
     PASS_WITH_FALLBACK / REJECTED / ERROR vocabulary -- see `classify_outcome`. Counts sum to
     `sample_count` exactly (`StatusBreakdown.total`)."""
+    mask_semantic_acceptance_rate: Rate = field(default_factory=lambda: Rate(0, 0))
+    """ACCEPT verdicts / all semantic-mask verdicts actually produced."""
+    mask_semantic_rejection_rate: Rate = field(default_factory=lambda: Rate(0, 0))
+    """REJECT verdicts / all semantic-mask verdicts actually produced."""
+    mask_semantic_abstain_rate: Rate = field(default_factory=lambda: Rate(0, 0))
+    """ABSTAIN verdicts / all semantic-mask verdicts actually produced."""
 
 
 E2EStatus = Literal["PASS", "PASS_WITH_FALLBACK", "REJECTED", "ERROR"]
@@ -381,6 +387,19 @@ def compute_metrics(
         error_count=statuses.count("ERROR"),
     )
 
+    mask_results = [
+        semantic
+        for outcome in outcomes
+        for semantic in [
+            outcome.primary_mask_semantics,
+            *(obj.mask_semantics for obj in outcome.object_outcomes),
+        ]
+        if semantic is not None
+    ]
+    mask_accepts = sum(1 for result in mask_results if result.verdict == "accept")
+    mask_rejects = sum(1 for result in mask_results if result.verdict == "reject")
+    mask_abstains = sum(1 for result in mask_results if result.verdict == "abstain")
+
     return EvaluationReport(
         analysis_mode=analysis_mode,
         sample_count=n,
@@ -400,4 +419,7 @@ def compute_metrics(
         secondary_object_render_rate=Rate(secondary_rendered, len(secondary_outcomes)),
         micro_object_render_rate=Rate(micro_rendered, len(micro_outcomes)),
         status_breakdown=status_breakdown,
+        mask_semantic_acceptance_rate=Rate(mask_accepts, len(mask_results)),
+        mask_semantic_rejection_rate=Rate(mask_rejects, len(mask_results)),
+        mask_semantic_abstain_rate=Rate(mask_abstains, len(mask_results)),
     )

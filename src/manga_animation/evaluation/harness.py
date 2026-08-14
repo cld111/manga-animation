@@ -54,7 +54,7 @@ from manga_animation.pipeline.orchestrator import run_pipeline
 from manga_animation.pipeline.types import MaskSemanticResult, PipelineStageError, RenderResult
 from manga_animation.schemas.animation_plan import MotionType
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 """The `PageRunOutcome.schema_version` every producer using this harness writes -- see that
 
 field's own docstring for what each version number means. Named here (not just inlined as a
@@ -152,6 +152,7 @@ def mask_semantics_outcome_from_result(
         vlm_matches=result.vlm_matches,
         vlm_confidence=result.vlm_confidence,
         reason=result.reason,
+        model_id=result.model_id,
         method=result.method,
         unexpected_content=list(result.unexpected_content),
         geometric_signals=dict(result.geometric_signals),
@@ -232,6 +233,7 @@ def run_one_sample(
             failure_detail=exc.detail,
             panel_count=panel_count,
             panel_sources=panel_sources,
+            primary_mask_semantics=mask_semantics_outcome_from_result(exc.mask_semantics),
             schema_version=CURRENT_SCHEMA_VERSION,
         )
     except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
@@ -264,6 +266,8 @@ def run_one_sample(
                 for v in obj.validation_attempts
             ],
             mask_semantics=mask_semantics_outcome_from_result(obj.mask_semantics),
+            failing_stage=None,
+            failure_reason=None,
         )
         for obj in result.secondary_objects
     ] + [
@@ -272,6 +276,8 @@ def run_one_sample(
             semantic_label=dropped.object_plan.semantic_label,
             motion_type=object_outcome_motion_type(dropped.object_plan.motion_type),
             status="dropped",
+            failing_stage=dropped.failing_stage,
+            failure_reason=dropped.reason,
             # DroppedObjectResult.reason already carries a real, human-readable summary of why
             # this object was dropped -- surfacing it here means the saved JSON alone explains a
             # drop, for the two stages whose drop reason is validation-attempt-shaped prose
@@ -295,9 +301,10 @@ def run_one_sample(
                         reason=dropped.reason,
                     )
                 ]
-                if dropped.failing_stage in ("validation", "mask_semantics")
+                if dropped.failing_stage == "validation"
                 else []
             ),
+            mask_semantics=mask_semantics_outcome_from_result(dropped.mask_semantics),
         )
         for dropped in result.dropped_objects
     ]
@@ -348,26 +355,31 @@ def run_nondeterminism_check(
     sample: EvalSample, config: Any, vlm_client: Any, run_count: int
 ) -> NondeterminismSummary:
     records: list[RepeatedRunRecord] = []
-    for i in range(run_count):
-        try:
-            plan = analyze_page(Path(sample.image_path), vlm_client, config=config)
-        except PipelineStageError:
+    try:
+        for i in range(run_count):
+            try:
+                plan = analyze_page(Path(sample.image_path), vlm_client, config=config)
+            except PipelineStageError:
+                records.append(
+                    RepeatedRunRecord(
+                        sample_id=sample.sample_id, run_index=i, outcome="static_or_unusable"
+                    )
+                )
+                continue
+            primaries = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
+            primary = primaries[0] if primaries else None
             records.append(
                 RepeatedRunRecord(
-                    sample_id=sample.sample_id, run_index=i, outcome="static_or_unusable"
+                    sample_id=sample.sample_id,
+                    run_index=i,
+                    outcome="usable",
+                    primary_semantic_label=primary.semantic_label if primary else None,
+                    primary_motion_type=primary.motion_type.value if primary else None,
+                    object_count=len(plan.objects),
                 )
             )
-            continue
-        primaries = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
-        primary = primaries[0] if primaries else None
-        records.append(
-            RepeatedRunRecord(
-                sample_id=sample.sample_id,
-                run_index=i,
-                outcome="usable",
-                primary_semantic_label=primary.semantic_label if primary else None,
-                primary_motion_type=primary.motion_type.value if primary else None,
-                object_count=len(plan.objects),
-            )
-        )
+    finally:
+        unload = getattr(vlm_client, "unload", None)
+        if callable(unload):
+            unload()
     return summarize_repeated_runs(records)

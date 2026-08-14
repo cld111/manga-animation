@@ -4,5 +4,4 @@
 # laptop rather than a GPU worker.
 
 dtype: float32 # MPS support for float16/bfloat16 is inconsistent across ops; keep float32 locally
-resolution: 1024 # smaller preview resolution for fast local iteration
-debug: true
+resolution: 1024 # smaller VLM analysis preview for fast local iteration
