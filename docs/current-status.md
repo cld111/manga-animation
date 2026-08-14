@@ -130,9 +130,18 @@ conclusion. Candidates without implemented adapters remain research entries.
   grounding `RuntimeError` isolated to its panel (ERROR) while later panels still processed and
   all models were released; a 1xT4 smoke run (CUDA_VISIBLE_DEVICES=0) completed with Qwen
   fitting on a single T4 (~12.1 GiB, CPU-offloaded) and the same stage lifecycle. Phase 15 also
-  found and fixed two lifecycle teardown defects: a raising `client.unload()` could mask a
-  stage exception and skip the deterministic release, and a failed `client.load()` in
-  `__enter__` left the stage object permanently poisoned.
+   found and fixed two lifecycle teardown defects: a raising `client.unload()` could mask a
+   stage exception and skip the deterministic release, and a failed `client.load()` in
+   `__enter__` left the stage object permanently poisoned.
+- Phase 16 added the drawn-effect animation track (`RADIAL_EXPAND` motion model plus
+  effect-aware `_MOTION_HEURISTICS` entries and an analysis prompt that asks the VLM to list
+  already-drawn effects as animation targets). A short real-GPU run on `wind_breaker_sprint`
+  produced the first end-to-end drawn-effect render: a `speed_lines` PRIMARY (mesh_warp)
+  passed grounding, geometric and semantic target validation, and mask-semantics, and
+  rendered a PASS panel video with the seamless loop verified on the source frames; the
+  page's `impact_burst` SECONDARY was correctly fail-closed by geometric validation instead
+  of rendered. See `Known Limitations`/`Immediate Priorities` for what Phase 16 did and did
+  not yet exercise.
 
 ## Known Limitations and Technical Debt
 
@@ -169,6 +178,33 @@ conclusion. Candidates without implemented adapters remain research entries.
   peak 8.7 GiB on one T4) and manifest-based resumability reusing completed panels on a second
   invocation. See docs/phase14-results.md.
 
+- `RADIAL_EXPAND` (Phase 16) is the drawn-effect motion model for the radial class of manga
+  effects (impact bursts, energy fields, radiating focus lines, glow): a spatially-varying
+  radial pulse about the object's own center where the center stays effectively fixed while
+  the rim breathes outward/inward -- unlike uniform `SCALE`, which moves the whole footprint
+  as one rigid block. The analysis prompt now asks the VLM to list ALREADY-DRAWN effects
+  (speed lines, impact bursts, energy fields, smoke, water, glow, sparks) as first-class
+  animation targets, and `_MOTION_HEURISTICS` maps effect labels to effect-specific motion:
+  impact/burst/energy/glow -> `radial_expand`, smoke/steam/water/fluid -> `mesh_warp`, rain
+  -> translate-down, sparks/particles -> opacity flicker, speed lines -> `mesh_warp`. Before
+  Phase 16 every effect label (`rain`, `green_fluid`, `speed_lines`, `impact_effect`,
+  `energy_effect`, `smoke`) collapsed to the SAME rigid `_DEFAULT_MOTION` (uniform translate,
+  amplitude 0.02) -- exactly the "simple geometric displacement" the phase brief rejects.
+- Phase 16 GPU evidence (real worker, 2xT4): on `wind_breaker_sprint` the analysis stage
+  labeled `speed_lines` PRIMARY with `mesh_warp` (confidence 1.0) and `impact_burst`
+  SECONDARY with `radial_expand`; the speed-lines PRIMARY passed grounding, geometric
+  validation, semantic target validation, and mask-semantics (VLM confirmed "only speed
+  lines"), and rendered a real PASS panel video with the seamless loop verified on the
+  source frame sequence (wrap step <= 2x ordinary step) and 93.8% of pixels static across
+  sampled frames -- the first end-to-end drawn-effect animation through the production
+  pipeline. Ordinary objects (hair, cloth, bicycle) still map to their pre-Phase-16
+  transform kinds; effect heuristics are ordered after the object heuristics and do not
+  shadow them. The `impact_burst` SECONDARY on the same page was correctly fail-closed by
+  geometric validation (bbox 86.7% of its reference region, and edge-touching) rather than
+  rendered. On `eval_weapon_effects` the PRIMARY remained `weapon` (rotate) and was
+  REJECTED by the known oversized-rotate-bbox geometric failure (the Phase 3.3 defect class,
+  still correctly fail-closed), so that page did not exercise the effect track.
+
 ## Immediate Priorities
 
 These are future work, not implemented capabilities:
@@ -183,6 +219,12 @@ These are future work, not implemented capabilities:
    speculative geometry thresholds from one instance.
 5. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
+6. Validate RADIAL_EXPAND visually on a real impact/energy panel whose effect mask passes
+   geometric validation (the single Phase 16 short-run evidence had `impact_burst` fail-closed
+   for geometric reasons, so the radial pulse has not yet been exercised end-to-end on a real
+   render), and consider effect-aware semantic labels for the mask-semantics gate.
+7. Add more effect-heavy pages to the real evaluation set (speed lines confirmed working;
+   impact/energy/glow/smoke/water render paths remain unexercised end-to-end).
 
 ## Verification and Workflow
 
