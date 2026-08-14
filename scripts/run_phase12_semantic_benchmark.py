@@ -288,11 +288,19 @@ def main() -> None:
 
     if args.vlm == "real":
         from manga_animation.analysis import Qwen25VLClient
+        from manga_animation.benchmarking.registry import load_candidates
         from manga_animation.core.config import load_config
 
         config = load_config("kaggle")
         candidate_id = config.model_variants.get("vlm", "qwen2.5-vl-7b-instruct")
-        vlm_client = Qwen25VLClient(source=candidate_id, dtype=config.dtype)
+        # Resolve the shortlist id (e.g. "qwen2.5-vl-7b-instruct") to its real HF source (e.g.
+        # "Qwen/Qwen2.5-VL-7B-Instruct") -- same resolution orchestrator.py::_candidate_source
+        # already does; model identity is config-driven, never hardcoded (see "Model
+        # Abstraction" in docs/architecture.md).
+        source = next(
+            c.source for c in load_candidates()["vlm"] if c.id == candidate_id
+        )
+        vlm_client = Qwen25VLClient(source=source, dtype=config.dtype)
         reports.append(_vlm_method(samples, vlm_client))
     else:
         print("--vlm none: skipping the VLM method (run with --vlm real on the GPU worker)")
