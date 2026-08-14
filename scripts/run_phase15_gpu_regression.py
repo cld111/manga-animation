@@ -35,6 +35,12 @@ Usage (models downloaded to local dirs on the worker, pages fetched):
     python scripts/run_phase15_gpu_regression.py --pages <page> --inject-grounding-failure 2 \
         --qwen ... --dino ... --sam ...
 
+1xT4 lane (Phase 15 section 12): on a 2xT4 worker, restrict to one visible device for the
+smoke/E2E run; on a genuine 1xT4 worker this is automatic:
+
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_phase15_gpu_regression.py --pages <page> \
+        --qwen ... --dino ... --sam ...
+
 Writes one git-ignored experiment JSON per invocation.
 """
 
