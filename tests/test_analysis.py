@@ -125,6 +125,16 @@ def test_all_static_raises_pipeline_stage_error_not_a_fabricated_plan(sample_ima
     assert not excinfo.value.architectural
 
 
+def test_all_static_can_be_recorded_as_a_valid_panel_outcome(sample_image_path, config):
+    decisions = [_decision("background", "static"), _decision("character_face", "static")]
+    client = FakeVLMClient([json.dumps(decisions)])
+
+    plan = analyze_page(sample_image_path, client, config=config, allow_all_static=True)
+
+    assert plan.objects
+    assert all(obj.motion_type == MotionType.STATIC for obj in plan.objects)
+
+
 def test_recovery_pass_fixes_malformed_json(sample_image_path, config):
     valid = [_decision("banner", "primary", confidence=0.9, motion_description="waves")]
     client = FakeVLMClient(["this is not json at all {{{", json.dumps(valid)])

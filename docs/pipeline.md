@@ -7,8 +7,14 @@ results live in `docs/phase*-results.md` and are not normative unless linked her
 Manga page
     │
     ▼
+Deterministic panel extraction  — src/manga_animation/analysis/panels.py
+    │  logical panel_bbox -> bounded scene_crop_bbox
+    ▼
+Independent panel unit          — src/manga_animation/pipeline/panels.py
+    │  one crop, status, output and manifest record per panel
+    ▼
 Panel / scene analysis          — src/manga_animation/analysis
-    │  detect panels and establish per-panel context
+    │  establish per-panel semantic context
     ▼
 VLM semantic understanding      — src/manga_animation/analysis
     │  identify objects, action cues and justified motion
@@ -52,6 +58,17 @@ Decoded-output validation        — src/manga_animation/rendering
 H.264 video                      — src/manga_animation/rendering
 ```
 
+`run_page_panels` is the page-level production entry point. It does not duplicate the stage
+implementation: it writes each scene crop and invokes the existing `run_pipeline` once per
+panel. The scene crop, not the strict logical `panel_bbox`, is the source image for grounding,
+segmentation, CV transforms, reconstruction, compositing and video rendering. Page-space
+coordinates are recovered for cross-panel safety checks by adding the scene crop origin.
+
+Each panel is recorded as `PASS`, `STATIC`, `REJECTED` or `ERROR`. A page manifest is written
+after every panel so successful outputs can be reused and a later panel failure cannot erase
+earlier results. A materially ambiguous grounded bbox crossing another logical panel is safely
+rejected; no object splitting, synchronization or ownership graph is attempted.
+
 The implementation order is intentionally `animation -> reconstruction`: reconstruction
 needs transformed masks to know what motion reveals. The layer and safety-gate blocks are
 pipeline boundaries, not independent model stages.
@@ -77,10 +94,20 @@ bbox-plausibility question but structurally the same kind of gate.
 
 ## Model Lifecycle
 
-Each model-backed stage owns its memory lifecycle. The VLM is released after analysis, target
-validation and semantic mask validation; grounding, segmentation and reconstruction release
-their clients in `finally` blocks. A benchmark adapter is also unloaded after success or
-failure.
+Model residency is stage-level and explicitly owned (Phase 14, ADR 0020). Each model-backed
+stage runs inside a `ModelStage` context manager (`src/manga_animation/pipeline/lifecycle.py`)
+that loads the client on entry and deterministically releases it on exit -- on success AND on
+exception -- by dropping references, collecting cyclic garbage, and flushing the CUDA caching
+allocator. `run_page_panels` processes panels stage-by-stage: analysis (VLM) for all eligible
+panels, then grounding (DINO), then validation (VLM), then segmentation (SAM), then semantic
+mask validation (VLM), then animation/reconstruction/compositing/rendering (LaMa loaded once).
+One model family is resident at a time, never per-panel. A benchmark adapter is also unloaded
+after success or failure.
+
+The VLM's `device_map="auto"` client specifically requires `gc.collect()` before
+`torch.cuda.empty_cache()`; without it the ~16 GiB model survives `unload()` inside cyclic
+Python references until an opportunistic GC, racing the next load into a CUDA OOM (see
+docs/phase14-results.md).
 
 The production client factory accepts only candidates with an implemented adapter. Entries
 in `configs/benchmark_candidates.yaml` without an adapter remain research candidates and
@@ -95,6 +122,9 @@ must not be reported as if they were active runtime models.
 - Raw composited frames preserve pixels outside transformed masks exactly.
 - H.264 decoding may introduce bounded codec noise; decoded validation is separate from the
   raw-frame pixel invariant.
+- `panel_bbox` describes logical panel geometry; `scene_crop_bbox` is the bounded processing and
+  output canvas. Scene crops contain their logical panel, remain in page bounds, and stop at
+  nearby-panel midpoints where a gutter exists.
 
 ## STATIC Results
 

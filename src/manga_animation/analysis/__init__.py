@@ -8,7 +8,7 @@ fake client.
 """
 
 from manga_animation.analysis.client import Qwen25VLClient, VLMClient
-from manga_animation.analysis.panels import detect_panels
+from manga_animation.analysis.panels import derive_scene_crop_bbox, detect_panels
 from manga_animation.analysis.plan_builder import (
     ANALYSIS_PROMPT,
     analyze_page,
@@ -24,4 +24,5 @@ __all__ = [
     "analyze_page_panels",
     "build_plan",
     "detect_panels",
+    "derive_scene_crop_bbox",
 ]

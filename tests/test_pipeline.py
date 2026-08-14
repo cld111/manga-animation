@@ -27,6 +27,7 @@ from manga_animation.pipeline.orchestrator import (
     build_default_clients,
     run_pipeline,
 )
+from manga_animation.pipeline.panels import run_page_panels
 from manga_animation.pipeline.types import PipelineStageError
 from manga_animation.schemas.animation_plan import MotionType
 from manga_animation.segmentation.client import MaskCandidate
@@ -837,6 +838,132 @@ def test_run_pipeline_analysis_mode_page_still_available_explicitly(
     assert excinfo.value.detail.startswith("VLM marked every object STATIC --")
 
 
+# --- Phase 13: independent panel processing -------------------------------------------------
+
+
+@requires_ffmpeg
+def test_run_page_panels_produces_one_video_and_manifest_entry_per_panel(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    result = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision(), _static_decision()]),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert len(result.panels) == 2
+    assert [panel.panel_id for panel in result.panels] == ["panel_001", "panel_002"]
+    assert all(panel.status == "PASS" for panel in result.panels)
+    assert all(
+        panel.output_video is not None and panel.output_video.exists() for panel in result.panels
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["page_id"] == two_panel_page_path.stem
+    assert len(manifest["panels"]) == 2
+    assert all(item["scene_crop_bbox"] != item["panel_bbox"] for item in manifest["panels"])
+    assert manifest["performance"]["detected_panel_count"] == 2
+    assert all(
+        item["metrics"]["frame_count"] == config.fps * config.duration_s
+        for item in manifest["panels"]
+    )
+
+
+@requires_ffmpeg
+def test_run_page_panels_isolates_a_failed_panel(two_panel_page_path: Path, config, tmp_path: Path):
+    class FailSecondGrounding(FakeGroundingClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def detect(self, image, text_prompt: str):
+            self.calls += 1
+            if self.calls == 2:
+                return []
+            return super().detect(image, text_prompt)
+
+    result = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision()]),
+        grounding_client=FailSecondGrounding(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert result.panels[0].status == "PASS"
+    assert result.panels[0].output_video is not None
+    assert result.panels[0].output_video.exists()
+    assert result.panels[1].status == "REJECTED"
+    assert result.panels[1].failure_stage == "grounding"
+
+
+def test_run_pipeline_rejects_ambiguous_cross_panel_grounding(
+    page_path: Path, config, tmp_path: Path
+):
+    from manga_animation.pipeline.types import BBoxPx
+
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient([_primary_decision()]),
+            grounding_client=FakeGroundingClient(box=(10, 10, 85, 75)),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+            logical_panel_bbox_px=BBoxPx(x0=0, y0=0, x1=60, y1=100),
+            neighboring_panel_bboxes=(BBoxPx(x0=70, y0=0, x1=130, y1=100),),
+        )
+
+    assert excinfo.value.stage == "validation"
+    assert "crosses logical neighbor panel" in excinfo.value.detail
+    assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+@requires_ffmpeg
+def test_run_page_panels_reuses_completed_outputs(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    out_dir = tmp_path / "videos"
+    first = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision()]),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    class ExplodingVLM:
+        def generate(self, image, prompt: str):
+            raise AssertionError("completed panel must not be analyzed again")
+
+        def unload(self):
+            pass
+
+    second = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=ExplodingVLM(),
+        grounding_client=FailingGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert [panel.status for panel in second.panels] == ["PASS", "PASS"]
+    assert [panel.output_video for panel in second.panels] == [
+        panel.output_video for panel in first.panels
+    ]
+
+
 # --- controlled-fallback plan override (Phase 3.1 failure policy escape hatch) -------------
 
 
@@ -1536,7 +1663,7 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
     real_reconstruct_hidden_region = orch.reconstruct_hidden_region
 
     def spy_reconstruct_hidden_region(
-        image, original_mask, transformed_masks, client, *, object_id, model_id
+        image, original_mask, transformed_masks, client, *, object_id, model_id, **kw
     ):
         reconstruction_calls.append((object_id, original_mask.copy()))
         return real_reconstruct_hidden_region(
@@ -1546,6 +1673,7 @@ def test_run_pipeline_multi_object_mask_and_motion_reach_the_right_object(
             client,
             object_id=object_id,
             model_id=model_id,
+            **kw,
         )
 
     monkeypatch.setattr(orch, "reconstruct_hidden_region", spy_reconstruct_hidden_region)

@@ -82,9 +82,19 @@ class Qwen25VLClient:
         return str(self._processor.batch_decode(new_tokens, skip_special_tokens=True)[0])
 
     def unload(self) -> None:
+        # Phase 14 (docs/phase14-results.md): this client is the one model in the pipeline
+        # whose tensors survive `self._model = None; empty_cache()` -- a `device_map="auto"`
+        # model (ADR 0005's Qwen sharding path) keeps cyclic Python references alive, so the
+        # CUDA allocator still counts its ~16 GiB until `gc.collect()` runs. Without it, a
+        # second Qwen load races the first unreleased instance and OOMs (reproduced on a real
+        # 2xT4 Kaggle run). The order matters: collect cyclic garbage first, then release the
+        # caching allocator's now-unreachable blocks.
+        import gc
+
         import torch
 
         self._model = None
         self._processor = None
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

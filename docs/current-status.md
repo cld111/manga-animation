@@ -7,20 +7,26 @@ evidence remain in `docs/phase*-results.md`; decision rationale remains in `docs
 ## Status
 
 The deterministic pipeline and local test/evaluation infrastructure are implemented through
-Phase 12. Real model execution remains a remote-GPU operation. The project is an engineering
-prototype with real end-to-end evidence and known real-world visual limitations, not a
-production animation service.
+Phase 13's panel-first orchestration. Real model execution remains a remote-GPU operation. The
+project is an engineering prototype with real end-to-end evidence and known real-world visual
+limitations, not a production animation service.
 
 ## Current Pipeline
 
 The implemented order is:
 
 ```text
-analysis -> grounding -> validation -> segmentation -> mask_semantics -> animation
--> reconstruction -> compositing -> rendering
+page -> deterministic panel detection -> bounded scene crops
+  -> independent analysis -> grounding -> validation -> segmentation -> mask_semantics
+  -> animation -> reconstruction -> compositing -> rendering
 ```
 
-- Analysis is panel-aware by default; page analysis remains explicit.
+- `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
+  its own scene crop, independent stages, output video or explicit status, and a page manifest.
+- `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
+  is bounded by page edges and nearby panel geometry.
+- Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result
+  is recorded as `STATIC` by the panel runner without inventing a video.
 - Grounding uses a real panel crop when analysis provides one and returns page coordinates.
 - `validation` checks grounded bbox plausibility, semantic agreement, and transform geometry
   before segmentation.
@@ -73,11 +79,19 @@ conclusion. Candidates without implemented adapters remain research entries.
   inherited automatically; each animated object needs its own motion spec.
 - Model-backed stages release their clients after the stage, including analysis, target
   validation, semantic mask validation, grounding, segmentation, and reconstruction.
+- GPU model lifecycle is stage-level (Phase 14, ADR 0020): each model-backed stage loads its
+  client once, processes every eligible panel, then deterministically releases it before the
+  next stage loads its own model. Models never co-reside, and a failed panel can no longer
+  leave a model resident to poison later panels. The VLM's `device_map="auto"` client is
+  released with `gc.collect()` before the caching-allocator flush -- the phase-14 root cause
+  of cross-panel CUDA OOM.
 - `PipelineConfig.resolution` changes VLM analysis resizing only; downstream CV uses source
   geometry. `dtype` describes the VLM; verified grounding/segmentation clients use `float32`.
 - Crossfade frames remain zero, and `h264` is the only supported output codec.
 - A semantic all-STATIC result is valid analysis evidence, but the current render contract
   rejects an all-STATIC plan because it has no target to render.
+- Ambiguous grounded objects that materially cross into another logical panel are rejected;
+  panel processing and unrelated panel outputs continue independently.
 
 ## Validated Capabilities and Evidence
 
@@ -101,6 +115,11 @@ conclusion. Candidates without implemented adapters remain research entries.
 - Real-world evaluation provenance is direct visual inspection of downloaded outputs by one
   evaluator. The Phase 12 semantic-mask benchmark has 13 real objects, but is development data
   used to design/calibrate the prompt, not held-out evidence.
+- Phase 14's stage-level lifecycle was proven on a real 2xT4 Kaggle worker: the old per-panel
+  Qwen unload (drop ref + `empty_cache()`, no `gc.collect()`) left ~16 GiB resident until an
+  opportunistic GC raced the next load into a CUDA OOM (deterministically reproduced at panel
+  2 in profiling); with `ModelStage` every stage returns the allocator to ~9 MiB per device
+  after release and a full 4-panel page runs with peak 8.7 GiB on one T4 (docs/phase14-results.md).
 
 ## Known Limitations and Technical Debt
 
@@ -128,20 +147,30 @@ conclusion. Candidates without implemented adapters remain research entries.
   for a held-out calibration study.
 - The full 10-sample real-world evaluation has not been rerun after enabling semantic mask
   validation, so the Phase 9 completion metrics are not a post-gate quality claim.
+- Phase 13's panel-first implementation has local behavioral coverage and fake-client end-to-end
+  coverage for multiple outputs, crop bounds, failure isolation, manifest fields, resumability,
+  and cross-panel rejection. Phase 14 then ran representative real GPU validation of the new
+  runner (4-panel page, real Qwen/Grounding DINO/SAM 2.1/LaMa on a 2xT4 Kaggle worker),
+  producing varied real outcomes (STATIC/STATIC/PASS/REJECTED), with the stage-level lifecycle
+  releasing every model deterministically after its stage (allocator back to ~9 MiB per device;
+  peak 8.7 GiB on one T4) and manifest-based resumability reusing completed panels on a second
+  invocation. See docs/phase14-results.md.
 
 ## Immediate Priorities
 
 These are future work, not implemented capabilities:
 
-1. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
+1. Review the Phase 14 GPU-validated stage-level lifecycle outputs (the Phase 14 E2E run's
+   rendered panel videos and crops) at native resolution.
+2. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
    before changing thresholds or claiming generalization.
-2. Run a bounded context-size study for mask verification and establish a genuine development/
+3. Run a bounded context-size study for mask verification and establish a genuine development/
    held-out split when data volume permits.
-3. Collect targeted same-category multi-instance evidence before designing instance-identity
+4. Collect targeted same-category multi-instance evidence before designing instance-identity
    validation.
-4. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
+5. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
    speculative geometry thresholds from one instance.
-5. Treat articulated part-level animation and scene transitions as design-only future concepts,
+6. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
 
 ## Verification and Workflow
