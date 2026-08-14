@@ -32,7 +32,7 @@ AnimationPlan
 │     ├── panel_id
 │     ├── bbox: BBox               (normalized, relative to the page)
 │     └── description
-├── objects: [ObjectPlan]          (may be empty — an all-STATIC page is valid)
+├── objects: [ObjectPlan]          (may be empty — an all-STATIC semantic plan is valid)
 │     ├── object_id, panel_id, semantic_label, confidence
 │     ├── motion_type: STATIC | PRIMARY | SECONDARY | MICRO
 │     ├── parent_id, children_ids  (kinematic hierarchy)
@@ -62,6 +62,10 @@ AnimationPlan
 Every non-STATIC object *must* carry a `motion` spec — the schema rejects `PRIMARY` /
 `SECONDARY` / `MICRO` objects with no motion just as it rejects STATIC objects that have
 one. Motion presence and `motion_type` can't drift apart.
+
+An `AnimationPlan` may contain at most one `PRIMARY` object. Multiple independent movers
+must use `SECONDARY`/`MICRO` for the additional objects; this keeps the orchestrator and
+evaluation contract unambiguous.
 
 ## `transform_kind` and what `amplitude` means
 
@@ -93,6 +97,10 @@ and parent cycles are rejected the same way. `AnimationPlan.children_of(object_i
 the child list from `parent_id` links at query time — `parent_id` is the source of truth;
 `children_ids` is there for the (common) case where it's more natural for a
 generation step to declare children top-down.
+
+The current implementation validates these links but does not automatically inherit or
+compose a parent's transform during animation. Callers must provide a separate motion spec
+for each object until coordinated motion is implemented.
 
 ## `pivot`, `phase`, `speed`, `easing`, `timing`
 
@@ -137,7 +145,8 @@ the last one are visually identical. Two `loop_mode`s are checked against that p
 
 `AnimationPlan` also validates that every object's `delay_s + duration_s` fits inside
 `loop.duration_s` — a motion window that runs past the end of the loop is rejected at plan
-construction time, not discovered later at render time.
+construction time, not discovered later at render time. `duration_s * fps` must also round to
+at least one output frame.
 
 ## Confidence
 

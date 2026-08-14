@@ -88,10 +88,21 @@ def _affine_matrix(
         shear = value * amplitude
         # Shear along the direction vector's axis, about the pivot — a straightforward
         # generalization of the phase2 script's fixed-horizontal-shear special case.
+        linear = np.array(
+            [
+                [1 + shear * direction.x, shear * direction.y],
+                [shear * direction.x, 1 + shear * direction.y],
+            ],
+            dtype=np.float32,
+        )
+        # Build the translation as p - A*p. Writing only one diagonal term here
+        # does not keep a non-origin pivot fixed for a general direction.
+        pivot = np.asarray(pivot_px, dtype=np.float32)
+        translation = pivot - linear @ pivot
         return np.array(
             [
-                [1 + shear * direction.x, shear * direction.y, -pivot_px[0] * shear * direction.x],
-                [shear * direction.x, 1 + shear * direction.y, -pivot_px[1] * shear * direction.y],
+                [linear[0, 0], linear[0, 1], translation[0]],
+                [linear[1, 0], linear[1, 1], translation[1]],
             ],
             dtype=np.float32,
         )

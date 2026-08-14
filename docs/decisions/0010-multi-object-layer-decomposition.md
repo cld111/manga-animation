@@ -138,11 +138,9 @@ reconstruction fill must not fight with it.
   reveals new background is already handled by `reconstruct_hidden_region` returning `None` in
   that case (unchanged, pre-existing behavior) — not a new question this ADR introduces.
 - ~~No real evaluation dataset sample has yet produced a genuine multi-object (PRIMARY +
-  SECONDARY/MICRO) plan in a real, observed VLM run~~ — resolved, see the "Revision (Phase 5
-  audit)" section below: real multi-object VLM plans are now observed. A related, still-open
-  question that section leaves open: no real page has yet produced a *successfully rendered*
-  multi-object output (both real multi-object plans found so far share a PRIMARY object whose
-  grounding fails for an unrelated reason, before any SECONDARY/MICRO object is reached).
+  SECONDARY/MICRO) plan in a real, observed VLM run~~ — resolved in the Phase 5 audit.
+- ~~No real page has yet produced a *successfully rendered* multi-object output~~ — resolved
+  by Phase 7; see the revision and `docs/current-status.md`.
 
 ## Revision (reconstruction hardening): `_compute_hole_mask` formula was wrong
 

@@ -229,6 +229,12 @@ class LoopSpec(BaseModel):
     def frame_count(self) -> int:
         return round(self.duration_s * self.fps)
 
+    @model_validator(mode="after")
+    def _check_frame_count(self) -> LoopSpec:
+        if self.frame_count < 1:
+            raise ValueError("duration_s * fps must round to at least one output frame")
+        return self
+
 
 class AnimationPlan(BaseModel):
     """The full, machine-readable animation decision for one source image."""
@@ -254,6 +260,12 @@ class AnimationPlan(BaseModel):
             dupes = sorted({o for o in object_ids if object_ids.count(o) > 1})
             raise ValueError(f"duplicate object_id(s): {dupes}")
         by_id = {o.object_id: o for o in self.objects}
+
+        primary_count = sum(1 for obj in self.objects if obj.motion_type == MotionType.PRIMARY)
+        if primary_count > 1:
+            raise ValueError(
+                f"AnimationPlan supports at most one PRIMARY object, got {primary_count}"
+            )
 
         for obj in self.objects:
             if obj.panel_id not in panel_id_set:

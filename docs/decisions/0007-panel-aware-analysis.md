@@ -17,9 +17,9 @@ page.
 Per the Phase 3.3 brief, before adding any model the existing codebase and real sample pages
 were inspected for whether a *deterministic* panel detector is sufficient:
 
-- `opencv-python-headless` is already a project dependency (the `cv` extras group,
-  `pyproject.toml`), already imported at module level in `animation/transforms.py` — no new
-  dependency is needed to do classical image processing.
+- `opencv-python-headless` is a base project dependency in `pyproject.toml`, already imported
+  at module level in `animation/transforms.py` — no separate runtime extra is needed for
+  classical image processing.
 - All three real sample pages this project has ever used (`examples/sample_page_01.png`,
   `examples/sample_page_02.png`, `examples/phase3_action_page.png` — visually inspected for
   this decision) are digital, full-color, single-column **webtoon-style** pages: panels are
@@ -94,8 +94,9 @@ engine — none of those stages change or become panel-aware:
 - `analysis/plan_builder.py` gains `analyze_page_panels`, sitting alongside the unchanged
   `analyze_page`; both build the same `AnimationPlan` shape (multiple `PanelPlan`s is already
   legal per the existing schema — no schema change needed).
-- `pipeline/orchestrator.py::run_pipeline` gains `analysis_mode: Literal["page", "panel"] =
-  "page"` — page-level remains the default and every existing test/caller is unaffected.
+- `pipeline/orchestrator.py::run_pipeline` exposes
+  `analysis_mode: Literal["page", "panel"] = "panel"` — panel-level is the current default
+  since Phase 10; page-level remains available when passed explicitly.
 - Grounding still runs over the *whole page image* exactly as before, per the brief's explicit
   "do not tightly couple panel detection to Grounding DINO" instruction — a panel-aware
   analysis run changes *which candidates the analysis stage considers and where they're

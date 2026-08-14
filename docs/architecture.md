@@ -1,85 +1,68 @@
 # Architecture
 
-This document is the set of engineering principles the manga-animation pipeline is built
-against. They exist to keep a system with many replaceable ML components (VLM, grounding,
-segmentation, inpainting) from turning into either an unmaintainable pile of hardcoded
-glue, or a full generative image-to-video system that no longer respects the source
-artwork. Every later phase should be checked against these before merging.
+This document defines the engineering principles of the manga-animation pipeline. They
+keep replaceable ML components from turning the system into hardcoded glue or a generative
+image-to-video system that no longer respects the source artwork.
 
 ## Original Image Is the Source of Truth
 
-The manga page the user provides is not a reference for generation — it *is* the output,
-minus motion. Wherever a region of the frame is not being deliberately animated, its pixels
-must be the original pixels, unchanged. Compositing stages should be structured so that
-"do nothing" is the default per-pixel behavior, and animated regions are the exception
-requiring justification (a segmented layer, a transform, a reason).
+The manga page the user provides is not a reference for generation - it is the output, minus
+motion. Wherever a region of the raw composited frame is not being deliberately animated,
+its pixels must be the original pixels, unchanged. After lossy H.264 encoding/decoding,
+bounded codec-dependent noise is expected and checked separately. Compositing stages should
+make "do nothing" the default per-pixel behavior.
 
 ## Minimal Motion Principle
 
-Only objects with a clear, visually justified reason to move should move. The system is
-not trying to animate "the page" — it's trying to animate the handful of elements that
-carry the page's action (a swung weapon, blowing hair, an impact). Everything else,
-including plausible-but-unjustified motion ("wouldn't it look nice if the background
-moved a little"), is out of scope by design.
+Only objects with a clear, visually justified reason to move should move. The system is not
+trying to animate the page; it animates the handful of elements that carry the action. Every
+plausible-but-unjustified background motion is out of scope.
 
 ## Static Is a Valid Result
 
-A page — or an object, or even an entire panel — that ends up with no motion at all is not
-a failure state. It's the correct output when there's no visually justified reason to
-animate. Every decision point in the pipeline (see the Animation Plan's `STATIC` motion
-type in [`animation-plan-schema.md`](animation-plan-schema.md)) should default toward
-STATIC and require a positive reason to do otherwise, not the other way around.
+A page, object or panel with no justified motion is a valid semantic result. The current
+render pipeline still rejects an all-STATIC plan because its output contract requires an
+animated target. If static-video output becomes a product requirement, it must be added as
+an explicit pipeline outcome rather than silently treated as success.
 
 ## Deterministic First
 
-Prefer deterministic CV transforms (affine transforms, mesh warps, alpha compositing —
-see the planned `cv-agent`/`src/manga_animation/animation` and `compositing` stages) over
-generative video models wherever the desired motion can be expressed that way. Determinism
-gives reproducibility, speed, and — critically — a mechanical guarantee that unrelated
-pixels aren't touched. Generative techniques (e.g. inpainting for hidden-region
-reconstruction, `src/manga_animation/reconstruction` — owned by `cv-agent`, see
-`.claude/agents/cv-agent.md`) are reserved for the specific sub-problems that are not
-expressible as a transform of existing pixels, such as revealing an area that motion
-uncovers.
+Prefer deterministic CV transforms (affine transforms, mesh warps and alpha compositing in
+`src/manga_animation/animation` and `compositing`) over generative video models whenever the
+desired motion can be expressed that way. Generative techniques such as inpainting are
+reserved for content that motion reveals but that was never present in the source image.
 
 ## Local Modification
 
-Every stage should touch the smallest region of the frame necessary for its job:
-segmentation should not over-segment beyond what animation needs, warps should be local to
-the object being animated, and reconstruction should only fill the specific hole that
-motion reveals. Global operations over the whole page are avoided by default.
+Every stage should touch the smallest region necessary for its job. Segmentation should not
+over-segment beyond what animation needs, warps should be local to the object, and
+reconstruction should only fill the specific hole motion reveals. Global operations are
+avoided by default.
 
 ## Semantic Coordination
 
-Independent objects may have independent motion parameters (phase, speed, amplitude — see
-`MotionSpec` in the Animation Plan schema), but "independent" refers to their timing
-curves, not their meaning. A character's hand and the object it's holding must stay
-kinematically attached (parent/child relationships in the schema); a flag and the pole it
-hangs from must move in a way that stays physically plausible together. Coordination is
-expressed structurally via `parent_id`/`children_ids`, not left to chance.
+Independent objects may have independent timing parameters, but "independent" refers to
+timing, not physical meaning. The Animation Plan validates `parent_id`/`children_ids`, but
+the current animation implementation does not propagate a parent's transform to children.
+Automatic kinematic coordination is future capability and must not be assumed by callers.
 
 ## Model Abstraction
 
-VLM, grounding, segmentation, and reconstruction are all treated as swappable components
-behind a stage boundary, not as fixed choices baked into pipeline code. Phase 2 will
-benchmark and select specific models; nothing about the pipeline's structure (or the
-Animation Plan schema, which is model-agnostic) should need to change if a model is later
-swapped out. Concretely: model identity lives in `PipelineConfig.model_variants` (a
-`dict[str, str]`), not as an import or a hardcoded model name inside a stage module.
+VLM, grounding, segmentation and reconstruction are stage-boundary components. The active
+candidate is configured through `PipelineConfig.model_variants`; the production factory
+must reject candidate IDs for which no client adapter is implemented. Benchmark candidates
+without adapters remain research entries, not fake runtime substitutions.
 
 ## GPU Awareness
 
-Models should not sit loaded in VRAM/unified memory longer than the stage that needs them
-is running. This matters especially on the hardware this project actually targets: an
-Apple Silicon machine with shared CPU/GPU memory locally, and memory-constrained T4/L4 GPUs
-on Kaggle remotely. Stages should load their model, do their work, and release it, rather
-than the pipeline holding every model resident for the full run.
+Models must not remain loaded in VRAM/unified memory longer than the stage that needs them.
+The VLM is used by both analysis and target validation, but each stage releases it before the
+next stage. Grounding, segmentation, reconstruction and benchmark adapters also clean up on
+failure paths.
 
 ## Remote Compute Is Disposable
 
 See [`decisions/0002-local-canonical-source.md`](decisions/0002-local-canonical-source.md)
 and [`decisions/0003-remote-compute-workers.md`](decisions/0003-remote-compute-workers.md).
-In short: Kaggle/Jupyter GPU sessions can disappear at any time (session expiry, quota,
-disconnect) without warning. Nothing about the project's state should depend on a remote
-session surviving — code lives in git, and the local checkout is always the complete,
-canonical copy.
+Kaggle/Jupyter sessions can disappear without warning. Code, tests, config and docs live in
+the local git checkout; generated artifacts remain reproducible and git-ignored.

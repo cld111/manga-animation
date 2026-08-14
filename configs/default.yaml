@@ -4,9 +4,9 @@
 device: auto # resolved at runtime: cuda > mps > cpu
 dtype: float32
 
-# Phase 3.1 implementation defaults (see the Phase 3.1 brief and ADR 0005) — preliminary,
-# single-candidate-per-stage selections from Phase 2's benchmarking, not a final
-# cross-candidate comparison. Swappable: see "Model Abstraction" in docs/architecture.md.
+# Preliminary operational baseline from the real Phase 2-10 evidence, not a final exhaustive
+# cross-candidate comparison. See docs/current-status.md and "Model Abstraction" in
+# docs/architecture.md.
 model_variants:
   vlm: qwen2.5-vl-7b-instruct
   grounding: grounding-dino-swin-l
@@ -17,11 +17,6 @@ resolution: 1536 # max working long-edge resolution, px
 fps: 24
 duration_s: 4.0 # ~3-5s seamless loop, per the project goal
 
-batch_size: 1
-num_workers: 0
-
 output_codec: h264
 debug: false
 seed: 42
-
-output_dir: outputs

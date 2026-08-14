@@ -18,6 +18,10 @@ class VLMClient(Protocol):
         """Run one image+prompt -> text generation call."""
         ...
 
+    def unload(self) -> None:
+        """Release model and processor memory after the analysis/validation stages."""
+        ...
+
 
 class Qwen25VLClient:
     """Real `qwen2.5-vl-7b-instruct` client, per ADR 0005's confirmed-working call.

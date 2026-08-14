@@ -216,6 +216,20 @@ class TestAnimationPlanHierarchy:
         with pytest.raises(ValidationError, match="cycle"):
             AnimationPlan(**base_plan_kwargs, objects=[a, b])
 
+    def test_multiple_primary_objects_are_rejected(self, base_plan_kwargs):
+        def primary(object_id: str) -> ObjectPlan:
+            return ObjectPlan(
+                object_id=object_id,
+                panel_id="panel_1",
+                semantic_label=object_id,
+                confidence=0.8,
+                motion_type=MotionType.PRIMARY,
+                motion=_translate_motion(),
+            )
+
+        with pytest.raises(ValidationError, match="at most one PRIMARY"):
+            AnimationPlan(**base_plan_kwargs, objects=[primary("a"), primary("b")])
+
 
 class TestSeamlessLoopTiming:
     def _plan_with_speed(
@@ -329,6 +343,11 @@ def test_bbox_out_of_bounds_is_rejected():
 def test_loop_frame_count_rounds_duration_times_fps():
     loop = LoopSpec(duration_s=4.0, fps=24)
     assert loop.frame_count == 96
+
+
+def test_loop_rejects_a_duration_that_produces_no_frames():
+    with pytest.raises(ValidationError, match="at least one output frame"):
+        LoopSpec(duration_s=0.001, fps=1)
 
 
 def test_source_image_requires_positive_dimensions():

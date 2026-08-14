@@ -1,20 +1,16 @@
 """Phase 2 feasibility check for the deterministic/kinematic animation stage.
 
 Per the Phase 2 brief, this stage is "primarily a CV implementation stage rather than a
-generative-model benchmark" — the deliverable is confirming the *algorithms* work and the
-project's hard invariants (static-region pixel preservation, seamless-loop continuity) hold
-numerically, not a full `src/manga_animation/animation`/`compositing` implementation (that's
-Phase 5, see the phases table in README.md).
+generative-model benchmark". This script is a historical feasibility record; the production
+implementation now lives in `src/manga_animation/animation` and `compositing`.
 
-This script deliberately does NOT touch `src/manga_animation/animation` or
-`src/manga_animation/compositing` — both stay empty stubs per Phase 1/2 scope. It runs
-entirely on CPU with a real sample manga page and a *synthetic* placeholder mask (no real
-segmentation model has been benchmarked yet — that's blocked on remote GPU access, see
-docs/decisions/0005-phase2-model-selection.md), so results here validate the CV mechanics in
-isolation, not end-to-end pipeline output.
+This script deliberately uses a synthetic mask and runs entirely on CPU. Its results validate
+CV mechanics in isolation, while current end-to-end evidence is recorded in the phase result
+documents and `docs/current-status.md`.
 
 Usage: uv run python scripts/phase2_cv_feasibility.py [--page examples/sample_page_01.png]
-Requires the `cv` optional dependency group: `uv sync --extra cv`.
+OpenCV is part of the base development environment; `uv sync --extra cv` remains accepted as
+an optional compatibility command.
 """
 
 from __future__ import annotations
@@ -69,7 +65,7 @@ def _oscillation(t_frac: float, speed: float, phase: float, easing: str) -> floa
 def _synthetic_mask(
     shape: tuple[int, int], bbox_norm: tuple[float, float, float, float]
 ) -> np.ndarray:
-    """A placeholder mask standing in for a real segmentation-agent output.
+    """A historical synthetic mask used by the Phase 2 feasibility experiment.
 
     bbox_norm is (x, y, w, h) normalized to [0, 1], matching the Animation Plan schema's
     BBox convention (docs/animation-plan-schema.md) so pivot/region resolution mirrors how

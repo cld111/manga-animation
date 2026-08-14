@@ -130,6 +130,16 @@ def test_usable_target_rate_excludes_only_analysis_stage_failures():
     assert report.usable_target_rate == Rate(2, 3)
 
 
+def test_usable_target_rate_excludes_unattributed_failures_before_grounding():
+    outcomes = [
+        _completed("a"),
+        _failed("b", stage="unexpected", detail="analysis crashed before grounding"),
+        _failed("c", stage="grounding", detail="no detection"),
+    ]
+    report = compute_metrics(outcomes, {})
+    assert report.usable_target_rate == Rate(2, 3)
+
+
 def test_static_rate_only_counts_the_genuine_all_static_detail_text():
     outcomes = [
         _failed("a", stage="analysis", detail="VLM marked every object STATIC across every ..."),

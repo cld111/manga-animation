@@ -3,8 +3,8 @@
 # benchmark methodology these candidates feed into. This file is data only — adding or
 # removing a candidate is a config edit, not a code change.
 #
-# Nothing here is a selection. `configs/default.yaml`'s `model_variants` stays empty until
-# real benchmark runs (on the remote Kaggle/Jupyter GPU) pick a winner per stage.
+# This is the research shortlist. `configs/default.yaml` contains the current preliminary
+# runtime baseline; candidates without a production adapter must not be selected silently.
 
 vlm:
   - id: qwen2.5-vl-7b-instruct

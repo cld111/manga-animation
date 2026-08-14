@@ -67,8 +67,7 @@ def segment_object(
             stage="segmentation",
             input_ref=grounding.object_id,
             detail=(
-                f"segmentation model returned no mask candidates for box "
-                f"{grounding.bbox.as_xyxy()}"
+                f"segmentation model returned no mask candidates for box {grounding.bbox.as_xyxy()}"
             ),
             root_cause="the segmentation model failed to propose any mask for the grounded box",
             architectural=False,
@@ -79,7 +78,7 @@ def segment_object(
 
     best = max(candidates, key=lambda c: c.iou_score)
     mask = best.mask
-    _validate_mask(mask, object_id=grounding.object_id)
+    _validate_mask(mask, expected_shape=image.shape[:2], object_id=grounding.object_id)
     bbox = _tight_bbox(mask)
     _validate_mask_shape(mask, bbox, object_id=grounding.object_id)
 
@@ -92,7 +91,37 @@ def segment_object(
     )
 
 
-def _validate_mask(mask: ImageArray, *, object_id: str) -> None:
+def _validate_mask(mask: ImageArray, *, expected_shape: tuple[int, int], object_id: str) -> None:
+    if mask.ndim != 2:
+        raise PipelineStageError(
+            stage="segmentation",
+            input_ref=object_id,
+            detail=f"segmentation mask must be 2D, got shape {mask.shape}",
+            root_cause="segmentation returned a mask with an unexpected channel dimension",
+            architectural=False,
+            proposed_fix="normalize the model output to a single full-page mask",
+        )
+    if mask.shape != expected_shape:
+        raise PipelineStageError(
+            stage="segmentation",
+            input_ref=object_id,
+            detail=(
+                f"segmentation mask shape {mask.shape} does not match source image shape "
+                f"{expected_shape}"
+            ),
+            root_cause="segmentation returned crop-local or otherwise mis-sized mask data",
+            architectural=False,
+            proposed_fix="post-process the model mask to the exact source-image geometry",
+        )
+    if mask.dtype != np.uint8:
+        raise PipelineStageError(
+            stage="segmentation",
+            input_ref=object_id,
+            detail=f"segmentation mask must use uint8 values, got dtype {mask.dtype}",
+            root_cause="segmentation output violated the MaskCandidate dtype contract",
+            architectural=False,
+            proposed_fix="convert the binary mask to uint8 values in {0, 255}",
+        )
     coverage = float(np.count_nonzero(mask)) / mask.size
     if coverage < _MIN_COVERAGE_FRACTION:
         raise PipelineStageError(

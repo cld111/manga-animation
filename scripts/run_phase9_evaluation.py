@@ -40,6 +40,7 @@ never committed).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ from manga_animation.evaluation import (
 from manga_animation.evaluation.dataset import REALWORLD_DATASET_PATH
 from manga_animation.evaluation.harness import (
     environment_metadata,
+    git_commit,
     panel_detection_evidence,
     run_nondeterminism_check,
     run_one_sample,
@@ -110,6 +112,19 @@ def _load_resume_state(resume_path: Path | None) -> dict[str, Any]:
         data["outcomes"].setdefault(mode, [])
     data.setdefault("nondeterminism", [])
     return data
+
+
+def _run_fingerprint(env: str, config: Any, samples: list[EvalSample], include_golden: bool) -> str:
+    """Identify the exact experiment that a resume file belongs to."""
+    payload = {
+        "git_commit": git_commit(),
+        "config_env": env,
+        "config": config.model_dump(mode="json"),
+        "include_golden": include_golden,
+        "samples": [sample.model_dump(mode="json") for sample in samples],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_json(path: Path, summary: dict[str, Any]) -> None:
@@ -190,6 +205,14 @@ def main() -> None:
     samples_by_id = {s.sample_id: s for s in samples}
 
     state = _load_resume_state(args.resume)
+    fingerprint = _run_fingerprint(args.env, config, samples, args.include_golden)
+    if args.resume is not None and args.resume.exists():
+        previous_fingerprint = state.get("run_fingerprint")
+        if previous_fingerprint != fingerprint:
+            raise SystemExit(
+                "resume file belongs to a different experiment; do not mix commits, "
+                "configuration or datasets"
+            )
     out_path = args.resume if args.resume is not None else None
     if out_path is None:
         args.experiments_dir.mkdir(parents=True, exist_ok=True)
@@ -204,10 +227,11 @@ def main() -> None:
     def _persist() -> None:
         summary = {
             "environment": environment_metadata(device),
+            "run_fingerprint": fingerprint,
             "config_env": args.env,
             "model_variants": config.model_variants,
             "include_golden": args.include_golden,
-            "dataset_composition": dataset_composition(load_eval_dataset(REALWORLD_DATASET_PATH)),
+            "dataset_composition": dataset_composition(samples),
             "outcomes": state["outcomes"],
             "nondeterminism": state["nondeterminism"],
         }
@@ -269,10 +293,11 @@ def main() -> None:
     _render_rates_in_place(reports, serialized_reports)
     final_summary = {
         "environment": environment_metadata(device),
+        "run_fingerprint": fingerprint,
         "config_env": args.env,
         "model_variants": config.model_variants,
         "include_golden": args.include_golden,
-        "dataset_composition": dataset_composition(load_eval_dataset(REALWORLD_DATASET_PATH)),
+        "dataset_composition": dataset_composition(samples),
         "outcomes": state["outcomes"],
         "reports": serialized_reports,
         "nondeterminism": state["nondeterminism"],

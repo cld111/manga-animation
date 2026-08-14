@@ -64,8 +64,6 @@ def run_benchmark(
             latencies_ms.append((time.perf_counter() - start) * 1000.0)
 
         peak_memory_mb = _peak_memory_mb(device)
-        adapter.unload()
-
         return BenchmarkResult(
             candidate_id=candidate.id,
             stage=candidate.stage,
@@ -92,6 +90,13 @@ def run_benchmark(
             dtype=dtype,
             error=str(exc),
         )
+    finally:
+        # A failed load/inference can still leave partially allocated weights
+        # behind. Cleanup must not depend on the success path.
+        try:
+            adapter.unload()
+        except Exception:  # noqa: BLE001 -- preserve the original benchmark failure
+            logger.exception("benchmark adapter cleanup failed candidate_id=%s", candidate.id)
 
 
 def run_sweep(

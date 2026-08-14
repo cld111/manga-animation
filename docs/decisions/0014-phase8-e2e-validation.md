@@ -143,14 +143,17 @@ reason), not a sample deliberately chosen to exercise boundary proximity.
   attempted here, left for a future phase per the same "don't fabricate a fixture just to fill a
   quota" discipline `configs/phase3_3_eval_dataset.yaml`'s own header already establishes).
 
-## Open questions
+## Historical and Remaining Open Questions
 
-- Whether `classify_outcome` should also consult a sample's free-text `acceptable_outcome`
+The first question below was resolved by Phase 8.3 and ADR 0015. It is retained only to
+preserve the decision history.
+
+- ~~Whether `classify_outcome` should also consult a sample's free-text `acceptable_outcome`
   field (e.g. via a second VLM call verifying the classification against that prose) is left
   open — this phase deliberately uses only structured, already-tested fields
   (`animation_possible`, `ground_truth_uncertain`, `regression_reference`), consistent with
   `_check_regression`'s own established preference for structured evidence over free-text
-  parsing.
+  parsing.~~ Resolved by ADR 0015 via the structured `honest_failure_acceptable` field.
 - `_SSIM_WRAP_TOLERANCE`'s value (0.05) is evidenced against exactly one real geometry (the
   synthetic moving-circle sequence in `tests/test_rendering.py`), not calibrated against a real
   rendered page's own periodic motion — flagged, not hidden, same status as every other

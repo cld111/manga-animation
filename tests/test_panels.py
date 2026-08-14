@@ -224,6 +224,7 @@ def test_detection_is_deterministic_across_repeated_calls():
     assert [p.bbox.as_xyxy() for p in first] == [p.bbox.as_xyxy() for p in second]
     assert [p.confidence for p in first] == [p.confidence for p in second]
     assert [p.source for p in first] == [p.source for p in second]
+    assert [p.id for p in first] == [p.id for p in second]
 
 
 @pytest.mark.parametrize("width,height", [(720, 5062), (800, 2305), (800, 2216)])

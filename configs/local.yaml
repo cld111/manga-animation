@@ -1,9 +1,8 @@
 # Local development profile: Apple Silicon, no NVIDIA/CUDA — see docs/decisions for why the
 # same codebase must run here unchanged. `device: auto` already resolves to "mps" here via
-# PipelineConfig.resolve_device(), this file mainly trims resolution/workers for fast
-# iteration on a laptop rather than a GPU worker.
+# PipelineConfig.resolve_device(), this file mainly trims resolution for fast iteration on a
+# laptop rather than a GPU worker.
 
 dtype: float32 # MPS support for float16/bfloat16 is inconsistent across ops; keep float32 locally
 resolution: 1024 # smaller preview resolution for fast local iteration
-num_workers: 0 # avoid multiprocessing worker overhead on a single dev machine
 debug: true

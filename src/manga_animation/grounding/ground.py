@@ -15,7 +15,7 @@ from manga_animation.schemas.animation_plan import ObjectPlan
 
 
 def _prompt_from_label(semantic_label: str) -> str:
-    """"flag_cloth" -> "flag cloth." — Grounding DINO's phrase-prompt convention (see
+    """ "flag_cloth" -> "flag cloth." — Grounding DINO's phrase-prompt convention (see
 
     `GROUNDING_PROMPT` in `scripts/phase2_kaggle_benchmark.py`: period-separated phrases).
     """
@@ -98,6 +98,9 @@ def ground_object_candidates(
     at all, or when every detection's box lies (partially or fully) outside the image after
     clipping — never returns an empty list silently.
     """
+    if max_candidates < 1:
+        raise ValueError(f"max_candidates must be at least 1, got {max_candidates}")
+
     region = _grounding_region(image, panel_bbox_px)
     crop = image[region.y0 : region.y1, region.x0 : region.x1]
 

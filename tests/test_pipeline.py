@@ -75,6 +75,7 @@ class FakeVLMClient:
     def __init__(self, decisions: list[dict], *, verification_matches: bool = True):
         self._decisions = decisions
         self._verification_matches = verification_matches
+        self.unload_count = 0
 
     def generate(self, image, prompt: str) -> str:
         if _VALIDATION_PROMPT_MARKER in prompt:
@@ -86,6 +87,9 @@ class FakeVLMClient:
                 }
             )
         return json.dumps(self._decisions)
+
+    def unload(self) -> None:
+        self.unload_count += 1
 
 
 class ValidationSequenceVLMClient:
@@ -179,8 +183,7 @@ class FakeGroundingClient:
 
     def detect(self, image, text_prompt: str) -> list[Detection]:
         return [
-            Detection(label="banner", score=0.9 - 0.1 * i, box=b)
-            for i, b in enumerate(self.boxes)
+            Detection(label="banner", score=0.9 - 0.1 * i, box=b) for i, b in enumerate(self.boxes)
         ]
 
     def unload(self) -> None:
@@ -423,10 +426,11 @@ def test_run_pipeline_loads_and_unloads_grounding_and_segmentation_clients(
     page_path: Path, config, tmp_path: Path
 ):
     grounding_client = FakeGroundingClient()
+    vlm_client = FakeVLMClient([_primary_decision()])
     run_pipeline(
         page_path,
         config,
-        vlm_client=FakeVLMClient([_primary_decision()]),
+        vlm_client=vlm_client,
         grounding_client=grounding_client,
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
@@ -437,6 +441,7 @@ def test_run_pipeline_loads_and_unloads_grounding_and_segmentation_clients(
     # pipeline run.
     assert grounding_client.loaded is True
     assert grounding_client.unloaded is True
+    assert vlm_client.unload_count == 2  # analysis and validation are separate model stages
 
 
 # --- Phase 3.2: grounding-candidate validation ---------------------------------------------
@@ -468,7 +473,7 @@ def test_run_pipeline_accepts_the_only_candidate_when_it_passes_validation(
 def test_run_pipeline_tries_the_next_ranked_grounding_candidate_when_the_first_fails_validation(
     page_path: Path, config, tmp_path: Path
 ):
-    """"Attempt another ranked grounding candidate if available" (Phase 3.2 failure policy) --
+    """ "Attempt another ranked grounding candidate if available" (Phase 3.2 failure policy) --
 
     the first-ranked (highest-score) box fails semantic validation, so the orchestrator must
     fall through to the second-ranked box from the SAME `detect()` call, not fail the run.
@@ -498,7 +503,7 @@ def test_run_pipeline_tries_the_next_ranked_grounding_candidate_when_the_first_f
 def test_run_pipeline_raises_stage_validation_when_every_grounding_candidate_fails(
     page_path: Path, config, tmp_path: Path
 ):
-    """"Never silently animate an unvalidated candidate" -- when every ranked grounding
+    """ "Never silently animate an unvalidated candidate" -- when every ranked grounding
 
     candidate fails validation, the run must fail outright (stage="validation"), not fall
     back to the best-scoring-but-rejected one.
@@ -578,7 +583,7 @@ def test_run_pipeline_flag_banner_historical_regression_still_rejected_by_semant
 def test_run_pipeline_tries_next_candidate_when_first_fails_geometry_not_semantics(
     page_path: Path, config, tmp_path: Path
 ):
-    """"Attempt another ranked grounding candidate if available" (Phase 3.2 failure policy)
+    """ "Attempt another ranked grounding candidate if available" (Phase 3.2 failure policy)
 
     must also apply when the FIRST candidate is rejected by the NEW transform-geometry check,
     not only a semantic mismatch -- the retry loop is agnostic to WHY a candidate was rejected.
@@ -611,7 +616,7 @@ def test_run_pipeline_tries_next_candidate_when_first_fails_geometry_not_semanti
 def test_run_pipeline_fallback_plan_can_be_rejected_by_geometry_check(
     page_path: Path, config, tmp_path: Path
 ):
-    """"Never silently animate an unvalidated candidate" (Phase 3.2) now also covers geometric
+    """ "Never silently animate an unvalidated candidate" (Phase 3.2) now also covers geometric
 
     safety, not just semantic correctness -- a human-authored fallback plan whose grounded
     region is semantically right but geometrically unsafe for its transform_kind must still
@@ -875,7 +880,7 @@ def test_run_pipeline_with_explicit_plan_skips_analysis_vlm_call(
 def test_run_pipeline_fallback_plan_can_still_be_rejected_by_validation(
     page_path: Path, config, tmp_path: Path
 ):
-    """"Preserve the existing controlled fallback" does not mean "skip validation for it" --
+    """ "Preserve the existing controlled fallback" does not mean "skip validation for it" --
 
     a human-authored fallback plan whose grounded region fails semantic validation must still
     fail the run, not silently animate (see the Phase 3.2 acceptance criterion: "never
@@ -1752,9 +1757,7 @@ def test_run_pipeline_panel_aware_regression_on_real_action_page_geometry(config
     target_panel = gutter_panels[1] if len(gutter_panels) > 1 else real_panels[0]
     assert target_panel.bbox.width > 0 and target_panel.bbox.height > 0
 
-    panel_bbox_norm = bbox_px_to_normalized(
-        target_panel.bbox, page_width=width, page_height=height
-    )
+    panel_bbox_norm = bbox_px_to_normalized(target_panel.bbox, page_width=width, page_height=height)
     plan = AnimationPlan(
         source=SourceImage(path=str(_PHASE3_ACTION_PAGE), width=width, height=height),
         panels=[PanelPlan(panel_id="real_panel", bbox=panel_bbox_norm)],
@@ -1859,6 +1862,12 @@ def test_build_default_clients_does_not_require_torch_installed():
     assert grounding.model_id == "grounding-dino-swin-l"
     assert segmentation.model_id == "sam2.1-hiera-base"
     assert reconstruction is not None
+
+
+def test_build_default_clients_rejects_a_manifest_candidate_without_runtime_adapter():
+    config = load_config(overrides={"model_variants": {"grounding": "owlv2-vit-l14"}})
+    with pytest.raises(PipelineStageError, match="no production client"):
+        build_default_clients(config)
 
 
 # --- Phase 5.1: panel-aware grounding (docs/decisions/0011-panel-aware-grounding.md) --------

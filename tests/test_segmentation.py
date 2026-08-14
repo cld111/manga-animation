@@ -124,6 +124,21 @@ def test_segment_object_raises_on_empty_mask():
     assert exc_info.value.stage == "segmentation"
 
 
+@pytest.mark.parametrize(
+    "mask",
+    [
+        np.zeros((32, 64), dtype=np.uint8),
+        np.zeros((64, 64, 1), dtype=np.uint8),
+        np.zeros((64, 64), dtype=np.float32),
+    ],
+)
+def test_segment_object_rejects_masks_that_violate_source_geometry_or_dtype(mask):
+    mask[10, 10] = 255
+    client = FakeSegmentationClient([MaskCandidate(mask=mask, iou_score=0.9)])
+    with pytest.raises(PipelineStageError, match="mask"):
+        segment_object(make_image(), make_grounding(), client)
+
+
 def test_segment_object_raises_on_full_page_mask():
     full = np.full((64, 64), 255, dtype=np.uint8)
     client = FakeSegmentationClient([MaskCandidate(mask=full, iou_score=0.9)])

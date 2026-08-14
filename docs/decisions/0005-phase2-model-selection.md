@@ -1,6 +1,7 @@
 # 5. Phase 2 model selection — status and findings
 
-Status: Proposed — **every required stage now has at least one real, working result**.
+Status: Accepted (preliminary operational baseline; exhaustive cross-candidate selection
+remains open) — **every required stage now has at least one real, working result**.
 `deterministic-animation` and `video-rendering` have local, executed evidence and a
 recommended approach. `grounding` has two real remote-GPU passes (n=2, then n=6) with a
 leading candidate. `vlm`, `segmentation`, and `inpainting` each now have at least one
@@ -21,8 +22,8 @@ plus confirm technical feasibility for the two non-model stages
 never locally, and the assistant must ask the user for the server URL rather than guess or
 reuse a stale one — no URL was available for this ADR's first draft, but one was provided
 partway through this work and used for the `grounding`/`vlm` runs described below (see
-`docs/phase2-benchmark-results.md`'s "Second pass"). `segmentation` and `inpainting` are
-still untested — that GPU time ran out before reaching them; see "Open questions".
+`docs/phase2-benchmark-results.md`'s "Second pass"). The following sentence reflects the
+initial draft context only; later sections record real segmentation and inpainting runs.
 
 What this pass produced, all committed to git (the local canonical copy, per ADR 0002):
 
@@ -219,11 +220,11 @@ Every executed result above records, per the Phase 2 brief's reproducibility req
   worker can `git clone`/`git pull` rather than relying on ad hoc code transfer — closing a
   gap ADR 0002 had assumed was already true but wasn't (no remote existed before this ADR).
 
-## Consequences
+## Historical Consequences
 
-- No `configs/default.yaml` `model_variants` entries are populated by this ADR yet — every
-  stage's PRIMARY is still marked preliminary (single-page or few-page evidence, one
-  candidate per stage tried), not a finalized cross-candidate selection.
+- At the time of this ADR, no `configs/default.yaml` `model_variants` entries were populated.
+  The current file now contains the preliminary operational baseline; exhaustive
+  cross-candidate selection remains open. See `docs/current-status.md`.
 - Phase 3 (Animation Plan generation from real VLM output) can now start prototyping against
   `qwen2.5-vl-7b-instruct` + `device_map="auto"`, since it has confirmed working structured
   output — but should treat the PRIMARY/SECONDARY/MICRO distinction as unverified until
@@ -237,14 +238,14 @@ Every executed result above records, per the Phase 2 brief's reproducibility req
 - Any future `cv-agent` compositing implementation must alpha-blend `LamaAdapter`'s (or any
   inpainting candidate's) output through the mask onto an untouched source copy — never use
   it as a full-frame replacement, per the real pixel-alignment finding above.
-- This ADR should be superseded once every stage has moved past "one preliminary candidate"
-  to a real cross-candidate comparison with broader sample coverage and visual QA.
+- ADR 0004 is now superseded by this ADR. This ADR remains the historical source for the
+  preliminary baseline and its limitations.
 
-## Open questions (need further remote GPU time and/or user input)
+## Remaining Selection Questions
 
-- Does `qwen2.5-vl-7b-instruct` correctly assign PRIMARY/SECONDARY/MICRO on a page with an
-  actual drawn motion cue, or does it default to `static` regardless of what's on the page?
-  Neither tested page had an unambiguous motion cue, so this is still unknown.
+- Does `qwen2.5-vl-7b-instruct` generalize its PRIMARY/SECONDARY/MICRO decisions across a
+  broader set of art styles and motion cues? Later phases observed real motion plans, but
+  exhaustive model comparison is still open.
 - Does `qwen2.5-vl-7b-instruct` fit a single T4/L4 with int8/int4 quantization, for
   deployment profiles without 2 GPUs? Untested.
 - Exact `transformers`/`diffusers` API for candidates released after this assistant's
@@ -254,11 +255,9 @@ Every executed result above records, per the Phase 2 brief's reproducibility req
 - `mayocream/aot-inpainting`'s actual generator architecture and checkpoint format — its
   adapter currently raises `NotImplementedError` rather than guess; recorded as
   PENDING/NOT RUNNABLE.
-- Visual/qualitative review of SAM2.1 masks and LaMa fills — this pass only had numeric
-  access (IoU scores, pixel-diff statistics, coverage fractions) with no way to render or
-  view images from the Kaggle session. The project's actual acceptance bar for both stages
-  is fundamentally a visual judgment call that numeric proxies only approximate.
+- Visual/qualitative review of SAM2.1 masks and LaMa fills was completed for selected real
+  runs in later phases, but broader coverage remains a quality risk.
   `qwen3-vl-small`, `internvl3-8b`, `sam3`, `sdxl-inpainting`, `sam3-concept-grounding` — all
   committed, none run.
-- All real evidence so far is one MangaDex series (full-color manhwa) — a second, visually
-  distinct series (e.g. traditional black-and-white manga) has not been tested for any stage.
+- Later real-world evaluation expanded beyond the original single series; exhaustive
+  cross-candidate comparison across all styles remains open.

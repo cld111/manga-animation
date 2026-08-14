@@ -138,6 +138,7 @@ def test_run_benchmark_failure_is_recorded_not_raised(fail_on):
     assert result.latency_ms_mean is None
     assert result.candidate_id == candidate.id
     assert result.stage == candidate.stage
+    assert adapter.unloaded is True
 
 
 def test_run_sweep_skips_candidates_without_a_registered_adapter():

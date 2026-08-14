@@ -37,8 +37,9 @@ class LamaClient:
     `LamaAdapter`.
     """
 
-    def __init__(self, device: str = "cpu"):
+    def __init__(self, device: str = "cpu", model_id: str = "lama-large"):
         self.device = device
+        self.model_id = model_id
         self._model: object | None = None
 
     def load(self) -> None:

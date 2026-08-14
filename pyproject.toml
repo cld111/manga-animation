@@ -7,22 +7,21 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "manga-animation project" }]
 
-# Phase 1 dependencies are intentionally minimal. Heavy ML libraries
-# (torch, transformers, segment-anything, ultralytics, ...) are added
-# in Phase 2 once models have been benchmarked and selected, and are
-# kept in optional groups below so the base install stays lightweight
-# and hardware-agnostic (CPU / Apple MPS / CUDA).
+# Heavy ML libraries remain optional because they are installed on the remote
+# GPU worker. Classical CV is part of the normal development/runtime surface:
+# the implemented analysis, animation and rendering modules import cv2.
 dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "numpy>=1.26",
     "pillow>=10.3",
+    "opencv-python-headless>=4.9",
 ]
 
 [project.optional-dependencies]
-# Classical CV, needed once segmentation/animation/compositing stages
-# are implemented (Phase 2+). Not required for the Phase 1 foundation.
-cv = ["opencv-python-headless>=4.9"]
+# Kept as a named extra for compatibility with remote setup commands. The
+# dependency is also in the base set because production modules import cv2.
+cv = []
 
 # Video assembly (FFmpeg wrapper). The `ffmpeg` binary itself is a
 # system dependency and is not installed by pip.

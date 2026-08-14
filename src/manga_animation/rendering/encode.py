@@ -166,7 +166,7 @@ def render(
             input_ref=str(out_path),
             detail=(
                 f"frame count mismatch: expected {frames.frame_count}, "
-                f"got {validation['reported_frame_count']}"
+                f"got {validation['decoded_frame_count']} decoded frames"
             ),
             architectural=False,
             proposed_fix="check the input frame sequence for gaps/duplicates before encoding",
@@ -230,10 +230,10 @@ def render(
 
     return RenderResult(
         output_path=out_path,
-        frame_count=validation["reported_frame_count"],
+        frame_count=validation["decoded_frame_count"],
         fps=validation["reported_fps"],
         resolution=tuple(validation["resolution"]),
-        duration_s=validation["reported_frame_count"] / frames.fps,
+        duration_s=validation["decoded_frame_count"] / frames.fps,
         codec=codec,
         # Not independently re-derivable from cv2.VideoCapture (it doesn't reliably expose
         # pixel format) -- this is the value we *requested* and the encode did not error, not
@@ -351,7 +351,7 @@ def _validate(
         return {"demuxable": False}
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    reported_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -367,10 +367,12 @@ def _validate(
     return {
         "demuxable": True,
         "reported_fps": fps,
-        "reported_frame_count": frame_count,
+        "reported_frame_count": reported_frame_count,
+        "decoded_frame_count": len(frames),
         "resolution": (width, height),
         "fps_matches_expected": abs(fps - expected_fps) < 0.1,
-        "frame_count_within_one": abs(frame_count - expected_frame_count) <= 1,
+        "frame_count_within_one": abs(len(frames) - expected_frame_count) <= 1,
+        "metadata_frame_count_matches": abs(reported_frame_count - len(frames)) <= 1,
         "resolution_matches_expected": (width, height) == expected_resolution,
         "loop_metrics": loop_metrics,
     }

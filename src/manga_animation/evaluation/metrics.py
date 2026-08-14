@@ -245,7 +245,7 @@ def _reached_grounding(outcome: PageRunOutcome) -> bool:
     """Analysis produced a usable plan -- the run got at least as far as attempting grounding
 
     (whether or not grounding itself then succeeded)."""
-    return not (outcome.status == "failed" and outcome.failing_stage == "analysis")
+    return not (outcome.status == "failed" and outcome.failing_stage in ("analysis", "unexpected"))
 
 
 def _target_matches_expectation(

@@ -15,17 +15,11 @@ def test_defaults_are_valid():
 
 @pytest.mark.parametrize(
     "field,value",
-    [("fps", 0), ("fps", -5), ("resolution", 0), ("batch_size", 0), ("duration_s", 0.0)],
+    [("fps", 0), ("fps", -5), ("resolution", 0), ("duration_s", 0.0)],
 )
 def test_non_positive_values_are_rejected(field, value):
     with pytest.raises(ValidationError):
         PipelineConfig(**{field: value})
-
-
-def test_num_workers_zero_is_allowed_but_negative_is_not():
-    assert PipelineConfig(num_workers=0).num_workers == 0
-    with pytest.raises(ValidationError):
-        PipelineConfig(num_workers=-1)
 
 
 def test_unknown_device_literal_is_rejected():

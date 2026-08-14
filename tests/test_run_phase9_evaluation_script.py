@@ -25,6 +25,7 @@ _spec.loader.exec_module(_module)
 _load_dataset = _module._load_dataset
 _check_missing_images = _module._check_missing_images
 _load_resume_state = _module._load_resume_state
+_run_fingerprint = _module._run_fingerprint
 _write_json = _module._write_json
 _render_rates_in_place = _module._render_rates_in_place
 
@@ -99,6 +100,16 @@ def test_load_resume_state_round_trips_a_previously_written_file(tmp_path):
     state = _load_resume_state(path)
     assert state["outcomes"]["page"] == written["outcomes"]["page"]
     assert state["nondeterminism"] == written["nondeterminism"]
+
+
+def test_run_fingerprint_changes_when_the_experiment_definition_changes():
+    from manga_animation.core.config import PipelineConfig
+
+    samples = _load_dataset(include_golden=False)
+    config = PipelineConfig(model_variants={"vlm": "candidate-a"})
+    first = _run_fingerprint("kaggle", config, samples, include_golden=False)
+    changed = _run_fingerprint("kaggle", config, samples, include_golden=True)
+    assert first != changed
 
 
 def test_write_json_creates_parent_directories(tmp_path):

@@ -453,6 +453,18 @@ def test_bbox_of_mask_rejects_empty_mask():
         bbox_of_mask(empty_mask)
 
 
+def test_shear_keeps_a_non_origin_pivot_fixed():
+    motion = make_motion(
+        transform_kind=TransformKind.SHEAR,
+        direction=Vector2(x=1.0, y=0.0),
+        amplitude=0.25,
+    )
+    pivot = (20.0, 30.0)
+    matrix = _affine_matrix(TransformKind.SHEAR, 1.0, motion, pivot, panel_diag_px=100.0)
+    transformed = matrix @ np.array([*pivot, 1.0], dtype=np.float32)
+    assert transformed == pytest.approx(pivot)
+
+
 # --- Phase 6: local-region transforms must match the old full-page implementation ---------
 
 

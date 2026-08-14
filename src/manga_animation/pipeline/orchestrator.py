@@ -33,6 +33,8 @@ decisions, only the wiring between their already-defined public entry points.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -46,6 +48,7 @@ from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame_stack
 from manga_animation.core.config import PipelineConfig
 from manga_animation.core.logging import StageTimer, get_logger
+from manga_animation.core.seed import set_global_seed
 from manga_animation.grounding import (
     GroundingClient,
     GroundingDinoClient,
@@ -296,6 +299,51 @@ def _candidate_source(stage: str, config: PipelineConfig) -> str:
     )
 
 
+_RUNTIME_CANDIDATES: dict[str, set[str]] = {
+    # Manifest entries without a production client remain benchmark candidates.
+    "vlm": {"qwen2.5-vl-7b-instruct"},
+    "grounding": {"grounding-dino-swin-l"},
+    "segmentation": {"sam2.1-hiera-base"},
+    "inpainting": {"lama-large"},
+}
+
+
+def _runtime_candidate(stage: str, config: PipelineConfig) -> tuple[str, str]:
+    candidate_id = config.model_variants.get(stage)
+    source = _candidate_source(stage, config)
+    if candidate_id not in _RUNTIME_CANDIDATES[stage]:
+        error_stage = "analysis" if stage == "vlm" else stage
+        raise PipelineStageError(
+            stage=error_stage,  # type: ignore[arg-type]
+            input_ref=candidate_id or stage,
+            detail=(
+                f"configured candidate {candidate_id!r} has no production client for stage "
+                f"{stage!r}"
+            ),
+            architectural=False,
+            proposed_fix=(
+                f"use one of {sorted(_RUNTIME_CANDIDATES[stage])} or implement/register an "
+                "adapter for the requested candidate"
+            ),
+        )
+    assert candidate_id is not None
+    return candidate_id, source
+
+
+def _unload_client(client: object) -> None:
+    unload = getattr(client, "unload", None)
+    if callable(unload):
+        unload()
+
+
+@contextmanager
+def _client_lifecycle(client: object) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        _unload_client(client)
+
+
 def build_default_clients(
     config: PipelineConfig,
 ) -> tuple[VLMClient, GroundingClient, SegmentationClient, ReconstructionClient]:
@@ -306,7 +354,11 @@ def build_default_clients(
     here is cheap and safe even without the `ml` extra installed.
     """
     device = config.resolve_device()
-    vlm_client = Qwen25VLClient(source=_candidate_source("vlm", config), dtype=config.dtype)
+    _, vlm_source = _runtime_candidate("vlm", config)
+    _, grounding_source = _runtime_candidate("grounding", config)
+    _, segmentation_source = _runtime_candidate("segmentation", config)
+    inpainting_id, _ = _runtime_candidate("inpainting", config)
+    vlm_client = Qwen25VLClient(source=vlm_source, dtype=config.dtype)
     # Real finding (Phase 3.1's first Kaggle run): Grounding DINO's processor produces
     # float32 pixel_values regardless of config.dtype, which raises "Input type (float) and
     # bias type (c10::Half) should be the same" against a float16-loaded model on this
@@ -316,13 +368,9 @@ def build_default_clients(
     # for the VLM stage. Hardcoding float32 here for these two stages reflects that real,
     # tested evidence rather than the single global config default; kaggle.yaml's own comment
     # already flagged dtype as something to "revisit per-model in Phase 2 if quality suffers".
-    grounding_client = GroundingDinoClient(
-        source=_candidate_source("grounding", config), device=device, dtype="float32"
-    )
-    segmentation_client = Sam21Client(
-        source=_candidate_source("segmentation", config), device=device, dtype="float32"
-    )
-    reconstruction_client = LamaClient(device=device)
+    grounding_client = GroundingDinoClient(source=grounding_source, device=device, dtype="float32")
+    segmentation_client = Sam21Client(source=segmentation_source, device=device, dtype="float32")
+    reconstruction_client = LamaClient(device=device, model_id=inpainting_id)
     return vlm_client, grounding_client, segmentation_client, reconstruction_client
 
 
@@ -394,11 +442,15 @@ def run_pipeline(
     `AnimationPlan` was produced, per ADR 0007's explicit decoupling from
     grounding/segmentation/animation. Pass `analysis_mode="page"` explicitly for the old default.
     """
+    set_global_seed(config.seed)
     device = config.resolve_device()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if plan is None:
-        with StageTimer("analysis", logger, device=device, model=config.model_variants.get("vlm")):
+        with (
+            _client_lifecycle(vlm_client),
+            StageTimer("analysis", logger, device=device, model=config.model_variants.get("vlm")),
+        ):
             plan = (
                 analyze_page_panels(image_path, vlm_client, config=config)
                 if analysis_mode == "panel"
@@ -478,7 +530,10 @@ def run_pipeline(
         finally:
             grounding_client.unload()
 
-    with StageTimer("validation", logger, device=device, model=config.model_variants.get("vlm")):
+    with (
+        _client_lifecycle(vlm_client),
+        StageTimer("validation", logger, device=device, model=config.model_variants.get("vlm")),
+    ):
         validation_attempts_by_object: dict[str, list[ValidationResult]] = {}
         accepted_by_object: dict[str, GroundingResult] = {}
         for obj in objects_to_animate:
@@ -646,7 +701,13 @@ def run_pipeline(
                 [mask for _, mask in layer.frames],
                 reconstruction_client,
                 object_id=obj.object_id,
-                model_id=config.model_variants.get("inpainting", "lama-large"),
+                model_id=str(
+                    getattr(
+                        reconstruction_client,
+                        "model_id",
+                        config.model_variants.get("inpainting", "unknown"),
+                    )
+                ),
             )
             if recon is not None:
                 reconstructions[obj.object_id] = recon

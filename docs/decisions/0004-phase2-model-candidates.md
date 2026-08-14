@@ -1,15 +1,14 @@
 # 4. Phase 2 model candidate shortlist and benchmark methodology
 
-Status: Proposed (shortlist only — no candidate is selected yet; selection requires the
-benchmark runs described below, which need the remote GPU worker)
+Status: Superseded by ADR 0005. This document remains the historical shortlist and benchmark
+methodology; it is not the active runtime model selection.
 
 ## Context
 
-Phase 1 ([0001](0001-hybrid-vlm-cv-architecture.md)) deliberately left `model_variants: {}`
-empty in `configs/default.yaml` — no model choice was made, only the pipeline shape and the
-config slot each choice will fill. Per the phases table in [README.md](../../README.md),
-Phase 2's job is to fill that slot: benchmark and select one model per stage (VLM,
-grounding, segmentation, inpainting) before Phase 3 starts generating real Animation Plans.
+The initial Phase 2 brief deliberately left `model_variants: {}` empty in
+`configs/default.yaml`. Later real GPU work established preliminary operational candidates;
+the current baseline and remaining selection uncertainty are summarized in
+[`docs/current-status.md`](../current-status.md) and ADR 0005.
 
 Per [0003](0003-remote-compute-workers.md), this machine has no CUDA GPU, and per standing
 project policy the pipeline is never run locally even as a smoke test — all actual model

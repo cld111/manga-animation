@@ -16,7 +16,6 @@ turning row/column uniformity profiles into `PanelCandidate`s.
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -200,7 +199,7 @@ def _whole_page_candidate(
 ) -> PanelCandidate:
     bbox = BBoxPx(x0=0, y0=0, x1=width, y1=height)
     return PanelCandidate(
-        id=f"panel_{uuid.uuid4().hex[:8]}",
+        id="panel_00_fallback_full_page",
         bbox=bbox,
         crop=image[0:height, 0:width].copy(),
         confidence=confidence,
@@ -221,7 +220,7 @@ def _to_candidate(image: ImageArray, leaf: _Leaf, index: int) -> PanelCandidate:
     metadata["context_margin_px"] = {"x": mx, "y": my}
     metadata["tight_bbox"] = (leaf.x0, leaf.y0, leaf.x1, leaf.y1)
     return PanelCandidate(
-        id=f"panel_{index:02d}_{uuid.uuid4().hex[:6]}",
+        id=f"panel_{index:02d}",
         bbox=bbox,
         crop=image[y0:y1, x0:x1].copy(),
         confidence=leaf.confidence,
@@ -263,8 +262,11 @@ def detect_panels(image: ImageArray) -> list[PanelCandidate]:
         ]
 
     page_area = w * h
-    kept = [leaf for leaf in leaves if ((leaf.x1 - leaf.x0) * (leaf.y1 - leaf.y0)) / page_area
-            >= _MIN_PANEL_AREA_FRACTION]
+    kept = [
+        leaf
+        for leaf in leaves
+        if ((leaf.x1 - leaf.x0) * (leaf.y1 - leaf.y0)) / page_area >= _MIN_PANEL_AREA_FRACTION
+    ]
     if not kept:
         return [
             _whole_page_candidate(

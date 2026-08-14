@@ -21,16 +21,16 @@ Remote GPU sessions are ephemeral compute workers, never the canonical project (
 [0002](0002-local-canonical-source.md)), and hardware differences between them are
 resolved entirely through `PipelineConfig` (`src/manga_animation/core/config.py`) plus
 layered YAML profiles in `configs/` (`default.yaml`, `local.yaml`, `kaggle.yaml`) —
-never through code branching on "am I local or remote" or hardcoded device/dtype/batch
-values inside a pipeline stage.
+never through code branching on "am I local or remote" or hardcoded device/dtype values
+inside a pipeline stage.
 
 Concretely:
 
 - `device: auto` resolves to `cuda` > `mps` > `cpu` at runtime (`PipelineConfig.resolve_device()`),
   so the same default config is safe to check out on any of the three profiles.
 - Anything that must actually differ per environment (`dtype: float16` on Kaggle vs.
-  `float32` locally where MPS op support is inconsistent; `resolution`; `batch_size`;
-  `num_workers`) lives in the environment's YAML profile, loaded via
+  `float32` locally where MPS op support is inconsistent; `resolution`) lives in the
+  environment's YAML profile, loaded via
   `load_config(env="kaggle")` / `load_config(env="local")`.
 - If a task requires reaching an actual Kaggle/Jupyter server, the URL is requested from
   the user explicitly, every time — never invented, never assumed carried over from a prior

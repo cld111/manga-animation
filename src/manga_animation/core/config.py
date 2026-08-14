@@ -40,14 +40,9 @@ class PipelineConfig(BaseModel):
     fps: int = Field(gt=0, le=60, default=24)
     duration_s: float = Field(gt=0.0, le=30.0, default=4.0)
 
-    batch_size: int = Field(gt=0, default=1)
-    num_workers: int = Field(ge=0, default=0)
-
     output_codec: Codec = "h264"
     debug: bool = False
     seed: int = 42
-
-    output_dir: Path = Path("outputs")
 
     def resolve_device(self) -> Literal["cpu", "cuda", "mps"]:
         """Resolve "auto" to a concrete device, without requiring torch to be installed."""
