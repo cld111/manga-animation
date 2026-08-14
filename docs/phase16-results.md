@@ -90,6 +90,30 @@ seamless loop verified on the source frame sequence (wrap step 2.26 <= 2x ordina
 pixels ~6.1. (The decoded H.264 stream shows the expected bounded codec noise, max diff
 255 on mask-edge pixels, consistent with the project's known codec-noise contract.)
 
+### Run 3: full end-to-end pipeline on `omniscient_reader_blade`
+
+`run_phase16_gpu_effects.py --pages examples/realworld/omniscient_reader_blade.png`.
+
+Panel status: `[PASS]`.
+
+- `obj_raised_sword_4` (PRIMARY, rotate): grounding candidate rank 0 semantic ACCEPT but
+  geometry REJECT (bbox flush to panel edge, 0% margin); rank 1 ACCEPT both; SAM mask
+  accepted; mask-semantics **ACCEPT** ("The bright region shows only the raised sword
+  without any additional content", confidence 1.0); rendered.
+- `obj_speed_lines_3` (secondary, mesh_warp): ALL grounding candidates semantically REJECT
+  because the grounded crops contained dialogue text and clothing, not speed lines. This is
+  the artwork-preservation goal working on a real example: the effect was not grounded, so
+  the dialogue text it pointed at was NOT animated. Dropped; PRIMARY unaffected.
+- `obj_character_hair_0` (secondary, translate): geometry REJECT on a 63.1%-area candidate;
+  a second candidate passed geometry but SAM produced an asymmetric edge-hugging mask
+  (right edge 45.3% vs left 2.7%) caught by the Phase 8.3 edge-asymmetry gate. Dropped.
+- `obj_character_clothing_1` (secondary, mesh_warp): geometry REJECT (63.4% area > 35%
+  bound). Dropped.
+
+Numerical verification of the rendered PASS video: seamless loop verified on the source
+frame sequence (wrap step 0.27 <= 2x ordinary step 0.24); 94.5% of pixels static across
+sampled frames; motion localized to the sword region.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
@@ -100,9 +124,16 @@ analysis signal run above is the informative evidence for it.
 
 ## Classification and next steps
 
-Classified **GOOD** for the speed-lines path (first end-to-end drawn-effect animation with
-the seamless loop verified); the RADIAL_EXPAND path was not yet exercised end-to-end on a
-real render (`impact_burst` fail-closed for geometric reasons on the one page tried).
+Classified **GOOD** for the drawn-effect and artwork-preservation paths, based on three
+real short runs:
+
+- speed-lines PRIMARY rendered end-to-end (`wind_breaker_sprint`, seamless loop verified);
+- a secondary speed-lines candidate whose grounding pointed at dialogue text was correctly
+  fail-closed rather than animating the text (`omniscient_reader_blade`);
+- ordinary objects still map to their pre-Phase-16 transform kinds on every page tried.
+
+The RADIAL_EXPAND path was not yet exercised end-to-end on a real render (`impact_burst`
+fail-closed for geometric reasons on the one page where the VLM proposed it).
 
 Next steps (see `docs/current-status.md` Immediate Priorities):
 1. Exercise RADIAL_EXPAND on a real impact/energy panel whose effect mask passes geometric
