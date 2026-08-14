@@ -289,7 +289,7 @@ _MOTION_TYPE_RANK: dict[MotionType, int] = {
 
 
 def _rank_candidates(
-    decisions: list[_RawObjectDecision], image_ref: str
+    decisions: list[_RawObjectDecision], image_ref: str, *, allow_all_static: bool = False
 ) -> list[_RawObjectDecision]:
     """Rank every non-STATIC decision best-to-worst as a candidate for the plan's single
     animated object -- the "ranked animation candidates" analysis representation Phase 3.2
@@ -308,6 +308,8 @@ def _rank_candidates(
     the case where non-STATIC signal existed but wasn't labeled "primary".
     """
     candidates = [d for d in decisions if d.motion_type != MotionType.STATIC]
+    if not candidates and allow_all_static:
+        return []
     if not candidates:
         raise PipelineStageError(
             stage="analysis",
@@ -412,6 +414,8 @@ def build_plan(
     image: Image.Image,
     image_path: Path,
     config: PipelineConfig,
+    *,
+    allow_all_static: bool = False,
 ) -> AnimationPlan:
     """Assemble the final schema-valid `AnimationPlan` from validated VLM decisions.
 
@@ -420,7 +424,23 @@ def build_plan(
     `_non_primary_object_plan`'s docstring). Only a decision the VLM marked STATIC, or an extra
     PRIMARY that lost to a higher-confidence one, still becomes STATIC in the emitted plan.
     """
-    ranked = _rank_candidates(decisions, str(image_path))
+    ranked = _rank_candidates(decisions, str(image_path), allow_all_static=allow_all_static)
+    if not ranked:
+        width, height = image.size
+        source = SourceImage(
+            path=str(image_path), width=width, height=height, checksum=_checksum(image_path)
+        )
+        panel = PanelPlan(panel_id=_PANEL_ID, bbox=BBox(x=0.0, y=0.0, width=1.0, height=1.0))
+        static_objects = [
+            _non_primary_object_plan(decision, index, _PANEL_ID, image_path)
+            for index, decision in enumerate(decisions)
+        ]
+        return AnimationPlan(
+            source=source,
+            panels=[panel],
+            objects=static_objects,
+            loop=LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True),
+        )
     chosen = ranked[0]
     rest = [d for d in decisions if d is not chosen]
 
@@ -484,7 +504,13 @@ def _resized_for_vlm(image: Image.Image, max_long_edge: int) -> Image.Image:
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 
-def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig) -> AnimationPlan:
+def analyze_page(
+    image_path: Path,
+    client: VLMClient,
+    *,
+    config: PipelineConfig,
+    allow_all_static: bool = False,
+) -> AnimationPlan:
     """Public entry point: real manga page -> validated `AnimationPlan`.
 
     Raises `PipelineStageError` (never silently invents a plan) if the VLM's output can't be
@@ -493,7 +519,9 @@ def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig)
     image = Image.open(image_path).convert("RGB")
     vlm_image = _resized_for_vlm(image, config.resolution)
     decisions = _decisions_from_vlm(client, vlm_image, str(image_path))
-    return build_plan(decisions, image, image_path, config)
+    return build_plan(
+        decisions, image, image_path, config, allow_all_static=allow_all_static
+    )
 
 
 # --- Phase 3.3: panel-aware analysis --------------------------------------------------------
@@ -512,7 +540,10 @@ def analyze_page(image_path: Path, client: VLMClient, *, config: PipelineConfig)
 
 
 def _rank_panel_candidates(
-    decisions: list[tuple[str, _RawObjectDecision]], image_ref: str
+    decisions: list[tuple[str, _RawObjectDecision]],
+    image_ref: str,
+    *,
+    allow_all_static: bool = False,
 ) -> list[tuple[str, _RawObjectDecision]]:
     """Panel-tagged counterpart of `_rank_candidates` -- identical `(motion_type priority,
     confidence)` ranking (see that function's docstring for the full rationale, unchanged
@@ -525,6 +556,8 @@ def _rank_panel_candidates(
     that would let VLM nondeterminism silently overrule a real panel-level finding.
     """
     candidates = [(pid, d) for pid, d in decisions if d.motion_type != MotionType.STATIC]
+    if not candidates and allow_all_static:
+        return []
     if not candidates:
         raise PipelineStageError(
             stage="analysis",
@@ -556,6 +589,8 @@ def _build_plan_from_panels(
     image: Image.Image,
     image_path: Path,
     config: PipelineConfig,
+    *,
+    allow_all_static: bool = False,
 ) -> AnimationPlan:
     """Panel-aware counterpart of `build_plan` -- identical object-construction/heuristic logic
     (see that function's docstring), the only differences being that each `ObjectPlan.panel_id`
@@ -565,7 +600,20 @@ def _build_plan_from_panels(
     geometry (used e.g. by `pivot.reference="panel"`) instead of the page-level path's
     always-`(0, 0, 1, 1)` placeholder.
     """
-    ranked = _rank_panel_candidates(decisions, str(image_path))
+    ranked = _rank_panel_candidates(
+        decisions, str(image_path), allow_all_static=allow_all_static
+    )
+    if not ranked:
+        width, height = image.size
+        source = SourceImage(
+            path=str(image_path), width=width, height=height, checksum=_checksum(image_path)
+        )
+        static_objects = [
+            _non_primary_object_plan(decision, index, panel_id, image_path)
+            for index, (panel_id, decision) in enumerate(decisions)
+        ]
+        loop = LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True)
+        return AnimationPlan(source=source, panels=panels, objects=static_objects, loop=loop)
     chosen_panel_id, chosen = ranked[0]
     rest = [(pid, d) for pid, d in decisions if d is not chosen]
 
@@ -605,7 +653,11 @@ def _build_plan_from_panels(
 
 
 def analyze_page_panels(
-    image_path: Path, client: VLMClient, *, config: PipelineConfig
+    image_path: Path,
+    client: VLMClient,
+    *,
+    config: PipelineConfig,
+    allow_all_static: bool = False,
 ) -> AnimationPlan:
     """Panel-aware entry point: real manga page -> validated `AnimationPlan`, analyzed panel by
     panel (via `analysis/panels.py::detect_panels`) instead of as one whole-page VLM call.
@@ -642,7 +694,9 @@ def analyze_page_panels(
             "falling back to page-level analysis",
             image_path,
         )
-        return analyze_page(image_path, client, config=config)
+        return analyze_page(
+            image_path, client, config=config, allow_all_static=allow_all_static
+        )
 
     tagged_decisions: list[tuple[str, _RawObjectDecision]] = []
     any_panel_produced_decisions = False
@@ -668,7 +722,9 @@ def analyze_page_panels(
             "for %s -- falling back to page-level analysis",
             image_path,
         )
-        return analyze_page(image_path, client, config=config)
+        return analyze_page(
+            image_path, client, config=config, allow_all_static=allow_all_static
+        )
 
     panels = [
         PanelPlan(
@@ -680,4 +736,11 @@ def analyze_page_panels(
         )
         for candidate in panel_candidates
     ]
-    return _build_plan_from_panels(tagged_decisions, panels, image, image_path, config)
+    return _build_plan_from_panels(
+        tagged_decisions,
+        panels,
+        image,
+        image_path,
+        config,
+        allow_all_static=allow_all_static,
+    )

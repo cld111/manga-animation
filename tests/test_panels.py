@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from manga_animation.analysis.panels import detect_panels
+from manga_animation.analysis.panels import derive_scene_crop_bbox, detect_panels
+from manga_animation.pipeline.types import BBoxPx
 
 
 def _blank_page(width: int, height: int, color: tuple[int, int, int] = (255, 255, 255)):
@@ -225,6 +226,29 @@ def test_detection_is_deterministic_across_repeated_calls():
     assert [p.confidence for p in first] == [p.confidence for p in second]
     assert [p.source for p in first] == [p.source for p in second]
     assert [p.id for p in first] == [p.id for p in second]
+
+
+def test_scene_crop_preserves_context_beyond_logical_panel_bbox():
+    panel = BBoxPx(x0=20, y0=30, x1=120, y1=130)
+    crop = derive_scene_crop_bbox(panel, (400, 400))
+
+    assert crop.x0 < panel.x0
+    assert crop.y0 < panel.y0
+    assert crop.x1 > panel.x1
+    assert crop.y1 > panel.y1
+
+
+def test_scene_crop_stops_before_adjacent_panel_content():
+    panel = BBoxPx(x0=0, y0=0, x1=280, y1=300)
+    neighbor = BBoxPx(x0=320, y0=0, x1=600, y1=300)
+    crop = derive_scene_crop_bbox(
+        panel,
+        (300, 600),
+        neighboring_panel_bboxes=(panel, neighbor),
+    )
+
+    assert panel.x1 <= crop.x1 < neighbor.x0
+    assert crop.y1 == panel.y1
 
 
 @pytest.mark.parametrize("width,height", [(720, 5062), (800, 2305), (800, 2216)])

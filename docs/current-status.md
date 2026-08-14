@@ -7,20 +7,26 @@ evidence remain in `docs/phase*-results.md`; decision rationale remains in `docs
 ## Status
 
 The deterministic pipeline and local test/evaluation infrastructure are implemented through
-Phase 12. Real model execution remains a remote-GPU operation. The project is an engineering
-prototype with real end-to-end evidence and known real-world visual limitations, not a
-production animation service.
+Phase 13's panel-first orchestration. Real model execution remains a remote-GPU operation. The
+project is an engineering prototype with real end-to-end evidence and known real-world visual
+limitations, not a production animation service.
 
 ## Current Pipeline
 
 The implemented order is:
 
 ```text
-analysis -> grounding -> validation -> segmentation -> mask_semantics -> animation
--> reconstruction -> compositing -> rendering
+page -> deterministic panel detection -> bounded scene crops
+  -> independent analysis -> grounding -> validation -> segmentation -> mask_semantics
+  -> animation -> reconstruction -> compositing -> rendering
 ```
 
-- Analysis is panel-aware by default; page analysis remains explicit.
+- `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
+  its own scene crop, independent stages, output video or explicit status, and a page manifest.
+- `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
+  is bounded by page edges and nearby panel geometry.
+- Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result
+  is recorded as `STATIC` by the panel runner without inventing a video.
 - Grounding uses a real panel crop when analysis provides one and returns page coordinates.
 - `validation` checks grounded bbox plausibility, semantic agreement, and transform geometry
   before segmentation.
@@ -78,6 +84,8 @@ conclusion. Candidates without implemented adapters remain research entries.
 - Crossfade frames remain zero, and `h264` is the only supported output codec.
 - A semantic all-STATIC result is valid analysis evidence, but the current render contract
   rejects an all-STATIC plan because it has no target to render.
+- Ambiguous grounded objects that materially cross into another logical panel are rejected;
+  panel processing and unrelated panel outputs continue independently.
 
 ## Validated Capabilities and Evidence
 
@@ -128,20 +136,27 @@ conclusion. Candidates without implemented adapters remain research entries.
   for a held-out calibration study.
 - The full 10-sample real-world evaluation has not been rerun after enabling semantic mask
   validation, so the Phase 9 completion metrics are not a post-gate quality claim.
+- Phase 13's panel-first implementation has local behavioral coverage and fake-client end-to-end
+  coverage for multiple outputs, crop bounds, failure isolation, manifest fields, resumability,
+  and cross-panel rejection. Representative real GPU validation and native-resolution visual
+  review for the new runner are still pending because the supplied Jupyter proxy URL returned
+  `404` and did not expose a usable notebook endpoint.
 
 ## Immediate Priorities
 
 These are future work, not implemented capabilities:
 
-1. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
+1. Run targeted real GPU panel validation on a reachable remote worker and inspect representative
+   panel videos/crops at native resolution.
+2. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
    before changing thresholds or claiming generalization.
-2. Run a bounded context-size study for mask verification and establish a genuine development/
+3. Run a bounded context-size study for mask verification and establish a genuine development/
    held-out split when data volume permits.
-3. Collect targeted same-category multi-instance evidence before designing instance-identity
+4. Collect targeted same-category multi-instance evidence before designing instance-identity
    validation.
-4. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
+5. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
    speculative geometry thresholds from one instance.
-5. Treat articulated part-level animation and scene transitions as design-only future concepts,
+6. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
 
 ## Verification and Workflow

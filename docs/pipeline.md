@@ -7,8 +7,14 @@ results live in `docs/phase*-results.md` and are not normative unless linked her
 Manga page
     │
     ▼
+Deterministic panel extraction  — src/manga_animation/analysis/panels.py
+    │  logical panel_bbox -> bounded scene_crop_bbox
+    ▼
+Independent panel unit          — src/manga_animation/pipeline/panels.py
+    │  one crop, status, output and manifest record per panel
+    ▼
 Panel / scene analysis          — src/manga_animation/analysis
-    │  detect panels and establish per-panel context
+    │  establish per-panel semantic context
     ▼
 VLM semantic understanding      — src/manga_animation/analysis
     │  identify objects, action cues and justified motion
@@ -51,6 +57,17 @@ Decoded-output validation        — src/manga_animation/rendering
     ▼
 H.264 video                      — src/manga_animation/rendering
 ```
+
+`run_page_panels` is the page-level production entry point. It does not duplicate the stage
+implementation: it writes each scene crop and invokes the existing `run_pipeline` once per
+panel. The scene crop, not the strict logical `panel_bbox`, is the source image for grounding,
+segmentation, CV transforms, reconstruction, compositing and video rendering. Page-space
+coordinates are recovered for cross-panel safety checks by adding the scene crop origin.
+
+Each panel is recorded as `PASS`, `STATIC`, `REJECTED` or `ERROR`. A page manifest is written
+after every panel so successful outputs can be reused and a later panel failure cannot erase
+earlier results. A materially ambiguous grounded bbox crossing another logical panel is safely
+rejected; no object splitting, synchronization or ownership graph is attempted.
 
 The implementation order is intentionally `animation -> reconstruction`: reconstruction
 needs transformed masks to know what motion reveals. The layer and safety-gate blocks are
@@ -95,6 +112,9 @@ must not be reported as if they were active runtime models.
 - Raw composited frames preserve pixels outside transformed masks exactly.
 - H.264 decoding may introduce bounded codec noise; decoded validation is separate from the
   raw-frame pixel invariant.
+- `panel_bbox` describes logical panel geometry; `scene_crop_bbox` is the bounded processing and
+  output canvas. Scene crops contain their logical panel, remain in page bounds, and stop at
+  nearby-panel midpoints where a gutter exists.
 
 ## STATIC Results
 

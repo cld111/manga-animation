@@ -156,6 +156,51 @@ class PanelCandidate:
                 f"extent {expected} -- crop must be exactly image[bbox]"
             )
 
+    @property
+    def panel_bbox(self) -> BBoxPx:
+        """The logical panel rectangle before detector context padding."""
+        tight = self.metadata.get("tight_bbox")
+        if isinstance(tight, (tuple, list)) and len(tight) == 4:
+            return BBoxPx(*(int(value) for value in tight))
+        return self.bbox
+
+
+PanelStatus = Literal["PASS", "STATIC", "REJECTED", "ERROR"]
+
+
+@dataclass
+class PanelUnit:
+    """One independently processable panel and its persisted outcome."""
+
+    page_id: str
+    panel_id: str
+    panel_order: int
+    panel_bbox: BBoxPx
+    scene_crop_bbox: BBoxPx
+    source_page: Path
+    scene_crop_path: Path
+    status: PanelStatus = "ERROR"
+    output_video: Path | None = None
+    failure_stage: str | None = None
+    failure_reason: str | None = None
+    metrics: dict[str, int | float] = field(default_factory=dict)
+
+    def as_manifest_dict(self) -> dict[str, Any]:
+        return {
+            "page_id": self.page_id,
+            "panel_id": self.panel_id,
+            "order": self.panel_order,
+            "panel_bbox": self.panel_bbox.as_xyxy(),
+            "scene_crop_bbox": self.scene_crop_bbox.as_xyxy(),
+            "source_page": str(self.source_page),
+            "source_crop": str(self.scene_crop_path),
+            "status": self.status,
+            "output_video": str(self.output_video) if self.output_video is not None else None,
+            "failure_stage": self.failure_stage,
+            "failure_reason": self.failure_reason,
+            "metrics": self.metrics,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class GroundingResult:

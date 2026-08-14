@@ -118,6 +118,32 @@ def _bbox_intersects(a: BBoxPx, b: BBoxPx) -> bool:
     return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
 
 
+def _bbox_intersection_area(a: BBoxPx, b: BBoxPx) -> int:
+    if not _bbox_intersects(a, b):
+        return 0
+    return max(0, min(a.x1, b.x1) - max(a.x0, b.x0)) * max(
+        0, min(a.y1, b.y1) - max(a.y0, b.y0)
+    )
+
+
+def _cross_panel_conflict(
+    bbox: BBoxPx,
+    current_panel_bbox: BBoxPx,
+    neighboring_panel_bboxes: tuple[BBoxPx, ...],
+) -> BBoxPx | None:
+    """Return a neighboring panel crossed by a materially ambiguous candidate bbox."""
+    bbox_area = bbox.width * bbox.height
+    if bbox_area <= 0:
+        return None
+    for neighbor in neighboring_panel_bboxes:
+        if neighbor == current_panel_bbox:
+            continue
+        overlap_fraction = _bbox_intersection_area(bbox, neighbor) / bbox_area
+        if overlap_fraction >= 0.10:
+            return neighbor
+    return None
+
+
 def _mask_overlap_fraction(
     mask_a: MaskArray, bbox_a: BBoxPx, mask_b: MaskArray, bbox_b: BBoxPx
 ) -> float:
@@ -423,6 +449,11 @@ def run_pipeline(
     out_dir: Path,
     plan: AnimationPlan | None = None,
     analysis_mode: Literal["page", "panel"] = "panel",
+    global_origin: tuple[int, int] = (0, 0),
+    logical_panel_bbox_px: BBoxPx | None = None,
+    neighboring_panel_bboxes: tuple[BBoxPx, ...] = (),
+    video_filename: str = "output.mp4",
+    frames_dir: Path | None = None,
 ) -> PipelineRunResult:
     """Run the complete pipeline (analysis through rendering, with Phase 3.2's grounding-
     validation gate) on one real manga page.
@@ -573,6 +604,48 @@ def run_pipeline(
             validation_attempts_by_object[obj.object_id] = attempts
 
             if accepted is not None:
+                if logical_panel_bbox_px is not None:
+                    ox, oy = global_origin
+                    local_bbox = accepted.bbox
+                    global_bbox = BBoxPx(
+                        x0=local_bbox.x0 + ox,
+                        y0=local_bbox.y0 + oy,
+                        x1=local_bbox.x1 + ox,
+                        y1=local_bbox.y1 + oy,
+                        score=local_bbox.score,
+                    )
+                    conflict = _cross_panel_conflict(
+                        global_bbox,
+                        logical_panel_bbox_px,
+                        neighboring_panel_bboxes,
+                    )
+                    if conflict is not None:
+                        reason = (
+                            f"grounded bbox {global_bbox.as_xyxy()} materially crosses logical "
+                            f"neighbor panel {conflict.as_xyxy()}; ambiguous cross-panel object "
+                            "animation is rejected conservatively"
+                        )
+                        if _is_primary(obj.object_id):
+                            raise PipelineStageError(
+                                stage="validation",
+                                input_ref=obj.object_id,
+                                detail=reason,
+                                root_cause=(
+                                    "object ownership cannot be safely attributed to one panel"
+                                ),
+                                architectural=False,
+                                proposed_fix=(
+                                    "leave the object static or provide a panel-local target"
+                                ),
+                            )
+                        dropped_objects.append(
+                            DroppedObjectResult(
+                                object_plan=obj,
+                                failing_stage="validation",
+                                reason=reason,
+                            )
+                        )
+                        continue
                 accepted_by_object[obj.object_id] = accepted
             elif _is_primary(obj.object_id):
                 # Per the Phase 3.2 failure policy: a candidate that clears grounding's own
@@ -825,10 +898,10 @@ def run_pipeline(
         frame_sequence = FrameSequence(frames=frames, fps=plan.loop.fps)
         render_result = render(
             frame_sequence,
-            out_dir / "output.mp4",
+            out_dir / video_filename,
             codec=config.output_codec,
             keep_frames=True,
-            frames_dir=out_dir / "frames",
+            frames_dir=frames_dir or out_dir / "frames",
         )
 
     secondary_results = [

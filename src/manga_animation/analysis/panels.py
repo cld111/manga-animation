@@ -71,6 +71,12 @@ along this axis too. Per-row/per-column standard deviation alone cannot otherwis
 this long avoids a spurious cut straight down the middle of a real, single, flat-colored panel.
 See ADR 0007's "Open questions" -- this is a documented limitation, not a solved case."""
 
+_SCENE_CROP_MARGIN_FRACTION = 0.08
+"""Default context around a logical panel, bounded by nearby panel geometry."""
+
+_SCENE_CROP_MAX_MARGIN_PX = 256
+"""Prevent very large panels from importing an unnecessarily large neighboring scene."""
+
 
 @dataclass(frozen=True, slots=True)
 class _Leaf:
@@ -281,3 +287,75 @@ def detect_panels(image: ImageArray) -> list[PanelCandidate]:
     candidates = [_to_candidate(image, leaf, index) for index, leaf in enumerate(kept)]
     candidates.sort(key=lambda c: (c.bbox.y0, c.bbox.x0))
     return candidates
+
+
+def _overlap_length(start_a: int, end_a: int, start_b: int, end_b: int) -> int:
+    return max(0, min(end_a, end_b) - max(start_a, start_b))
+
+
+def derive_scene_crop_bbox(
+    panel_bbox: BBoxPx,
+    page_shape: tuple[int, int],
+    *,
+    neighboring_panel_bboxes: tuple[BBoxPx, ...] = (),
+    margin_fraction: float = _SCENE_CROP_MARGIN_FRACTION,
+    max_margin_px: int = _SCENE_CROP_MAX_MARGIN_PX,
+) -> BBoxPx:
+    """Expand a logical panel into a bounded scene canvas without swallowing neighbors.
+
+    Expansion is proportional to the panel dimensions, clipped at page boundaries, and clipped
+    at the midpoint of a nearby panel. The midpoint leaves gutter context while preventing a
+    crop from importing the neighboring panel's content.
+    """
+    if margin_fraction < 0.0 or max_margin_px < 0:
+        raise ValueError("margin_fraction and max_margin_px must be non-negative")
+    page_h, page_w = page_shape
+    if not (
+        0 <= panel_bbox.x0 < panel_bbox.x1 <= page_w
+        and 0 <= panel_bbox.y0 < panel_bbox.y1 <= page_h
+    ):
+        raise ValueError(
+            f"panel_bbox {panel_bbox.as_xyxy()} is outside page bounds ({page_w}x{page_h})"
+        )
+
+    margin_x = min(max_margin_px, round(panel_bbox.width * margin_fraction))
+    margin_y = min(max_margin_px, round(panel_bbox.height * margin_fraction))
+    touching_margin_x = max(1, margin_x // 4) if margin_x else 0
+    touching_margin_y = max(1, margin_y // 4) if margin_y else 0
+    left, top = max(0, panel_bbox.x0 - margin_x), max(0, panel_bbox.y0 - margin_y)
+    right, bottom = min(page_w, panel_bbox.x1 + margin_x), min(page_h, panel_bbox.y1 + margin_y)
+
+    for neighbor in neighboring_panel_bboxes:
+        if neighbor == panel_bbox:
+            continue
+        horizontal_overlap = _overlap_length(
+            panel_bbox.y0, panel_bbox.y1, neighbor.y0, neighbor.y1
+        )
+        vertical_overlap = _overlap_length(panel_bbox.x0, panel_bbox.x1, neighbor.x0, neighbor.x1)
+        if neighbor.x1 <= panel_bbox.x0 and horizontal_overlap:
+            if neighbor.x1 == panel_bbox.x0:
+                left = max(left, panel_bbox.x0 - touching_margin_x)
+            else:
+                left = max(left, (neighbor.x1 + panel_bbox.x0) // 2)
+        elif neighbor.x0 >= panel_bbox.x1 and horizontal_overlap:
+            if neighbor.x0 == panel_bbox.x1:
+                right = min(right, panel_bbox.x1 + touching_margin_x)
+            else:
+                right = min(right, (panel_bbox.x1 + neighbor.x0) // 2)
+        if neighbor.y1 <= panel_bbox.y0 and vertical_overlap:
+            if neighbor.y1 == panel_bbox.y0:
+                top = max(top, panel_bbox.y0 - touching_margin_y)
+            else:
+                top = max(top, (neighbor.y1 + panel_bbox.y0) // 2)
+        elif neighbor.y0 >= panel_bbox.y1 and vertical_overlap:
+            if neighbor.y0 == panel_bbox.y1:
+                bottom = min(bottom, panel_bbox.y1 + touching_margin_y)
+            else:
+                bottom = min(bottom, (panel_bbox.y1 + neighbor.y0) // 2)
+
+    return BBoxPx(
+        x0=left,
+        y0=top,
+        x1=max(panel_bbox.x1, right),
+        y1=max(panel_bbox.y1, bottom),
+    )
