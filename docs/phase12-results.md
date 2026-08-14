@@ -750,13 +750,13 @@ which is itself the strongest possible evidence of liveness for those windows.
 
 - **Branch**: `phase-12-semantic-validation` (created from `main` at `72c7470`, diverging after
   `d396b23`/Phase 11).
-- **Commits** (5 so far, more to follow for review-response fixes and this final report):
-  `25be433` (semantic mask validation gate), `60412af` (real benchmark + leaderboard + ADR
-  0018), `02df332` (VLM model-id resolution fix, found on the live GPU worker), `ea36203`
-  (TRANSLATE direction-vector fix, found on the live GPU worker), `61bb66f` (prompt-anchoring
-  fix, found on the live GPU worker).
-- **PR**: opened into `main` after this document and any adversarial-review fixes are committed
-  (see the end of this document for the final PR URL) — not merged, per the brief's explicit
-  instruction.
+- **Commits** (7): `25be433` (semantic mask validation gate), `60412af` (real benchmark +
+  leaderboard + ADR 0018), `02df332` (VLM model-id resolution fix, found on the live GPU
+  worker), `ea36203` (TRANSLATE direction-vector fix, found on the live GPU worker), `61bb66f`
+  (prompt-anchoring fix, found on the live GPU worker), `9d2a0bb` (this document's first draft),
+  `f2ccd8e` (adversarial review fixes: 3 independent reviewers, 2 real code fixes, 5 new
+  regression tests, corrected factual errors in this document).
+- **PR**: [#3](https://github.com/cld111/manga-animation/pull/3), opened into `main`, **not
+  merged**, per the brief's explicit instruction.
 - **Working tree**: clean at every commit point in this phase; verified via `git status` before
-  each push.
+  each push and immediately before opening the PR.
