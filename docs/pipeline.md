@@ -94,10 +94,20 @@ bbox-plausibility question but structurally the same kind of gate.
 
 ## Model Lifecycle
 
-Each model-backed stage owns its memory lifecycle. The VLM is released after analysis, target
-validation and semantic mask validation; grounding, segmentation and reconstruction release
-their clients in `finally` blocks. A benchmark adapter is also unloaded after success or
-failure.
+Model residency is stage-level and explicitly owned (Phase 14, ADR 0020). Each model-backed
+stage runs inside a `ModelStage` context manager (`src/manga_animation/pipeline/lifecycle.py`)
+that loads the client on entry and deterministically releases it on exit -- on success AND on
+exception -- by dropping references, collecting cyclic garbage, and flushing the CUDA caching
+allocator. `run_page_panels` processes panels stage-by-stage: analysis (VLM) for all eligible
+panels, then grounding (DINO), then validation (VLM), then segmentation (SAM), then semantic
+mask validation (VLM), then animation/reconstruction/compositing/rendering (LaMa loaded once).
+One model family is resident at a time, never per-panel. A benchmark adapter is also unloaded
+after success or failure.
+
+The VLM's `device_map="auto"` client specifically requires `gc.collect()` before
+`torch.cuda.empty_cache()`; without it the ~16 GiB model survives `unload()` inside cyclic
+Python references until an opportunistic GC, racing the next load into a CUDA OOM (see
+docs/phase14-results.md).
 
 The production client factory accepts only candidates with an implemented adapter. Entries
 in `configs/benchmark_candidates.yaml` without an adapter remain research candidates and
