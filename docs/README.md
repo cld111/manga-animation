@@ -15,6 +15,7 @@ Current contracts must not be inferred from a historical phase report.
 | Stage order, ownership, lifecycle, and safety contracts | [`pipeline.md`](pipeline.md) | Stage changes and orchestration |
 | Animation Plan contract | [`animation-plan-schema.md`](animation-plan-schema.md) | Schema and motion-plan work |
 | Architectural decisions | [`decisions/`](decisions/) | Decision rationale and supersession history |
+| Remote Kaggle Jupyter workflow | [`kaggle-jupyter.md`](kaggle-jupyter.md) | Verified connection/execution/watchdog procedure for the remote GPU worker |
 | Experiment evidence | `phase*-results.md` | Historical provenance, metrics, and negative results |
 
 ADR status is authoritative within each ADR. ADR 0004 is superseded by ADR 0005; ADR 0005

@@ -194,5 +194,6 @@ changes move between local and remote only through git.
 - [`architecture.md`](architecture.md): stable engineering principles and invariants.
 - [`pipeline.md`](pipeline.md): current stage order, ownership, lifecycle, and safety contracts.
 - [`animation-plan-schema.md`](animation-plan-schema.md): machine-readable plan contract.
+- [`kaggle-jupyter.md`](kaggle-jupyter.md): verified remote-Kaggle connection/execution/watchdog procedure.
 - [`decisions/`](decisions/): accepted decisions, supersession, and rationale.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
