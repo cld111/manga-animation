@@ -107,6 +107,78 @@ def test_model_stage_rejects_reentrant_entry():
         stage.__exit__(None, None, None)
 
 
+def test_model_stage_enter_load_failure_does_not_poison_the_stage_object():
+    """Phase 15 adversarial review (HIGH/MEDIUM): Python does not call `__exit__` when
+    `__enter__` raises, so a failed client.load() must still reset the re-entrancy guard and
+    attempt the deterministic release. Otherwise the stage object stays permanently
+    'active' and any partial CUDA blocks a failed load allocated stay resident."""
+    client = TrackingClient()
+
+    def explode() -> None:
+        raise RuntimeError("simulated CUDA OOM during load")
+
+    client.load = explode  # type: ignore[method-assign]
+    stage = ModelStage(client, name="stage")
+    with pytest.raises(RuntimeError, match="simulated CUDA OOM"):
+        stage.__enter__()
+    # The guard was reset, so a later, successful entry is possible instead of a permanent
+    # "entered while already active" poisoning.
+    stage.auto_load = False
+    stage.__enter__()
+    assert stage._active
+    stage.__exit__(None, None, None)
+    assert not stage._active
+
+
+def test_model_stage_unload_failure_does_not_mask_the_stage_exception():
+    """Phase 15 adversarial review (HIGH): a raising client.unload() must not replace the
+    stage body's own exception (the root cause would be lost)."""
+    class ExplodingUnload(TrackingClient):
+        def unload(self) -> None:
+            raise RuntimeError("simulated empty_cache failure")
+
+    with pytest.raises(ValueError, match="body boom"):
+        with ModelStage(ExplodingUnload(), name="stage"):
+            raise ValueError("body boom")
+
+
+def test_model_stage_unload_failure_still_fails_a_successful_stage():
+    """Phase 15 adversarial review (HIGH): when the stage body succeeds but cleanup raises,
+    the failure is still surfaced (fail-closed) rather than silently swallowed."""
+    class ExplodingUnload(TrackingClient):
+        def unload(self) -> None:
+            raise RuntimeError("simulated empty_cache failure")
+
+    with pytest.raises(RuntimeError, match="simulated empty_cache failure"):
+        with ModelStage(ExplodingUnload(), name="stage"):
+            pass
+
+
+def test_model_stage_unload_failure_still_runs_release_device_memory():
+    """Phase 15 adversarial review (HIGH): the deterministic release must run even when the
+    client's unload() raises -- a failed unload must not skip the Phase 14 leak protection."""
+    from manga_animation.pipeline import lifecycle as lifecycle_module
+
+    class ExplodingUnload(TrackingClient):
+        def unload(self) -> None:
+            raise RuntimeError("simulated unload failure")
+
+    calls = []
+
+    def fake_release(device: str | None = None) -> None:
+        calls.append(device)
+
+    original = lifecycle_module.release_device_memory
+    lifecycle_module.release_device_memory = fake_release
+    try:
+        with pytest.raises(RuntimeError, match="simulated unload failure"):
+            with ModelStage(ExplodingUnload(), name="stage"):
+                pass
+    finally:
+        lifecycle_module.release_device_memory = original
+    assert calls == [None]  # release ran despite the unload failure
+
+
 # --- stage-level run_page_panels -------------------------------------------------------------
 
 

@@ -89,23 +89,53 @@ class ModelStage(AbstractContextManager["ModelStage"]):
         if self.auto_load:
             loader = getattr(self.client, "load", None)
             if callable(loader):
-                loader()
+                try:
+                    loader()
+                except BaseException:
+                    # Python never calls `__exit__` when `__enter__` raises, so a failed
+                    # load() would otherwise leave `_active=True` (poisoning this stage object
+                    # against any later reuse) and any CUDA caching-allocator blocks allocated
+                    # before the failure un-released. Reset the guard and attempt the same
+                    # deterministic release the normal exit path uses before the load error
+                    # propagates.
+                    self._active = False
+                    self._unload()
+                    raise
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        unload_error: BaseException | None = None
         try:
             self._unload()
+        except Exception as err:  # noqa: BLE001 -- cleanup must never mask the stage result
+            unload_error = err
         finally:
             self._active = False
-        # never swallow the stage's exception
+        if unload_error is not None:
+            if exc_type is None:
+                # The stage body completed; a cleanup failure still fails the run (fail-closed).
+                raise unload_error
+            # The stage body already raised: log the cleanup failure but never replace the
+            # stage's own exception -- a broken unload must not mask the real failure.
+            logger.warning(
+                "model stage %r: cleanup failed while unwinding a stage exception: %s",
+                self.name,
+                unload_error,
+            )
 
     def _unload(self) -> None:
         before_mb = self._allocated_mb()
         unloader = getattr(self.client, "unload", None)
-        if callable(unloader):
-            unloader()
-        release_device_memory(self.device)
-        _release_memory_log(before_mb, self._allocated_mb(), self.name)
+        try:
+            if callable(unloader):
+                unloader()
+        finally:
+            # The Phase 14 leak fix (gc.collect() -> empty_cache() -> ipc_collect()) must run
+            # even when the client's own unload() raises (e.g. a broken CUDA context after a
+            # real OOM can make empty_cache() fail): a failed unload must not silently skip the
+            # deterministic release of the previous stage's model.
+            release_device_memory(self.device)
+            _release_memory_log(before_mb, self._allocated_mb(), self.name)
 
     def _allocated_mb(self) -> float:
         try:
