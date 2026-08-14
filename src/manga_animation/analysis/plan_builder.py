@@ -264,20 +264,31 @@ _MOTION_HEURISTICS: list[tuple[tuple[str, ...], MotionSpec]] = [
             easing=Easing.EASE_IN_OUT,
         ),
     ),
+]
+
+_DEFAULT_MOTION = MotionSpec(
+    transform_kind=TransformKind.TRANSLATE,
+    direction=Vector2(x=1.0, y=0.0),
+    amplitude=0.02,
+    speed=1.0,
+    easing=Easing.EASE_IN_OUT,
+    pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+)
+
+# Phase 16: effect-class motion entries, keyed by SEMANTIC LABEL only (never the free-text
+# motion_description). Rationale (real Phase 16 GPU finding on `villainess_ending_scuffle`):
+# `_MOTION_HEURISTICS` matches on `semantic_label + motion_description`, and a VLM's
+# effect description routinely names the object it is attached to -- e.g. `impact_burst`
+# with "bursts outward from the weapon clash" matched the earlier `sword/blade/weapon`
+# entry and got a rigid ROTATE instead of the effect's natural RADIAL_EXPAND pulse. An
+# effect's own label ("impact_burst", "speed_lines", "smoke_cloud") is the trustworthy
+# signal; words inside its description must not override that. Evaluated BEFORE
+# `_MOTION_HEURISTICS` (so effect labels dominate object words in their own descriptions),
+# but only for the label itself.
+_EFFECT_LABEL_KEYWORDS: tuple[tuple[tuple[str, ...], MotionSpec], ...] = (
     (
-        (
-            "impact",
-            "burst",
-            "explosion",
-            "shockwave",
-            "energy",
-            "glow",
-            "pulse",
-            "aura",
-            "radiat",
-            "flash",
-            "shock wave",
-        ),
+        ("impact", "burst", "explosion", "shockwave", "energy", "glow", "pulse", "aura",
+         "radiat", "flash"),
         MotionSpec(
             transform_kind=TransformKind.RADIAL_EXPAND,
             amplitude=0.08,
@@ -328,7 +339,8 @@ _MOTION_HEURISTICS: list[tuple[tuple[str, ...], MotionSpec]] = [
         ),
     ),
     (
-        ("speed_line", "speed line", "motion_line", "motion line", "streak", "slash", "flow line"),
+        ("speed_line", "speed line", "motion_line", "motion line", "streak", "slash",
+         "flow line"),
         MotionSpec(
             transform_kind=TransformKind.MESH_WARP,
             amplitude=0.12,
@@ -337,20 +349,17 @@ _MOTION_HEURISTICS: list[tuple[tuple[str, ...], MotionSpec]] = [
             pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
         ),
     ),
-]
-
-_DEFAULT_MOTION = MotionSpec(
-    transform_kind=TransformKind.TRANSLATE,
-    direction=Vector2(x=1.0, y=0.0),
-    amplitude=0.02,
-    speed=1.0,
-    easing=Easing.EASE_IN_OUT,
-    pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
 )
 
 
 def _motion_spec_for(decision: _RawObjectDecision) -> MotionSpec:
-    haystack = f"{decision.semantic_label} {decision.motion_description or ''}".lower()
+    label = decision.semantic_label.lower()
+    # Effect labels dominate object words in their own description (see
+    # `_EFFECT_LABEL_KEYWORDS`'s rationale) -- but only the label decides effect class.
+    for keywords, template in _EFFECT_LABEL_KEYWORDS:
+        if any(kw in label for kw in keywords):
+            return template.model_copy(deep=True)
+    haystack = f"{label} {decision.motion_description or ''}".lower()
     for keywords, template in _MOTION_HEURISTICS:
         if any(kw in haystack for kw in keywords):
             return template.model_copy(deep=True)

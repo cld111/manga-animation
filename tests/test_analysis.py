@@ -375,6 +375,38 @@ def test_drawn_effects_get_effect_specific_motion_specs():
     assert spec.pivot.y == pytest.approx(0.5)
 
 
+def test_effect_label_dominates_object_words_in_its_description():
+    """Phase 16 regression (real GPU finding on `villainess_ending_scuffle`): an effect's
+    motion_description routinely names the object it is attached to ("bursts outward from
+    the weapon clash"), and matching on label+description let the earlier object heuristics
+    (`sword/blade/weapon` -> ROTATE) steal the effect and give it a rigid rotation instead
+    of its natural pulse. The effect's own label must decide the effect class; object words
+    inside its description must not override it."""
+    from manga_animation.analysis.plan_builder import _motion_spec_for, _RawObjectDecision
+    from manga_animation.schemas.animation_plan import MotionType
+
+    cases = [
+        ("impact_burst", "impact burst radiates around the sword swing", "radial_expand"),
+        ("impact_burst", "bursts outward from the weapon clash", "radial_expand"),
+        ("speed_lines", "speed lines streak behind the character's hand", "mesh_warp"),
+        ("smoke_cloud", "smoke drifts from the burning cloth", "mesh_warp"),
+        ("energy_field", "energy pulses around the character's arm", "radial_expand"),
+    ]
+    for label, desc, expected_kind in cases:
+        decision = _RawObjectDecision(
+            semantic_label=label,
+            motion_type=MotionType.SECONDARY,
+            confidence=0.7,
+            reason="x",
+            motion_description=desc,
+        )
+        spec = _motion_spec_for(decision)
+        assert spec.transform_kind.value == expected_kind, (
+            f"{label!r} with description {desc!r} should map to {expected_kind}, "
+            f"got {spec.transform_kind.value}"
+        )
+
+
 def test_analysis_prompt_explicitly_asks_for_drawn_effects_as_animation_targets():
     """Phase 16: the analysis prompt must instruct the VLM to list ALREADY-DRAWN effects
     (speed lines, impact bursts, energy fields, smoke, water, glow) as first-class animation
