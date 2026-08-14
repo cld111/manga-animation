@@ -47,6 +47,21 @@ class PipelineConfig(BaseModel):
     debug: bool = False
     seed: int = 42
 
+    enable_semantic_mask_validation: bool = Field(
+        default=True,
+        description=(
+            "Phase 12: run the post-segmentation semantic mask validation gate "
+            "(validation.mask_semantics.verify_mask_semantics) between segmentation and "
+            "animation. Defaults on, per this project's 'a clean honest REJECTED is preferable "
+            "to a visually corrupted PASS' precedent (docs/phase11-results.md section 7) -- the "
+            "gate exists specifically to catch the real, confirmed Phase 11 failure mode "
+            "(semantically over-inclusive real SAM masks that pass every existing geometric "
+            "check). Exposed as a config toggle rather than hardcoded so a caller that has "
+            "already characterized this gate's real false-rejection rate for its own dataset "
+            "can disable it deliberately -- see docs/decisions/0018-semantic-mask-validation.md."
+        ),
+    )
+
     output_dir: Path = Path("outputs")
 
     def resolve_device(self) -> Literal["cpu", "cuda", "mps"]:

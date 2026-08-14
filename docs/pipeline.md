@@ -34,6 +34,12 @@ Target validation                — src/manga_animation/validation
 Precise segmentation            — src/manga_animation/segmentation
     │  pixel-accurate masks per grounded object (e.g. SAM-family model)
     ▼
+Semantic mask validation         — src/manga_animation/validation (mask_semantics.py)
+    │  ACCEPT/REJECT/ABSTAIN: does the real mask's own pixel content match the intended
+    │  target, not just "is this box a plausible location for it" (Phase 12 — see
+    │  docs/decisions/0018-semantic-mask-validation.md; a geometrically unremarkable mask
+    │  is not automatically a semantically correct one)
+    ▼
 Deterministic / kinematic       — src/manga_animation/animation
 animation                       │  apply each animated object's MotionSpec: translate/rotate/
     │                             scale/shear/mesh_warp/opacity, via OpenCV/NumPy transforms.
@@ -97,6 +103,13 @@ though, it calls into the VLM through the same `VLMClient` protocol `analysis/cl
 already defines (a cheap crop-verification call, not a full-page analysis call) rather than
 adding a new model dependency — so a validation-quality question is fair game for
 `vision-agent` to weigh in on too, even though `segmentation-agent` owns the code.
+
+The **semantic mask validation** stage (`src/manga_animation/validation/mask_semantics.py`,
+Phase 12 — see [ADR 0018](decisions/0018-semantic-mask-validation.md)) is owned by
+`segmentation-agent` too, for the same reason: it lives in the same `validation` package,
+consumes `segmentation`'s own real mask output, and its job ("does the real mask's content
+match the label") is a mask-quality question, distinct from `validate_target`'s pre-segmentation
+bbox-plausibility question but structurally the same kind of gate.
 
 ## Why the Animation Plan sits where it does
 
