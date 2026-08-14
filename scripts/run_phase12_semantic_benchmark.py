@@ -53,6 +53,7 @@ from manga_animation.schemas.animation_plan import (
     ObjectPlan,
     PivotSpec,
     TransformKind,
+    Vector2,
 )
 from manga_animation.validation.mask_semantics import verify_mask_semantics
 
@@ -99,6 +100,11 @@ class MethodReport:
 
 
 def _object_plan(sample: MaskSemanticSample) -> ObjectPlan:
+    transform_kind = TransformKind(sample.transform_kind)
+    # verify_mask_semantics never reads ObjectPlan.motion (unlike validate.py's prompt, which
+    # threads transform_kind into its own prompt as motion context) -- this only needs to
+    # satisfy ObjectPlan's own schema validity (TRANSLATE requires a direction vector).
+    direction = Vector2(x=1.0, y=0.0) if transform_kind == TransformKind.TRANSLATE else None
     return ObjectPlan(
         object_id=f"obj_{sample.sample_id}",
         panel_id="panel_1",
@@ -106,8 +112,8 @@ def _object_plan(sample: MaskSemanticSample) -> ObjectPlan:
         confidence=0.8,
         motion_type=MotionType.PRIMARY,
         motion=MotionSpec(
-            transform_kind=TransformKind(sample.transform_kind),
-            direction=None,
+            transform_kind=transform_kind,
+            direction=direction,
             amplitude=0.1,
             speed=1.0,
             easing=Easing.SINE,
