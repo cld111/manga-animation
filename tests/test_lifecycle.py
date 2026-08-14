@@ -113,17 +113,20 @@ def test_model_stage_rejects_reentrant_entry():
 class CountingGroundingClient:
     model_id = "fake-grounding-dino"
 
-    def __init__(self, fail_first_n: int = 0):
+    def __init__(self, fail_first_n: int = 0, raise_on_call: int | None = None):
         self.load_calls = 0
         self.unload_calls = 0
         self.detect_calls = 0
         self.fail_first_n = fail_first_n
+        self.raise_on_call = raise_on_call
 
     def load(self) -> None:
         self.load_calls += 1
 
     def detect(self, image, text_prompt: str) -> list[Detection]:
         self.detect_calls += 1
+        if self.detect_calls == self.raise_on_call:
+            raise RuntimeError("fake unexpected GPU error")
         if self.detect_calls <= self.fail_first_n:
             return []
         h, w = image.shape[:2]
@@ -175,16 +178,17 @@ class StageLevelVLMClient:
     """Returns an animated PRIMARY decision for analysis, ACCEPTs validation and
     mask_semantics prompts, and counts unloads (its real shape: no load())."""
 
-    def __init__(self):
+    def __init__(self, mask_semantics_matches: bool = True):
         self.unload_calls = 0
+        self._mask_semantics_matches = mask_semantics_matches
 
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
             return json.dumps(
                 {
-                    "mask_matches_object": True,
-                    "confidence": 0.9,
-                    "unexpected_content": [],
+                    "mask_matches_object": self._mask_semantics_matches,
+                    "confidence": 0.9 if self._mask_semantics_matches else 0.1,
+                    "unexpected_content": [] if self._mask_semantics_matches else ["fake content"],
                     "reason": "fake mask semantics response",
                 }
             )
@@ -293,5 +297,57 @@ def test_run_page_panels_early_panel_failure_does_not_poison_later_panels_or_cle
     assert [panel.status for panel in result.panels] == ["REJECTED", "PASS"]
     assert result.panels[0].failure_stage == "grounding"
     assert grounding.detect_calls == 2  # panel 2 still got grounded
+    assert grounding.load_calls == 1
+    assert grounding.unload_calls == 1
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_page_panels_primary_mask_semantics_rejection_stays_rejected(
+    two_panel_page_path: Path, config: PipelineConfig, tmp_path: Path
+):
+    """A PRIMARY object that fails the Phase 12 semantic mask gate must keep the panel REJECTED
+    and must NOT be rendered into a PASS by the later animation/render stage. This is the
+    fail-closed PRIMARY policy, which the stage-level restructure must not bypass.
+    """
+    result = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=StageLevelVLMClient(mask_semantics_matches=False),
+        grounding_client=CountingGroundingClient(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert [panel.status for panel in result.panels] == ["REJECTED", "REJECTED"]
+    assert all(panel.failure_stage == "mask_semantics" for panel in result.panels)
+    manifest = json.loads(result.manifest_path.read_text())
+    for item in manifest["panels"]:
+        assert item["status"] == "REJECTED"
+        assert item["output_video"] is None
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_page_panels_unexpected_stage_exception_isolates_to_that_panel(
+    two_panel_page_path: Path, config: PipelineConfig, tmp_path: Path
+):
+    """An unexpected (non-PipelineStageError) exception inside a model stage -- the same class
+    of failure as a CUDA OOM or a raw model RuntimeError -- must isolate to its panel (ERROR)
+    and leave the other panel eligible, not abort the whole page.
+    """
+    grounding = CountingGroundingClient(raise_on_call=1)
+    result = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=StageLevelVLMClient(),
+        grounding_client=grounding,
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert [panel.status for panel in result.panels] == ["ERROR", "PASS"]
+    assert result.panels[0].failure_stage == "RuntimeError"
+    assert grounding.detect_calls == 2
     assert grounding.load_calls == 1
     assert grounding.unload_calls == 1

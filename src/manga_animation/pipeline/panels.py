@@ -222,6 +222,7 @@ def run_page_panels(
     # Stage 1: panel/scene analysis -- the VLM processes every eligible panel, then releases.
     # -------------------------------------------------------------------------------------
     plans: dict[str, AnimationPlan] = {}
+    failed: set[str] = set()
     with ModelStage(vlm_client, name="analysis"):
         for panel in panels:
             if panel.status in ("PASS", "STATIC"):
@@ -236,9 +237,11 @@ def run_page_panels(
                 )
             except PipelineStageError as exc:
                 finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                failed.add(panel.panel_id)
                 continue
             except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
                 finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                failed.add(panel.panel_id)
                 continue
             if not any(obj.motion_type != MotionType.STATIC for obj in plan.objects):
                 panel.status = "STATIC"
@@ -260,14 +263,14 @@ def run_page_panels(
     with ModelStage(grounding_client, name="grounding"):
         for panel in panels:
             panel_id = panel.panel_id
-            if panel_id not in plans:
+            if panel_id not in plans or panel_id in failed:
                 continue  # resumed/STATIC, or already failed at analysis
-            plan = plans[panel_id]
-            primary = _select_primary(plan, str(panel.scene_crop_path))
-            objects, bbox_by_object = _select_objects(
-                plan, primary, crops[panel_id].shape[:2]
-            )
             try:
+                plan = plans[panel_id]
+                primary = _select_primary(plan, str(panel.scene_crop_path))
+                objects, bbox_by_object = _select_objects(
+                    plan, primary, crops[panel_id].shape[:2]
+                )
                 grounded, dropped = _ground_objects(
                     crops[panel_id],
                     objects,
@@ -277,6 +280,11 @@ def run_page_panels(
                 )
             except PipelineStageError as exc:
                 finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                failed.add(panel_id)
+                continue
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                failed.add(panel_id)
                 continue
             objects_by_panel[panel_id] = objects
             bbox_by_object_by_panel[panel_id] = bbox_by_object
@@ -292,7 +300,7 @@ def run_page_panels(
     with ModelStage(vlm_client, name="validation"):
         for panel in panels:
             panel_id = panel.panel_id
-            if panel_id not in candidates_by_panel:
+            if panel_id not in candidates_by_panel or panel_id in failed:
                 continue
             try:
                 attempts, accepted, dropped = _validate_objects(
@@ -308,6 +316,11 @@ def run_page_panels(
                 )
             except PipelineStageError as exc:
                 finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                failed.add(panel_id)
+                continue
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                failed.add(panel_id)
                 continue
             validation_by_panel[panel_id] = attempts
             accepted_by_panel[panel_id] = accepted
@@ -322,7 +335,7 @@ def run_page_panels(
     with ModelStage(segmentation_client, name="segmentation"):
         for panel in panels:
             panel_id = panel.panel_id
-            if panel_id not in accepted_by_panel:
+            if panel_id not in accepted_by_panel or panel_id in failed:
                 continue
             try:
                 animated, seg, dropped = _segment_objects(
@@ -334,6 +347,11 @@ def run_page_panels(
                 )
             except PipelineStageError as exc:
                 finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                failed.add(panel_id)
+                continue
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                failed.add(panel_id)
                 continue
             animated_by_panel[panel_id] = animated
             segmentation_by_panel[panel_id] = seg
@@ -348,7 +366,7 @@ def run_page_panels(
         with ModelStage(vlm_client, name="mask_semantics"):
             for panel in panels:
                 panel_id = panel.panel_id
-                if panel_id not in animated_by_panel:
+                if panel_id not in animated_by_panel or panel_id in failed:
                     continue
                 try:
                     kept, seg, msv, dropped = _mask_semantics_objects(
@@ -361,6 +379,11 @@ def run_page_panels(
                     )
                 except PipelineStageError as exc:
                     finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                    failed.add(panel_id)
+                    continue
+                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                    finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                    failed.add(panel_id)
                     continue
                 animated_by_panel[panel_id] = kept
                 segmentation_by_panel[panel_id] = seg
@@ -376,7 +399,7 @@ def run_page_panels(
     with ModelStage(reconstruction_client, name="reconstruction"):
         for panel in panels:
             panel_id = panel.panel_id
-            if panel_id not in animated_by_panel:
+            if panel_id not in animated_by_panel or panel_id in failed:
                 continue
             panel_started_at.setdefault(panel_id, time.perf_counter())
             try:
