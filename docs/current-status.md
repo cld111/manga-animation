@@ -7,9 +7,10 @@ evidence remain in `docs/phase*-results.md`; decision rationale remains in `docs
 ## Status
 
 The deterministic pipeline and local test/evaluation infrastructure are implemented through
-Phase 13's panel-first orchestration. Real model execution remains a remote-GPU operation. The
-project is an engineering prototype with real end-to-end evidence and known real-world visual
-limitations, not a production animation service.
+Phase 13's panel-first orchestration, hardened by Phase 14's stage-level model lifecycle and
+validated across multiple real pages and repeated GPU runs in Phase 15. Real model execution
+remains a remote-GPU operation. The project is an engineering prototype with real end-to-end
+evidence and known real-world visual limitations, not a production animation service.
 
 ## Current Pipeline
 
@@ -120,6 +121,18 @@ conclusion. Candidates without implemented adapters remain research entries.
   opportunistic GC raced the next load into a CUDA OOM (deterministically reproduced at panel
   2 in profiling); with `ModelStage` every stage returns the allocator to ~9 MiB per device
   after release and a full 4-panel page runs with peak 8.7 GiB on one T4 (docs/phase14-results.md).
+- Phase 15 validated the Phase 14 lifecycle across 6 real pages (17 panels) in one 2xT4 session,
+  plus repeated execution and a resume run: every model stage released exactly its own
+  footprint (Qwen ~15.8 GiB per VLM stage, DINO ~892 MiB, SAM ~283 MiB, LaMa ~197 MiB) on every
+  page, `allocated` returned to ~73/9 MiB per device after every page (17 timeline samples with
+  both GPUs fully released), timeline peak was 8.7 GiB on one T4, and a repeated `villainess`
+  run reproduced the same per-panel statuses (docs/phase15-results.md). An injected raw
+  grounding `RuntimeError` isolated to its panel (ERROR) while later panels still processed and
+  all models were released; a 1xT4 smoke run (CUDA_VISIBLE_DEVICES=0) completed with Qwen
+  fitting on a single T4 (~12.1 GiB, CPU-offloaded) and the same stage lifecycle. Phase 15 also
+  found and fixed two lifecycle teardown defects: a raising `client.unload()` could mask a
+  stage exception and skip the deterministic release, and a failed `client.load()` in
+  `__enter__` left the stage object permanently poisoned.
 
 ## Known Limitations and Technical Debt
 
@@ -160,17 +173,15 @@ conclusion. Candidates without implemented adapters remain research entries.
 
 These are future work, not implemented capabilities:
 
-1. Review the Phase 14 GPU-validated stage-level lifecycle outputs (the Phase 14 E2E run's
-   rendered panel videos and crops) at native resolution.
-2. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
+1. Investigate the dense-mask semantic false negative and expand the real labeled-mask dataset
    before changing thresholds or claiming generalization.
-3. Run a bounded context-size study for mask verification and establish a genuine development/
+2. Run a bounded context-size study for mask verification and establish a genuine development/
    held-out split when data volume permits.
-4. Collect targeted same-category multi-instance evidence before designing instance-identity
+3. Collect targeted same-category multi-instance evidence before designing instance-identity
    validation.
-5. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
+4. Gather evidence for a safe MESH_WARP bound and for mid-cycle artifact detection; do not add
    speculative geometry thresholds from one instance.
-6. Treat articulated part-level animation and scene transitions as design-only future concepts,
+5. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
 
 ## Verification and Workflow
