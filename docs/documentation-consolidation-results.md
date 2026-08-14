@@ -58,6 +58,13 @@ rationale. Improvement is qualitative; no token reduction is claimed.
 
 ## GIT
 
-Branch, commits, PR URL, and final working-tree state are recorded here after push and PR
-creation. Changed files: `CLAUDE.md`, `docs/README.md`, `docs/current-status.md`,
-`docs/documentation-consolidation-results.md`, `.claude/skills/video-rendering/SKILL.md`.
+Branch: `docs-context-consolidation`.
+
+Commits: `f811319` (`Consolidate documentation context`); this follow-up commit records the
+final PR metadata in this report.
+
+PR: [#4](https://github.com/cld111/manga-animation/pull/4), opened into `main`, not merged.
+
+Final working tree: clean after the metadata update is pushed. Changed files: `CLAUDE.md`,
+`docs/README.md`, `docs/current-status.md`, `docs/documentation-consolidation-results.md`,
+`.claude/skills/video-rendering/SKILL.md`.
