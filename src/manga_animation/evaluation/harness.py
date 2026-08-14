@@ -274,16 +274,18 @@ def run_one_sample(
             status="dropped",
             # DroppedObjectResult.reason already carries a real, human-readable summary of why
             # this object was dropped -- surfacing it here means the saved JSON alone explains a
-            # drop. Only meaningful when the drop happened AT validation (`dropped.reason` is
-            # validation-attempt prose in that case); a grounding-stage drop never reached
-            # validation, so there is nothing validation-shaped to report. A mask_semantics-stage
-            # drop (Phase 12) is a real, disclosed gap of the same shape: `dropped.reason`
-            # carries the real verdict/VLM reason as prose (see orchestrator.py's construction of
-            # `DroppedObjectResult(failing_stage="mask_semantics", ...)`), but there is no
-            # structured `MaskSemanticResult` retained for a dropped object to populate
-            # `mask_semantics=` with (only kept/rendered objects carry the real result object
-            # through to this point) -- left `mask_semantics=None`/empty `validation_attempts`
-            # here, same as every other non-validation drop reason, not silently invented.
+            # drop, for the two stages whose drop reason is validation-attempt-shaped prose
+            # ("validation" always was; "mask_semantics" too, Phase 12 -- orchestrator.py formats
+            # `DroppedObjectResult(failing_stage="mask_semantics", reason=f"{verdict.upper()}:
+            # {vlm_reason}")`, so this is real, human-readable evidence, not invented). A
+            # grounding-stage or segmentation-stage drop's own reason is shaped differently (a
+            # bbox/mask-geometry sentence, not a candidate-attempt one) and is intentionally left
+            # unsurfaced here rather than force-fit into `ValidationAttemptOutcome`'s fields --
+            # still a real, disclosed gap for those two stages (docs/phase12-results.md section
+            # 10), just not the one this fix closes. No structured `MaskSemanticResult` is
+            # retained for a dropped object (only kept/rendered objects carry the real result
+            # object this far) -- `mask_semantics=None` stays correct; only the free-text reason
+            # is recovered here.
             validation_attempts=(
                 [
                     ValidationAttemptOutcome(
@@ -293,7 +295,7 @@ def run_one_sample(
                         reason=dropped.reason,
                     )
                 ]
-                if dropped.failing_stage == "validation"
+                if dropped.failing_stage in ("validation", "mask_semantics")
                 else []
             ),
         )

@@ -48,7 +48,7 @@ from manga_animation.pipeline.types import (
     MaskSemanticVerdict,
 )
 from manga_animation.schemas.animation_plan import ObjectPlan
-from manga_animation.validation.validate import _extract_json_object
+from manga_animation.validation.validate import _client_model_id, _extract_json_object
 
 logger = get_logger(__name__)
 
@@ -240,7 +240,7 @@ def verify_mask_semantics(
     prompt = _build_mask_verification_prompt(object_plan)
     raw_text = vlm_client.generate(Image.fromarray(crop), prompt)
     verification = _parse_mask_verification(raw_text)
-    model_id = str(getattr(vlm_client, "source", type(vlm_client).__name__))
+    model_id = _client_model_id(vlm_client)
 
     if verification is None:
         result = MaskSemanticResult(

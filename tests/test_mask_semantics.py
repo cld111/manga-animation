@@ -159,6 +159,31 @@ def test_verify_mask_semantics_does_not_abstain_just_outside_the_band():
     assert result.verdict == "accept"
 
 
+def test_verify_mask_semantics_abstains_at_the_exact_lower_band_boundary():
+    """Regression guard for the exact [0.4, 0.6] band edges -- an off-by-one here (e.g.
+
+    swapping `<=` for `<`) would be invisible to every other test in this module, none of
+    which exercises confidence exactly 0.4 or 0.6 (independent adversarial QA review finding).
+    """
+    bbox = BBoxPx(x0=50, y0=50, x1=100, y1=100)
+    mask = make_diamond_mask(200, 200, bbox)
+    client = FakeVLMClient(_mask_response(False, confidence=0.4, reason="right at the edge"))
+
+    result = verify_mask_semantics(make_image(), make_object_plan(), mask, bbox, client)
+
+    assert result.verdict == "abstain"
+
+
+def test_verify_mask_semantics_abstains_at_the_exact_upper_band_boundary():
+    bbox = BBoxPx(x0=50, y0=50, x1=100, y1=100)
+    mask = make_diamond_mask(200, 200, bbox)
+    client = FakeVLMClient(_mask_response(True, confidence=0.6, reason="right at the edge"))
+
+    result = verify_mask_semantics(make_image(), make_object_plan(), mask, bbox, client)
+
+    assert result.verdict == "abstain"
+
+
 # --- fail-closed on an unparseable VLM response ------------------------------------------------
 
 

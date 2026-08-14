@@ -291,11 +291,19 @@ independent findings, not templated:
   than Phase 11's own stated "creature's head + background drape" -- correct verdict, imperfectly
   matching mechanism, disclosed rather than smoothed over.
 - `villainess_ending_scuffle_obj_cloth_5` (confirmed bad): predicted **good** -- a real false
-  negative on the single most "textbook" defect in Phase 11's own report. Plausible cause: this
-  mask is 90%+ dense within its own bbox (Phase 11 section 5.1), so the dimming construction
-  leaves little dimmed/undimmed contrast for the VLM to use in spotting the bubble -- a real,
-  disclosed limitation of the current crop-highlighting approach on very dense masks, not
-  investigated further this phase (would need its own targeted experiment).
+  negative on the single most "textbook" defect in Phase 11's own report. **Root cause verified
+  directly, not assumed**: the adversarial review reconstructed the exact crop
+  `verify_mask_semantics` actually sent to the VLM for this object (same code, same real local
+  mask/image artifacts) and confirmed the speech bubble ("GIVE IT BACKK!!") and the hand are
+  BOTH fully inside the mask -- rendered at full brightness, not dimmed -- exactly as this
+  benchmark's own YAML entry already describes ("mask... visibly includes a full speech bubble...
+  and a hand"). An earlier draft of this section incorrectly speculated the miss was a
+  low-contrast artifact of the dimming technique on dense masks; that explanation is WRONG and is
+  corrected here. **The real mechanism: the VLM was shown the contamination in full, undimmed
+  clarity and still did not flag it** -- a genuine model reasoning/compliance failure on this
+  specific real crop, not a limitation of the crop-construction technique. This is a materially
+  more concerning finding than the original (wrong) explanation, and is left unresolved this
+  phase (see section 10.1's revised assessment).
 - `sss_hunter_gladiator_obj_green_fluid_15` (labeled good): predicted **bad** -- *"includes a
   green alien face along with the green fluid"*. A plausible, defensible read (fluid effects
   drawn on/near a creature's face are genuinely ambiguous), not an obvious model error -- kept as
@@ -411,7 +419,8 @@ exactly one of these 13 categories; `mask_semantics` is the one new category thi
 | --- | --- | --- | --- | --- |
 | Qwen2.5-VL (analysis) | All-STATIC on a page with real motion | `analysis` | Run fails before grounding | High (Phase 3.1, reproduced) |
 | Qwen2.5-VL (mask_semantics prompt, v1) | Prompt-anchoring — templated "speech bubble" response | `mask_semantics` | 88% false-positive rate | High (this phase, section 5.2, root-caused and fixed) |
-| Qwen2.5-VL (mask_semantics prompt, v2) | Misses a 90%+-dense defective mask (`cloth_5`) | `mask_semantics` | One real false negative, mitigated by no other gate | Medium (single instance, section 5.3) |
+| Qwen2.5-VL (mask_semantics prompt, v2) | Fails to flag a real, fully-undimmed, plainly visible contamination (`cloth_5`'s speech bubble + hand) | `mask_semantics` | One real false negative, mitigated by no other gate | High (root cause independently verified against the exact real crop, section 5.3) |
+| Qwen2.5-VL (confidence field, both prompt versions) | Real confidence values cluster on a small set of round numbers per verdict class (v1: exactly 0.3/1.0; v2: exactly 1.0 for every accept, 0.7-0.75 for every reject) rather than a continuous calibrated score | `mask_semantics` | ABSTAIN band `[0.4, 0.6]` fired zero times across every real GPU call this phase | High (directly observed in the real saved benchmark JSON, section 10.1) |
 | Grounding DINO | Zero detections on an extreme-aspect-ratio full page | `grounding` | Run fails outright | High (Phase 5, fixed by Phase 5.1's panel-crop grounding) |
 | SAM 2.1 | Geometrically-fine but semantically wrong mask | `segmentation` (undetected until `mask_semantics`) | Silent visual defect once animated | High (Phase 11, this phase's whole motivation) |
 | SAM 2.1 | Edge-hugging over-segmentation into background | `segmentation` | Hard seam once translated | High (Phase 8.3, still caught by existing check) |
@@ -426,7 +435,7 @@ was independently confirmed defective by Phase 11's direct pixel inspection).
 
 ## 10. Known limitations (disclosed, not hidden)
 
-### 10.1 Calibration is provisional, not finished
+### 10.1 Calibration is provisional, not finished -- and the confidence signal itself looks unreliable
 
 The `[0.4, 0.6]` ABSTAIN band and the decision to trust the VLM's binary `mask_matches_object`
 read directly (no secondary numeric threshold) are both evidenced-but-NOT-statistically-
@@ -434,9 +443,24 @@ calibrated, the same status this codebase's other thresholds already carry (e.g.
 `transform_geometry.py`'s bounds). 13 real labeled objects — all used to *develop* the prompt
 itself — is not enough to calibrate a production threshold responsibly. Every real ABSTAIN
 verdict this phase actually observed: **zero** — neither the 13-sample benchmark run nor the 3
-real E2E runs produced a single `abstain` (every real VLM confidence was either a clean 0.7-1.0
-accept-side reading or (rarely) exactly 0.3 on reject) — so the ABSTAIN path exists and is
-tested (`tests/test_mask_semantics.py`), but has zero real-world firing evidence yet.
+real E2E runs produced a single `abstain`.
+
+**Adversarial review finding, verified against the real saved evidence** (`outputs/experiments/
+phase12_semantic_benchmark_20260814T001059Z_kaggle.json`): the revised (v2, shipped) prompt's
+real confidence values are not a continuous signal at all — every one of the 9 real ACCEPT
+verdicts reported confidence exactly `1.0`, and every one of the 4 real REJECT verdicts reported
+`0.7` or `0.75`. This is the same "identical confidence per verdict class" signature this
+document's own section 5.2 already used to diagnose the v1 prompt's anchoring defect — just a
+different pair of round numbers, not evidence the underlying problem is fixed. Plausible
+mechanism: `Qwen25VLClient.generate` (`analysis/client.py`) calls `model.generate` with plain
+greedy decoding (no temperature/sampling), and neither prompt version gives the model any
+calibration guidance for what a given confidence value should mean. **Given this, the ABSTAIN
+band should currently be read as structurally near-unreachable in production, not merely
+"untested yet"** — a materially more concerning framing than "zero real firings so far" alone
+suggests, and the honest one to carry into any production decision about this gate. Still
+covered by `tests/test_mask_semantics.py` at the unit level (hardcoded fake confidences), which
+proves the branch's own logic is correct but says nothing about whether real VLM output can ever
+reach it.
 
 ### 10.2 Instance identity (Workstream 7, 32)
 
@@ -463,14 +487,18 @@ with Phase 11's own independent finding (`docs/phase11-results.md` section 5.2).
 runs this phase — the OOM was specific to this session's own test harness running two full
 `build_default_clients()` sets back-to-back in one process.
 
-### 10.4 Safe fallback / GPU-residency gap found (not a new defect, a pre-existing one confirmed)
+### 10.4 Safe fallback / GPU-residency gap found (not a new defect, a pre-existing one confirmed, narrower than an earlier draft of this section claimed)
 
 `run_pipeline` explicitly `.load()`s/`.unload()`s `grounding_client`/`segmentation_client` around
-their own stage (`docs/architecture.md`'s "GPU Awareness"), but never calls
-`vlm_client.unload()`/`reconstruction_client.unload()` at any point — `Qwen25VLClient.unload()`
-exists (used nowhere in `orchestrator.py`) and `ReconstructionClient`'s protocol has no unload at
-all called by the orchestrator either. This is a real, pre-existing gap this phase's own testing
-surfaced concretely (section 7's OOM) but did not introduce and did not fix — out of this phase's
+their own stage (`docs/architecture.md`'s "GPU Awareness"), and — confirmed by adversarial review,
+correcting an earlier draft of this section that overstated the gap — `reconstruction_client` is
+ALSO correctly released: `reconstruct_hidden_region` calls `client.load()`/`client.unload()`
+around each object's real inpaint call. Only `vlm_client` genuinely leaks residency for the whole
+run: `Qwen25VLClient.unload()` exists but is called nowhere in `orchestrator.py`, across all
+three of its real call sites (analysis, `validation`, and now `mask_semantics` — this phase adds
+a third user of the same never-released client, extending an existing gap, not creating a new
+one). This is a real, pre-existing gap this phase's own testing surfaced concretely (section 7's
+OOM) but did not introduce and did not fix — out of this phase's
 "smallest correct fix" scope (a real caller normally runs one `run_pipeline` per process, where
 this doesn't matter; it only matters for a test harness or a service that runs multiple pages per
 process, which this codebase does not yet do in production). Flagged as real future work
@@ -625,12 +653,68 @@ boundaries, hidden dependencies, incorrect failure semantics), Reviewer C (regre
 to break the new gate's test coverage and safety guarantees). Each was given the real files,
 the real GPU numbers, and instructed to cite file:line/actual numbers, not speculate.
 
-[Filled in once all three reviews return — see the findings and this session's responses below.]
+All three reviews returned real, evidence-based findings — none merely confirmed the work was
+fine. Findings and this session's responses:
+
+**Reviewer A (semantic methodology)** — two significant findings, both verified independently
+before acting on them:
+1. **This document's own original explanation for the `cloth_5` false negative was factually
+   wrong.** Reviewer A reconstructed the exact real crop `verify_mask_semantics` sends to the
+   VLM (same code, same real local artifacts) and showed the speech bubble and hand are fully
+   inside the mask (bright, undimmed) — the VLM was shown the contamination in full clarity and
+   still missed it, not a low-contrast dimming artifact as originally claimed. **Verified
+   independently by this session too** (the reconstructed crop was regenerated and visually
+   inspected a second time before editing anything) before correcting section 5.3, the model
+   failure matrix (section 9), and section 10.1.
+2. **Real confidence values are still quantized/templated after the prompt fix**, just onto a
+   different pair of round numbers (every real ACCEPT = 1.0, every real REJECT = 0.7-0.75) —
+   independently confirmed against the real saved benchmark JSON. Section 10.1 rewritten to state
+   plainly that the ABSTAIN band should be treated as structurally near-unreachable given this
+   evidence, not merely "untested so far."
+3. Also flagged (already true, no action needed): the n=13 dev-only disclosure was found honest,
+   no overclaiming; only 1 of 3 real E2E pages produced a video, and the villainess rejection's
+   own correctness remains genuinely unverified (already disclosed in section 7, reinforced here).
+
+**Reviewer B (code/architecture)** — core stage-wiring logic (PRIMARY-fail/SECONDARY-drop/
+config-disabled paths) confirmed correct by independent tracing. Two real findings, both fixed:
+1. `evaluation/harness.py`'s `run_one_sample` silently dropped the human-readable reason for a
+   `mask_semantics`-stage object drop (only `"validation"`-stage drops kept their reason) —
+   directly undercut this phase's own claim of distinct machine-readable reporting for the more
+   common (SECONDARY-drop) real outcome. **Fixed**: the same condition now also covers
+   `"mask_semantics"`.
+2. An earlier draft of section 10.4 overstated the GPU-residency gap, implying
+   `reconstruction_client` leaks GPU memory like `vlm_client` — false; `reconstruct_hidden_region`
+   already calls `.load()`/`.unload()` per object. **Fixed**: section 10.4 corrected to name only
+   `vlm_client` as the real, still-open gap.
+3. Minor nit (fixed): `mask_semantics.py` reimplemented `validate.py`'s private
+   `_client_model_id` inline instead of importing it (while already importing
+   `_extract_json_object` from the same module) — now imports both consistently.
+
+**Reviewer C (regression/QA)** — ran the real suite (555 passed at the time), confirmed no red
+anywhere, and used live mutation testing (edit, run, revert) to find real, concrete coverage
+gaps rather than speculating:
+1. The `[0.4, 0.6]` ABSTAIN boundary was provably invisible to every test (mutating `<=` to `<`
+   left the suite fully green). **Fixed**: added exact-boundary tests at confidence 0.4 and 0.6.
+2. No test proved two simultaneously-bad SECONDARY objects both get dropped (only ever one at a
+   time). **Fixed**: added a two-bad-secondaries test.
+3. The overlap guard's execution order relative to `mask_semantics` was correct by inspection but
+   unpinned by any test (the existing fake VLM client had no call recorder). **Fixed**: added a
+   call-count/prompt-tracking test proving an overlap-dropped object never reaches `mask_semantics`
+   at all.
+4. The config-disable test only covered PRIMARY. **Fixed**: added a SECONDARY-object equivalent.
+5. `mask_semantics_outcome_from_result` was untested for the `"abstain"` verdict. **Fixed**: added.
+
+All five Reviewer-C-recommended tests plus both Reviewer-B code fixes are committed. Net result:
+**561 passed** (was 555 before this section's fixes, 548 before Phase 12 started), ruff/mypy
+clean. No finding from any reviewer was dismissed without either a fix or an explicit, reasoned
+"not fixing this phase, here is why" (the instance-identity and calibration gaps both reviewers
+also touched on were already disclosed as open in sections 10.1/10.2 before review, and remain
+open after it — genuinely unresolved, not newly discovered).
 
 ## 15. Final full regression
 
 ```
-uv run pytest -q      # 555 passed, 2 deselected (was 548 before Phase 12; +7 net after review fixes)
+uv run pytest -q      # 561 passed, 2 deselected (was 548 before Phase 12; +13 net, including 5 tests added directly from adversarial review findings)
 uv run ruff check .   # clean
 uv run mypy src       # clean, 46 files
 ```

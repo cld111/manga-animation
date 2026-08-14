@@ -108,9 +108,16 @@ class FakeVLMClient:
         self._verification_matches = verification_matches
         self._mask_semantics_matches = mask_semantics_matches
         self._mask_semantics_confidence = mask_semantics_confidence
+        self.mask_semantics_prompts: list[str] = []
+        """Every prompt this fake answered as a mask_semantics-stage call, in call order --
+
+        lets a test assert exactly which/how many objects reached this stage (e.g. proving an
+        object dropped by an earlier guard, such as the cross-object overlap check, never wastes
+        a mask_semantics call at all -- an independent adversarial QA review finding)."""
 
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+            self.mask_semantics_prompts.append(prompt)
             return _fake_mask_semantics_response(
                 self._mask_semantics_matches, confidence=self._mask_semantics_confidence
             )
@@ -2233,3 +2240,144 @@ def test_run_pipeline_can_disable_the_mask_semantics_gate_via_config(
     )
     assert result.render.output_path.exists()
     assert result.mask_semantics is None
+
+
+@requires_ffmpeg
+def test_run_pipeline_can_disable_the_mask_semantics_gate_for_a_secondary_object(
+    config, tmp_path: Path
+):
+    """Same guarantee as the PRIMARY-object disable test above, extended to a SECONDARY --
+
+    with the gate off, a mask that would otherwise be dropped must reach the render instead
+    (independent adversarial QA review finding: the existing disable test only covered PRIMARY).
+    """
+    disabled_config = config.model_copy(update={"enable_semantic_mask_validation": False})
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        disabled_config,
+        vlm_client=FakeVLMClient(decisions, mask_semantics_matches=False),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()
+    assert len(result.secondary_objects) == 1  # would have been dropped with the gate enabled
+    assert result.secondary_objects[0].mask_semantics is None
+    assert result.dropped_objects == []
+
+
+def test_run_pipeline_drops_two_simultaneously_bad_secondary_objects(config, tmp_path: Path):
+    """Two independent SECONDARY objects both failing mask_semantics in the same run must BOTH
+
+    be dropped, not just the first -- guards against an early-exit/break bug in the per-object
+    loop that a single-bad-object test (the one directly above) cannot catch (independent
+    adversarial QA review finding).
+    """
+    decisions = [
+        _primary_decision("hanging_banner"),
+        _secondary_decision("trailing_cloth"),
+        _secondary_decision("raised_hand"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {
+            "hanging_banner": (10, 10, 60, 90),
+            "trailing_cloth": (70, 10, 110, 60),
+            "raised_hand": (70, 130, 110, 190),
+        }
+    )
+
+    class BothSecondariesBadVLMClient:
+        """Accepts PRIMARY; rejects at mask_semantics for BOTH secondary objects."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+                matches = "hanging banner" in prompt  # only PRIMARY passes
+                return _fake_mask_semantics_response(matches)
+            if _VALIDATION_PROMPT_MARKER in prompt:
+                return json.dumps({"matches": True, "confidence": 0.9, "reason": "ok"})
+            return json.dumps(decisions)
+
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=BothSecondariesBadVLMClient(),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()  # PRIMARY alone still renders
+    assert result.secondary_objects == []
+    dropped_labels = {d.object_plan.semantic_label for d in result.dropped_objects}
+    assert dropped_labels == {"trailing_cloth", "raised_hand"}
+    assert all(d.failing_stage == "mask_semantics" for d in result.dropped_objects)
+
+
+def test_run_pipeline_overlap_dropped_secondary_never_reaches_mask_semantics(
+    config, tmp_path: Path
+):
+    """The cross-object overlap guard (`_drop_overlapping_secondary_objects`, Phase 8.3) must
+
+    run BEFORE mask_semantics -- an object it already drops should never waste a real VLM call.
+    Order is correct by inspection of orchestrator.py, but was previously unpinned by any test:
+    the pre-existing overlap test used a `FakeVLMClient` with no call recorder, so a stage-order
+    swap would have passed it identically (independent adversarial QA review finding). Uses the
+    same real defect shape as
+    `test_run_pipeline_drops_a_secondary_object_whose_mask_overlaps_an_already_accepted_one`.
+    """
+    box_primary = (110, 130, 160, 200)  # "raised_hand" -- ROTATE, doesn't overlap either hair box
+    box_hair_left = (10, 10, 60, 90)  # "left_hair" -> TRANSLATE (contains "hair")
+    box_hair_right = (15, 15, 58, 88)  # "right_hair" -- nested almost entirely inside the above
+
+    decisions = [
+        _primary_decision("raised_hand"),
+        _secondary_decision("left_hair"),
+        _secondary_decision("right_hair"),
+    ]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"raised_hand": box_primary, "left_hair": box_hair_left, "right_hair": box_hair_right}
+    )
+    vlm_client = FakeVLMClient(decisions)  # mask_semantics_matches=True by default
+
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=vlm_client,
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()
+    assert len(result.dropped_objects) == 1
+    assert result.dropped_objects[0].failing_stage == "segmentation"  # the overlap guard, not
+    # mask_semantics -- confirms overlap-dropping happened first
+
+    # Exactly 2 real mask_semantics calls (PRIMARY + the one surviving hair object) -- the
+    # overlap-dropped "right_hair" must never have reached this stage at all.
+    assert len(vlm_client.mask_semantics_prompts) == 2
+    checked_labels = {
+        "raised hand" if "raised hand" in p else ("left hair" if "left hair" in p else "?")
+        for p in vlm_client.mask_semantics_prompts
+    }
+    assert checked_labels == {"raised hand", "left hair"}

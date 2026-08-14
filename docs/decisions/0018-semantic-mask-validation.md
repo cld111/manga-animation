@@ -133,7 +133,13 @@ Add `src/manga_animation/validation/mask_semantics.py`, a new stage (`Stage` lit
   confirmed-good) to attempt an actual precision/recall sweep — see
   `docs/phase12-results.md`'s calibration-study section for why this phase's own real dataset
   (12 objects, all already used to *design* this gate) cannot also serve as an unbiased
-  evaluation set for it without disclosing that overlap.
+  evaluation set for it without disclosing that overlap. **Real GPU evidence gathered after this
+  ADR's original design (docs/phase12-results.md section 10.1, independently confirmed by
+  adversarial review) makes this worse than "unresolved": every real confidence value observed
+  this phase clustered on one of two round numbers per verdict class (1.0 for accept, 0.7-0.75
+  for reject), never landing inside the abstain band at all — the confidence signal itself looks
+  quantized/uncalibrated, not merely under-sampled. Treat ABSTAIN as structurally near-
+  unreachable in production until real evidence shows otherwise, not as a working safety valve.**
 - **Instance identity** (correct category, wrong physical instance — e.g. two characters' hair)
   is not directly addressed by this check: a mask that is entirely "character_hair" content but
   belongs to the *wrong* character would plausibly still read as "yes, this is hair" to the VLM

@@ -143,3 +143,25 @@ def test_mask_semantics_outcome_from_result_mirrors_the_real_result():
     assert outcome.vlm_confidence == pytest.approx(0.82)
     assert outcome.unexpected_content == ["speech bubble", "hand"]
     assert outcome.geometric_signals == {"bbox_density": 0.9}
+
+
+def test_mask_semantics_outcome_from_result_mirrors_an_abstain_verdict():
+    """Reject and abstain must stay distinguishable through the mapper too -- both are
+
+    "not accepted" but mean different things (a confident negative vs. insufficient evidence,
+    see docs/decisions/0018-semantic-mask-validation.md) -- independent adversarial QA review
+    finding: only the reject case had a direct test before this.
+    """
+    result = MaskSemanticResult(
+        object_id="obj_2",
+        verdict="abstain",
+        vlm_matches=True,
+        vlm_confidence=0.5,
+        reason="near-coin-flip confidence",
+        model_id="fake-qwen",
+        method="vlm_mask_crop_v1",
+    )
+    outcome = mask_semantics_outcome_from_result(result)
+    assert outcome is not None
+    assert outcome.verdict == "abstain"
+    assert outcome.vlm_confidence == pytest.approx(0.5)
