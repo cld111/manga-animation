@@ -41,4 +41,10 @@ traditional layouts and flat-color content.
 
 ## Git
 
-Branch: `phase-13-panel-animation`. Commit and PR details are recorded after local verification.
+Branch: `phase-13-panel-animation`.
+
+Commit: `00b56b2` (`Implement independent panel animation pipeline`).
+
+Pull Request: https://github.com/cld111/manga-animation/pull/5 (open, targeting `main`).
+
+Working tree: clean after the documentation update is committed and pushed.
