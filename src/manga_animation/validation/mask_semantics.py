@@ -79,20 +79,22 @@ comic page actually corresponds to one specific intended object, before that exa
 animated. The image shows a cropped region of the page; the BRIGHT area is the mask being \
 checked, the DARKENED surrounding area is context only (not part of what you are judging).
 
-Manga segmentation can produce a mask that is geometrically fine but semantically wrong -- for \
-example covering the intended object PLUS an unrelated speech bubble, another character's face \
-or hand, or background scenery. Be strict: only answer yes if the bright region is ENTIRELY the \
-target object, with no substantial unrelated content included.
+Manga segmentation can sometimes produce a mask that is geometrically fine but semantically \
+wrong -- covering the intended object plus something else it should not include. This is NOT \
+always the case: most masks are correct. Look carefully at what is ACTUALLY bright in THIS \
+specific image before answering -- do not assume a defect is present.
 
 Target object: "{semantic_label}"
 
 Does the bright region show ONLY "{semantic_label}", with nothing else of note included? \
 Answer with ONLY one JSON object, no prose, no markdown fences, in exactly this shape:
 {{"mask_matches_object": true or false, "confidence": a float 0-1, "unexpected_content": \
-["short label", ...] (empty list if none), "reason": "one short sentence"}}
+["short label", ...] (empty list if none), "reason": "one short sentence describing what you \
+actually see in the bright region"}}
 
-If the bright region includes anything beyond the target object itself (another object, text, \
-a face, background), answer false and name what else it includes in unexpected_content."""
+Only answer false if the bright region visibly, concretely includes something beyond the \
+target object itself -- name exactly what you see in unexpected_content, based on this \
+specific image, not a generic guess."""
 
 
 class _MaskVerificationResponse(BaseModel):
