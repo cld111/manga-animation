@@ -472,6 +472,40 @@ def test_run_pipeline_end_to_end_produces_a_playable_video(page_path: Path, conf
 
 
 @requires_ffmpeg
+def test_run_pipeline_end_to_end_with_radial_expand_primary(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 16: a RADIAL_EXPAND PRIMARY (an impact/energy burst -- the drawn-effect motion
+    model) must run the whole pipeline end to end through the fake-client path and produce a
+    playable video whose loop is verified -- the transform's dispatch must reach
+    `_radial_expand_frame` inside the orchestrator, not just under the unit tests.
+
+    The grounding box must clear `check_transform_geometry`'s radial_expand profile (35%
+    area, 2% edge margin on a 120x160 page), so it is placed well inside the page.
+    """
+    from manga_animation.schemas.animation_plan import TransformKind
+
+    out_dir = tmp_path / "out"
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=FakeVLMClient([_primary_decision("impact_burst"), _static_decision()]),
+        grounding_client=FakeGroundingClient(box=(40, 60, 80, 100)),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=out_dir,
+    )
+
+    assert isinstance(result, PipelineRunResult)
+    assert result.primary_object.motion_type == MotionType.PRIMARY
+    assert result.primary_object.semantic_label == "impact_burst"
+    assert result.primary_object.motion is not None
+    assert result.primary_object.motion.transform_kind == TransformKind.RADIAL_EXPAND
+    assert result.render.output_path.exists()
+    assert result.render.frame_count == config.fps * config.duration_s
+
+
+@requires_ffmpeg
 def test_run_pipeline_loads_and_unloads_grounding_and_segmentation_clients(
     page_path: Path, config, tmp_path: Path
 ):
