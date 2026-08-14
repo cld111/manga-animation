@@ -67,10 +67,19 @@ from manga_animation.segmentation import Sam21Client
 _MEMORY_SAMPLE_INTERVAL_S = 5.0
 
 
-def _snapshot_vram(now: float, started_at: float) -> dict[str, object]:
-    """Full VRAM snapshot across all visible devices (allocated/reserved/peak) plus a
-    process-wide live-CUDA-tensor scan (the forensic complement to allocator stats: detects
-    tensors still referenced from Python even when the caching allocator reports them free)."""
+def _snapshot_vram(
+    now: float, started_at: float, *, gc_scan: bool = False
+) -> dict[str, object]:
+    """Full VRAM snapshot across all visible devices (allocated/reserved/peak) plus, only when
+    `gc_scan=True`, a process-wide live-CUDA-tensor scan.
+
+    The live-tensor scan (gc.get_objects + torch.is_tensor) is deliberately NOT run from the
+    background sampler thread: iterating every live Python object while the main thread is
+    mid-inference races with concurrent object allocation and produced a real
+    `SystemError: bad argument to internal function` (tupleobject.c) inside pipeline panels
+    during Phase 15's first run. Allocator stats alone are safe to read from the sampler; the
+    gc scan is only run at page boundaries, when the pipeline is idle between pages.
+    """
     import torch
 
     torch.cuda.synchronize()
@@ -91,19 +100,20 @@ def _snapshot_vram(now: float, started_at: float) -> dict[str, object]:
             }
         )
     rec["gpus"] = gpus
-    count = 0
-    bytes_live = 0
-    import gc
+    if gc_scan:
+        import gc
 
-    for obj in gc.get_objects():
-        try:
-            if torch.is_tensor(obj) and obj.is_cuda:
-                count += 1
-                bytes_live += obj.numel() * obj.element_size()
-        except Exception:  # noqa: BLE001 -- a single weird object must not abort the scan
-            continue
-    rec["live_cuda_tensors"] = count
-    rec["live_cuda_mb"] = round(bytes_live / 2**20, 1)
+        count = 0
+        bytes_live = 0
+        for obj in gc.get_objects():
+            try:
+                if torch.is_tensor(obj) and obj.is_cuda:
+                    count += 1
+                    bytes_live += obj.numel() * obj.element_size()
+            except Exception:  # noqa: BLE001 -- a single weird object must not abort the scan
+                continue
+        rec["live_cuda_tensors"] = count
+        rec["live_cuda_mb"] = round(bytes_live / 2**20, 1)
     return rec
 
 
@@ -184,7 +194,7 @@ def _run_page(
     if inject_grounding_failure is not None:
         grounding_client = _FailAfterGroundingCalls(dino, inject_grounding_failure)
 
-    before = _snapshot_vram(time.perf_counter(), started_at)
+    before = _snapshot_vram(time.perf_counter(), started_at, gc_scan=True)
     stop = threading.Event()
     sampler = threading.Thread(
         target=_mem_sample_loop, args=(stop, timeline, started_at), daemon=True
@@ -204,7 +214,7 @@ def _run_page(
     finally:
         stop.set()
         sampler.join(timeout=10)
-    after = _snapshot_vram(time.perf_counter(), started_at)
+    after = _snapshot_vram(time.perf_counter(), started_at, gc_scan=True)
     run_release_logs = _release_logs_from_buffer(release_log_buffer)
 
     peak_mb = 0.0
@@ -264,7 +274,7 @@ def main() -> None:
     ]
 
     started_at = time.perf_counter()
-    timeline: list[dict[str, object]] = [_snapshot_vram(started_at, started_at)]
+    timeline: list[dict[str, object]] = [_snapshot_vram(started_at, started_at, gc_scan=True)]
     buffer, handler = _capture_stage_release_logs()
     release_logs: list[str] = []
     page_runs: list[dict[str, object]] = []
@@ -353,7 +363,7 @@ def main() -> None:
         handler.flush()
         _teardown_log_handler(handler)
 
-    end = _snapshot_vram(time.perf_counter(), started_at)
+    end = _snapshot_vram(time.perf_counter(), started_at, gc_scan=True)
     out_path = args.out or Path(
         f"outputs/experiments/phase15_gpu_regression_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
