@@ -30,7 +30,6 @@ def main() -> None:
     setup_logging(debug=False)
     config = load_config(args.env)
     vlm = Qwen25VLClient(source=args.qwen, dtype=config.dtype)
-    vlm.load()
     try:
         for page in args.pages:
             page = page.resolve()
