@@ -347,7 +347,7 @@ def test_drawn_effects_get_effect_specific_motion_specs():
         "green_fluid": ("fluid flows and ripples", "mesh_warp"),
         "rain": ("rain falls downward", "translate"),
         "speed_lines": ("speed lines streak along the motion direction", "mesh_warp"),
-        "spark_shower": ("sparks scatter", "translate"),
+        "spark_shower": ("sparks flicker", "opacity"),
     }
     for label, (desc, expected_kind) in cases.items():
         decision = _RawObjectDecision(

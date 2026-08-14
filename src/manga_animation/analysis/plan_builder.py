@@ -318,6 +318,16 @@ _MOTION_HEURISTICS: list[tuple[tuple[str, ...], MotionSpec]] = [
         ),
     ),
     (
+        ("spark", "spark_shower", "debris", "particle", "shard"),
+        MotionSpec(
+            transform_kind=TransformKind.OPACITY,
+            amplitude=0.35,
+            speed=2.0,
+            easing=Easing.EASE_IN_OUT,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
         ("speed_line", "speed line", "motion_line", "motion line", "streak", "slash", "flow line"),
         MotionSpec(
             transform_kind=TransformKind.MESH_WARP,
