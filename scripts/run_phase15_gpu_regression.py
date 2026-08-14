@@ -175,7 +175,7 @@ def _run_page(
     lama,
     out_dir: Path,
     started_at: float,
-    release_logs: list[str],
+    release_log_buffer: io.StringIO,
     timeline: list[dict[str, object]],
     *,
     inject_grounding_failure: int | None,
@@ -205,6 +205,7 @@ def _run_page(
         stop.set()
         sampler.join(timeout=10)
     after = _snapshot_vram(time.perf_counter(), started_at)
+    run_release_logs = _release_logs_from_buffer(release_log_buffer)
 
     peak_mb = 0.0
     for sample in timeline:
@@ -220,7 +221,7 @@ def _run_page(
         "vram_before": before,
         "vram_after": after,
         "peak_allocated_mb": peak_mb,
-        "release_logs": release_logs[-20:],
+        "release_logs": run_release_logs,
         "inject_grounding_failure": inject_grounding_failure,
     }
 
@@ -282,12 +283,12 @@ def main() -> None:
                 lama,
                 out_dir,
                 started_at,
-                release_logs,
+                buffer,
                 timeline,
                 inject_grounding_failure=args.inject_grounding_failure,
             )
             page_runs.append(run)
-            release_logs.extend(_release_logs_from_buffer(buffer))
+            release_logs.extend(run["release_logs"])
             print(
                 f"[{page.name}] {run['elapsed_s']}s "
                 f"statuses={[p['status'] for p in run['panels']]} "
@@ -308,11 +309,11 @@ def main() -> None:
                 lama,
                 out_dir,
                 started_at,
-                release_logs,
+                buffer,
                 timeline,
                 inject_grounding_failure=None,
             )
-            release_logs.extend(_release_logs_from_buffer(buffer))
+            release_logs.extend(first["release_logs"])
             second = _run_page(
                 page,
                 config,
@@ -322,11 +323,11 @@ def main() -> None:
                 lama,
                 out_dir,
                 started_at,
-                release_logs,
+                buffer,
                 timeline,
                 inject_grounding_failure=None,
             )
-            release_logs.extend(_release_logs_from_buffer(buffer))
+            release_logs.extend(second["release_logs"])
             page_runs.append(
                 {
                     "resume_test": str(page),
