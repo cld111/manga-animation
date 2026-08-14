@@ -34,6 +34,7 @@ from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
 from manga_animation.grounding.ground import _prompt_from_label
+from manga_animation.pipeline.types import BBoxPx
 from manga_animation.segmentation import Sam21Client
 
 
@@ -54,7 +55,7 @@ def _measure_region(region_name: str, region: np.ndarray, label: str, dino, sam)
         return
     r_area = region.shape[0] * region.shape[1]
     for di, det in enumerate(detections[:3]):
-        box = det.box
+        box = BBoxPx(x0=det.box[0], y0=det.box[1], x1=det.box[2], y1=det.box[3])
         masks = sam.segment(region, box)
         if not masks:
             print(f"  {label:16s} {region_name} cand{di} score={det.score:.3f}: no mask")
