@@ -201,6 +201,61 @@ class ValidationResult:
     object has no `motion` to check against)."""
 
 
+MaskSemanticVerdict = Literal["accept", "reject", "abstain"]
+"""Phase 12: post-segmentation semantic mask validation's three-way outcome (Workstream 6 --
+explicit UNKNOWN/ABSTAIN handling, not a forced binary). `"abstain"` means the check itself ran
+but produced insufficiently confident evidence either way -- distinct from `"reject"`, a
+confident negative. `pipeline.orchestrator.run_pipeline` treats `"abstain"` identically to
+`"reject"` for every object (fail-closed: a PRIMARY object fails the run, a SECONDARY/MICRO
+object is dropped) -- but the two are recorded distinctly so evaluation reporting never
+collapses a genuine model disagreement into the same bucket as insufficient evidence
+(Workstream 57)."""
+
+
+@dataclass(frozen=True, slots=True)
+class MaskSemanticResult:
+    """Does one SEGMENTED mask's actual pixel content match its intended `semantic_label` --
+
+    not "is this a plausible box for it" (`ValidationResult`, pre-segmentation, bbox-level) but
+    "does the mask's own silhouette/content match the label, in full" (Phase 12, post-
+    segmentation, mask-level). See `validation/mask_semantics.py` for the real Phase 11 defect
+    this exists to catch (`docs/phase11-results.md` section 6.4: a mask geometrically
+    unremarkable -- passes every existing bbox/edge/overlap check -- but semantically wrong,
+    e.g. a "cloth" mask that also covers a full speech bubble and a hand).
+    """
+
+    object_id: str
+    verdict: MaskSemanticVerdict
+    vlm_matches: bool | None
+    """The VLM's raw yes/no read: does the highlighted mask region show ONLY the target object?
+    `None` when the VLM call itself could not be parsed (fail-closed reject, no VLM opinion to
+    record) -- mirrors `ValidationResult.semantic_match`'s own `None`-on-parse-failure
+    convention."""
+    vlm_confidence: float | None
+    reason: str
+    model_id: str
+    method: str
+    """Which candidate method produced this result (e.g. `"vlm_mask_crop_v1"`) -- Workstream
+    30's leaderboard needs this to compare methods; production always uses exactly one, but
+    keeping it explicit costs nothing and matches `ValidationResult.model_id`'s existing
+    precedent for recording provenance instead of assuming a single hardcoded method forever."""
+    unexpected_content: tuple[str, ...] = ()
+    """Free-text labels of unrelated content the VLM reported finding inside the mask (e.g.
+    `("speech bubble", "hand")`) when `vlm_matches` is `False` -- explainability (Workstream 8),
+    not machine-checked."""
+    geometric_signals: dict[str, float] = field(default_factory=dict)
+    """Phase 11's own candidate geometric signals (fragmentation/density/aspect/solidity),
+    computed and RECORDED for every result but never gating (`docs/phase11-results.md` section
+    7: none reliably separates confirmed-defective real masks from legitimate ones on this
+    project's own real evidence) -- retained as secondary, non-gating diagnostic/forensic
+    evidence only (Workstream 9's "only retain signals that demonstrate value" -- these are kept
+    for explainability, explicitly NOT as a decision signal)."""
+
+    @property
+    def accepted(self) -> bool:
+        return self.verdict == "accept"
+
+
 @dataclass(frozen=True, slots=True)
 class SegmentationResult:
     """A pixel-accurate mask for one grounded object.
@@ -357,6 +412,7 @@ Stage = Literal[
     "grounding",
     "validation",
     "segmentation",
+    "mask_semantics",
     "reconstruction",
     "animation",
     "compositing",

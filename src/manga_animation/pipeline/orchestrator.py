@@ -4,15 +4,20 @@ Wires the stage packages together in this actual order (pre-existing doc/code dr
 here: `docs/pipeline.md`'s diagram lists reconstruction before animation, but reconstruction
 needs animation's transformed masks to know what a motion reveals, so it has always run after):
 
-    analysis -> grounding -> validation -> segmentation -> animation -> reconstruction
-    -> compositing -> rendering
+    analysis -> grounding -> validation -> segmentation -> mask_semantics -> animation
+    -> reconstruction -> compositing -> rendering
 
 `validation` (Phase 3.2, `src/manga_animation/validation`) sits between grounding and
 segmentation: a grounding candidate that clears the grounding model's own detection threshold
 is not automatically trusted as semantically correct — see
 `docs/decisions/0006-grounding-target-validation.md`. If every ranked grounding candidate for
 the plan's object fails validation, the run fails outright (`PipelineStageError`, stage=
-`"validation"`) rather than animating an unvalidated best guess.
+`"validation"`) rather than animating an unvalidated best guess. `mask_semantics` (Phase 12,
+`validation.mask_semantics`) sits between segmentation and animation: a segmented mask that
+passes every existing geometric check is not automatically trusted as semantically correct
+either — see `docs/decisions/0018-semantic-mask-validation.md`. The two "validation" stages are
+deliberately distinct: `validation` operates on a grounding bbox before any mask exists;
+`mask_semantics` operates on the real, segmented mask's own pixel content.
 
 This orchestrates the plan's PRIMARY object end to end, plus (Phase 4, see
 docs/decisions/0010-multi-object-layer-decomposition.md) any SECONDARY/MICRO objects the VLM
@@ -23,9 +28,9 @@ grounding/segmentation at all"). Every stage function this module calls already 
 `PipelineStageError` on failure; this module does not swallow or convert those into a false
 success for the PRIMARY object — a failed run surfaces exactly which stage failed and why (see
 the Phase 3.1 brief's "Failure policy", preserved unchanged in Phase 3.2). A SECONDARY/MICRO
-object failing at grounding/validation/segmentation does NOT fail the run — it is dropped from
-the render (logged) while the PRIMARY object's own success/failure policy is unaffected; see
-`_Z_ORDER_BY_MOTION_TYPE` and `ObjectRunResult` below.
+object failing at grounding/validation/segmentation/mask_semantics does NOT fail the run — it is
+dropped from the render (logged) while the PRIMARY object's own success/failure policy is
+unaffected; see `_Z_ORDER_BY_MOTION_TYPE` and `ObjectRunResult` below.
 
 This is orchestration code, not a stage itself — it owns none of the stages' internal
 decisions, only the wiring between their already-defined public entry points.
@@ -60,6 +65,7 @@ from manga_animation.pipeline.types import (
     GroundingResult,
     Layer,
     MaskArray,
+    MaskSemanticResult,
     PipelineStageError,
     ReconstructionResult,
     RenderResult,
@@ -75,7 +81,7 @@ from manga_animation.reconstruction import (
 from manga_animation.rendering import render
 from manga_animation.schemas.animation_plan import AnimationPlan, MotionType, ObjectPlan
 from manga_animation.segmentation import Sam21Client, SegmentationClient, segment_object
-from manga_animation.validation import validate_target
+from manga_animation.validation import validate_target, verify_mask_semantics
 
 logger = get_logger(__name__)
 
@@ -218,10 +224,13 @@ class DroppedObjectResult:
     segmented successfully but conflicts with an already-accepted object's mask closely enough
     to risk a double-exposure ghost if both were animated independently (see
     `_drop_overlapping_secondary_objects` below) -- `reason` always distinguishes which.
+    `failing_stage="mask_semantics"` (Phase 12) is distinct from both: the mask passed every
+    geometric check but `validation.mask_semantics.verify_mask_semantics` REJECTed or ABSTAINed
+    on its actual pixel content -- see `docs/decisions/0018-semantic-mask-validation.md`.
     """
 
     object_plan: ObjectPlan
-    failing_stage: Literal["grounding", "validation", "segmentation"]
+    failing_stage: Literal["grounding", "validation", "segmentation", "mask_semantics"]
     reason: str
 
 
@@ -229,16 +238,19 @@ class DroppedObjectResult:
 class ObjectRunResult:
     """Everything produced for one non-PRIMARY animated object during a run (Phase 4) -- a
 
-    SECONDARY/MICRO object that was successfully grounded, validated, and segmented and is
-    therefore part of the render. An object that failed at any of those stages is simply
-    absent from `PipelineRunResult.secondary_objects` (logged, not silently invented as a
-    result) -- see `docs/decisions/0010-multi-object-layer-decomposition.md`.
+    SECONDARY/MICRO object that was successfully grounded, validated, segmented, and passed
+    semantic mask validation, and is therefore part of the render. An object that failed at any
+    of those stages is simply absent from `PipelineRunResult.secondary_objects` (logged, not
+    silently invented as a result) -- see `docs/decisions/0010-multi-object-layer-decomposition.md`.
     """
 
     object_plan: ObjectPlan
     grounding: GroundingResult
     validation_attempts: list[ValidationResult]
     segmentation: SegmentationResult
+    mask_semantics: MaskSemanticResult | None
+    """`None` only when `PipelineConfig.enable_semantic_mask_validation` is `False` -- the gate
+    never ran, not that it produced no opinion (see Phase 12's config toggle)."""
     reconstruction: ReconstructionResult | None
 
 
@@ -259,6 +271,9 @@ class PipelineRunResult:
     grounding: GroundingResult
     validation_attempts: list[ValidationResult]
     segmentation: SegmentationResult
+    mask_semantics: MaskSemanticResult | None
+    """Phase 12, PRIMARY object only -- see `ObjectRunResult.mask_semantics`'s docstring for the
+    `None` case."""
     reconstruction: ReconstructionResult | None
     render: RenderResult
     secondary_objects: list[ObjectRunResult] = field(default_factory=list)
@@ -656,6 +671,71 @@ def run_pipeline(
         animated_objects, segmentation_by_object, primary.object_id, dropped_objects
     )
 
+    # Phase 12 (docs/decisions/0018-semantic-mask-validation.md): does each real, ACCEPTED mask's
+    # own pixel content actually match its semantic_label -- not just "is this mask's shape
+    # unremarkable" (segmentation's own geometric checks above), but "does the mask's content
+    # match its label" (docs/phase11-results.md section 6.4's confirmed, unresolved finding: a
+    # SAM mask can pass every geometric check while covering substantially more/different real
+    # content than its label). PRIMARY REJECT/ABSTAIN fails the run (same fail-closed policy as
+    # grounding/validation above); SECONDARY/MICRO REJECT/ABSTAIN drops the object.
+    mask_semantics_by_object: dict[str, MaskSemanticResult] = {}
+    if config.enable_semantic_mask_validation:
+        with (
+            _client_lifecycle(vlm_client),
+            StageTimer(
+                "mask_semantics", logger, device=device, model=config.model_variants.get("vlm")
+            ),
+        ):
+            kept_after_semantics: list[ObjectPlan] = []
+            for obj in animated_objects:
+                seg = segmentation_by_object[obj.object_id]
+                mask_result = verify_mask_semantics(image, obj, seg.mask, seg.bbox, vlm_client)
+                mask_semantics_by_object[obj.object_id] = mask_result
+                if mask_result.accepted:
+                    kept_after_semantics.append(obj)
+                    continue
+                if _is_primary(obj.object_id):
+                    raise PipelineStageError(
+                        stage="mask_semantics",
+                        input_ref=obj.object_id,
+                        detail=(
+                            f"semantic mask validation {mask_result.verdict.upper()} for "
+                            f"semantic_label={obj.semantic_label!r}: {mask_result.reason}"
+                        ),
+                        root_cause=(
+                            "the segmented mask passed every geometric check but its actual "
+                            "pixel content does not match the intended semantic target (or the "
+                            "evidence was too weak to tell) -- see "
+                            "docs/decisions/0018-semantic-mask-validation.md"
+                        ),
+                        architectural=False,
+                        proposed_fix=(
+                            "retry with a different page/object, or supply a "
+                            "controlled-fallback AnimationPlan for a human-verified target"
+                        ),
+                    )
+                logger.warning(
+                    "semantic mask validation %s for %s object_id=%s semantic_label=%s -- "
+                    "dropping it from this render (PRIMARY is unaffected): %s",
+                    mask_result.verdict.upper(),
+                    obj.motion_type.value,
+                    obj.object_id,
+                    obj.semantic_label,
+                    mask_result.reason,
+                )
+                dropped_objects.append(
+                    DroppedObjectResult(
+                        object_plan=obj,
+                        failing_stage="mask_semantics",
+                        reason=f"{mask_result.verdict.upper()}: {mask_result.reason}",
+                    )
+                )
+            animated_objects = kept_after_semantics
+            kept_ids = {obj.object_id for obj in animated_objects}
+            segmentation_by_object = {
+                oid: seg for oid, seg in segmentation_by_object.items() if oid in kept_ids
+            }
+
     with StageTimer("animation", logger, device="cpu", model=None):
         frame_count = plan.loop.frame_count
         layers: list[Layer] = []
@@ -734,6 +814,7 @@ def run_pipeline(
             grounding=accepted_by_object[obj.object_id],
             validation_attempts=validation_attempts_by_object[obj.object_id],
             segmentation=segmentation_by_object[obj.object_id],
+            mask_semantics=mask_semantics_by_object.get(obj.object_id),
             reconstruction=reconstructions.get(obj.object_id),
         )
         for obj in animated_objects
@@ -747,6 +828,7 @@ def run_pipeline(
         grounding=accepted_by_object[primary.object_id],
         validation_attempts=validation_attempts_by_object[primary.object_id],
         segmentation=segmentation_by_object[primary.object_id],
+        mask_semantics=mask_semantics_by_object.get(primary.object_id),
         reconstruction=reconstructions.get(primary.object_id),
         render=render_result,
         secondary_objects=secondary_results,

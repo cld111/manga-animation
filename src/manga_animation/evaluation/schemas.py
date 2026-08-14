@@ -44,6 +44,25 @@ class ValidationAttemptOutcome(BaseModel):
     reason: str
 
 
+class MaskSemanticOutcome(BaseModel):
+    """Mirrors `pipeline.types.MaskSemanticResult` for JSON round-tripping (Phase 12, see
+
+    `docs/decisions/0018-semantic-mask-validation.md`) -- same rationale as
+    `ValidationAttemptOutcome` mirroring `pipeline.types.ValidationResult`. Populated only when
+    the real `MaskSemanticResult` object was available to the harness (the gate ran and produced
+    a verdict for this exact object) -- see `ObjectAttemptOutcome.mask_semantics`/
+    `PageRunOutcome.primary_mask_semantics` for when that is/isn't the case.
+    """
+
+    verdict: Literal["accept", "reject", "abstain"]
+    vlm_matches: bool | None
+    vlm_confidence: float | None
+    reason: str
+    method: str
+    unexpected_content: list[str] = []
+    geometric_signals: dict[str, float] = {}
+
+
 ObjectOutcomeStatus = Literal["rendered", "dropped"]
 ObjectOutcomeMotionType = Literal["secondary", "micro"]
 
@@ -67,11 +86,20 @@ class ObjectAttemptOutcome(BaseModel):
     semantic_label: str
     motion_type: ObjectOutcomeMotionType
     status: ObjectOutcomeStatus
-    """"rendered" -- grounded, validated, segmented, and included in the final composited
-    output (mirrors one of `PipelineRunResult.secondary_objects`). "dropped" -- failed at
-    grounding or validation and was excluded per ADR 0010's failure policy (mirrors one of
-    `PipelineRunResult.dropped_objects`) -- this does NOT mean the whole page run failed."""
+    """"rendered" -- grounded, validated, segmented, passed semantic mask validation, and
+    included in the final composited output (mirrors one of
+    `PipelineRunResult.secondary_objects`). "dropped" -- failed at grounding, validation,
+    segmentation, or mask_semantics and was excluded per ADR 0010's failure policy (mirrors one
+    of `PipelineRunResult.dropped_objects`) -- this does NOT mean the whole page run failed."""
     validation_attempts: list[ValidationAttemptOutcome] = []
+    mask_semantics: MaskSemanticOutcome | None = None
+    """Phase 12: populated only for a `status="rendered"` object where the gate actually ran
+    (`PipelineConfig.enable_semantic_mask_validation` was `True`) -- mirrors
+    `ObjectRunResult.mask_semantics`. `None` for a `status="dropped"` object (see `reason` on
+    the synthetic `ValidationAttemptOutcome` `run_one_sample` attaches for a mask_semantics-stage
+    drop instead -- there is no structured `MaskSemanticResult` retained for a dropped object,
+    same limitation `validation_attempts` already has for a grounding-stage drop) or when the
+    gate never ran for this object at all."""
 
 
 class LoopMetricsOutcome(BaseModel):
@@ -147,6 +175,14 @@ class PageRunOutcome(BaseModel):
     outcome recorded before this field existed (`schema_version < 3`, see below). Populated
     from `PipelineRunResult.render` (`pipeline/types.py::RenderResult`) at the same point
     `primary_semantic_label`/`validation_attempts`/etc. already are."""
+    primary_mask_semantics: MaskSemanticOutcome | None = None
+    """Phase 12: the PRIMARY object's own semantic mask validation result (mirrors
+    `PipelineRunResult.mask_semantics`) -- `None` when the gate was disabled
+    (`PipelineConfig.enable_semantic_mask_validation=False`) or for every outcome recorded
+    before this field existed (`schema_version < 5`). A `status="completed"` outcome always has
+    this populated when the gate ran, since a PRIMARY REJECT/ABSTAIN fails the whole run before
+    a `PageRunOutcome` with `status="completed"` can ever be constructed -- see
+    `docs/decisions/0018-semantic-mask-validation.md`."""
     schema_version: int = Field(
         default=1,
         ge=1,
@@ -158,9 +194,12 @@ class PageRunOutcome(BaseModel):
             "empty because none existed. 3 = Phase 8 onward: a producer that also populates "
             "render_summary for every completed outcome. 4 = Phase 9 onward: a producer that "
             "also populates render_summary.seam_artifact_suspected for every completed "
-            "outcome (see manga_animation.evaluation.harness.run_one_sample). This is a "
-            "PREDICTION-schema version a producer sets when it constructs a record -- unlike "
-            "EvalSample.annotation_version (ADR 0009), which is a ground-truth-revision signal "
+            "outcome (see manga_animation.evaluation.harness.run_one_sample). 5 = Phase 12 "
+            "onward: a producer that also populates primary_mask_semantics and "
+            "object_outcomes[].mask_semantics when the semantic mask validation gate ran. This "
+            "is a PREDICTION-schema version a producer sets when it constructs a record -- "
+            "unlike EvalSample.annotation_version (ADR 0009), which is a ground-truth-revision "
+            "signal "
             "only a human bumps by hand -- so it is set programmatically wherever a "
             "PageRunOutcome is actually constructed (see "
             "manga_animation.evaluation.harness.run_one_sample), not left to drift."

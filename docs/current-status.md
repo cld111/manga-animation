@@ -15,8 +15,9 @@ service.
 |---|---|---|
 | Analysis | Panel mode is the default; page mode remains explicit | `docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md` |
 | Grounding | Grounding DINO, panel-crop aware | `docs/decisions/0011-panel-aware-grounding.md` |
-| Target validation | Semantic and transform-geometry gates | `docs/decisions/0006-grounding-target-validation.md`, `0008-transform-aware-target-validation.md` |
+| Target validation | Pre-segmentation semantic and transform-geometry gates | `docs/decisions/0006-grounding-target-validation.md`, `0008-transform-aware-target-validation.md` |
 | Segmentation | SAM 2.1 with mask-shape validation | `docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md` |
+| Semantic mask validation | Post-segmentation ACCEPT/REJECT/ABSTAIN gate, enabled by default | `docs/decisions/0018-semantic-mask-validation.md` |
 | Animation | Deterministic OpenCV/NumPy transforms | `src/manga_animation/animation` |
 | Reconstruction | LaMa, loaded only when motion reveals a hole | `src/manga_animation/reconstruction` |
 | Compositing | Multi-layer, deterministic z-order and overlap protection | `docs/decisions/0010-multi-object-layer-decomposition.md`, `0015-duplicate-silhouette-and-seam-fixes.md` |
@@ -47,7 +48,8 @@ not silently accepted by the production client factory until an adapter exists.
 - A `SECONDARY`/`MICRO` failure is isolated from the run; a `PRIMARY` failure rejects it.
 - A segmentation mask must be a full-source-image, 2D `uint8` array.
 - `analysis_mode="panel"` is the default. Use `analysis_mode="page"` only intentionally.
-- All model-backed stages release their model after the stage completes or fails.
+- All model-backed stages, including semantic mask validation, release their model after the
+  stage completes or fails.
 
 ## Known Product Gaps
 

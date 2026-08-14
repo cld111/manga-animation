@@ -28,6 +28,12 @@ Precise segmentation            — src/manga_animation/segmentation
 Post-segmentation safety gates  — segmentation/orchestration boundary
     │  mask shape and cross-object overlap checks
     ▼
+Semantic mask validation         — src/manga_animation/validation (mask_semantics.py)
+    │  ACCEPT/REJECT/ABSTAIN: does the real mask's own pixel content match the intended
+    │  target, not just "is this box a plausible location for it" (Phase 12 — see
+    │  docs/decisions/0018-semantic-mask-validation.md; a geometrically unremarkable mask
+    │  is not automatically a semantically correct one)
+    ▼
 Deterministic / kinematic       — src/manga_animation/animation
     animation                    │  apply MotionSpec transforms locally
     ▼
@@ -61,6 +67,13 @@ pipeline boundaries, not independent model stages.
 Target validation is owned by `segmentation-agent` because it decides whether a grounded
 region is a plausible target before segmentation. It does not change the VLM's STATIC vs.
 animated decision.
+
+The **semantic mask validation** stage (`src/manga_animation/validation/mask_semantics.py`,
+Phase 12 — see [ADR 0018](decisions/0018-semantic-mask-validation.md)) is owned by
+`segmentation-agent` too, for the same reason: it lives in the same `validation` package,
+consumes `segmentation`'s own real mask output, and its job ("does the real mask's content
+match the label") is a mask-quality question, distinct from `validate_target`'s pre-segmentation
+bbox-plausibility question but structurally the same kind of gate.
 
 ## Model Lifecycle
 

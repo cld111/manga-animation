@@ -28,6 +28,7 @@ Manga page
     -> target validation
     -> precise segmentation
     -> post-segmentation safety gates
+    -> semantic mask validation
     -> deterministic animation
     -> hidden-region reconstruction when needed
     -> original-image compositing

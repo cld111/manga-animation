@@ -1,8 +1,8 @@
 """Pipeline configuration.
 
-Every hardware- or environment-sensitive parameter (device, dtype, resolution, batch size,
-worker count, model variant...) belongs here, loaded from YAML, and never hardcoded in
-pipeline stage code. This is what lets the same codebase run unchanged on a local Apple
+Every hardware- or environment-sensitive parameter (device, dtype, resolution, model
+variant...) belongs here, loaded from YAML, and never hardcoded in pipeline stage code. This
+is what lets the same codebase run unchanged on a local Apple
 Silicon machine and on a remote Kaggle T4/L4 worker — see docs/architecture.md
 ("Remote Compute Is Disposable" / "Model Abstraction").
 """
@@ -44,6 +44,20 @@ class PipelineConfig(BaseModel):
     debug: bool = False
     seed: int = 42
 
+    enable_semantic_mask_validation: bool = Field(
+        default=True,
+        description=(
+            "Phase 12: run the post-segmentation semantic mask validation gate "
+            "(validation.mask_semantics.verify_mask_semantics) between segmentation and "
+            "animation. Defaults on, per this project's 'a clean honest REJECTED is preferable "
+            "to a visually corrupted PASS' precedent (docs/phase11-results.md section 7) -- the "
+            "gate exists specifically to catch the real, confirmed Phase 11 failure mode "
+            "(semantically over-inclusive real SAM masks that pass every existing geometric "
+            "check). Exposed as a config toggle rather than hardcoded so a caller that has "
+            "already characterized this gate's real false-rejection rate for its own dataset "
+            "can disable it deliberately -- see docs/decisions/0018-semantic-mask-validation.md."
+        ),
+    )
     def resolve_device(self) -> Literal["cpu", "cuda", "mps"]:
         """Resolve "auto" to a concrete device, without requiring torch to be installed."""
         if self.device != "auto":

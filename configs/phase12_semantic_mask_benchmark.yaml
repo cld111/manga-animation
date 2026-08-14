@@ -1,0 +1,232 @@
+# Phase 12 semantic-mask validation benchmark. See
+# src/manga_animation/evaluation/mask_dataset.py for the schema (MaskSemanticSample) and
+# docs/decisions/0018-semantic-mask-validation.md / docs/phase12-results.md's benchmarking
+# section for the full design, method comparison, and disclosed limitations.
+#
+# Every sample here is a REAL SegmentationResult.mask array from a real, previously-completed
+# live GPU run (Phase 8.3's or Phase 11's own diagnostic captures) -- never a fabricated or
+# synthetic mask. `ground_truth` is assigned from the corresponding phase report's own
+# independently-confirmed root-cause finding (a real GPU mask-overlay visualization, not a
+# guess) -- see each sample's `evidence` field for the exact citation.
+#
+# Artifact availability: `mask_path`/`source_page` point at git-ignored, locally-generated
+# files (ADR 0002 -- generated outputs are never canonical). They are present on THIS checkout
+# because the GPU runs that produced them already happened here (Phase 8.3's
+# outputs/debug/phase8_3_verification/, Phase 11's outputs/debug/phase11_gpu_evidence/) --
+# `scripts/run_phase12_semantic_benchmark.py` skips (not fails) any sample whose files are
+# missing on a fresh checkout, and reports how many samples were actually evaluated vs.
+# skipped, so a partial local checkout never silently inflates its own coverage claim.
+#
+# Composition (13 real objects total -- see docs/phase12-results.md for why this is smaller
+# than the Phase 12 brief's own "10+ good, 5+ difficult good" target, and why it was not
+# padded with fabricated examples to hit that number):
+#   - 5 BAD (4 from Phase 11's own confirmed-root-cause table, 1 from Phase 8.3's independently
+#     confirmed Defect B -- a different confirmed mechanism, edge-asymmetry rather than
+#     Phase 11's "geometrically unremarkable" signature, kept here as a cross-check case)
+#   - 8 GOOD (real masks from the same GPU captures with no reported visual defect; 3 of these
+#     are additionally tagged difficulty: difficult -- genuinely large/irregular/organic
+#     silhouettes -- so this gate's false-rejection behavior on legitimately hard objects can
+#     be inspected, not just its true-positive behavior on the bad ones)
+#
+# IMPORTANT (Workstream 53/54 -- dataset leakage): every BAD sample here was also part of the
+# real evidence ADR 0018's design decision cites (Phase 11 section 6.4/7). This benchmark is
+# DEVELOPMENT data for this gate, not a held-out, unbiased evaluation set -- see
+# docs/phase12-results.md's contamination-audit section. Any precision/recall number computed
+# from this file describes "does the chosen method correctly re-derive the labels it was
+# designed around," not "how will this method generalize to an unseen page."
+
+samples:
+  # --- Phase 11 GPU capture (outputs/debug/phase11_gpu_evidence/), commit 72c7470 -----------
+
+  - sample_id: villainess_ending_scuffle_obj_raised_sword_12
+    source_page: examples/realworld/villainess_ending_scuffle.png
+    mask_path: outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_primary_mask.npy
+    semantic_label: raised_sword
+    bbox_xyxy: [356, 2083, 627, 2469]
+    transform_kind: rotate
+    ground_truth: good
+    difficulty: typical
+    evidence: >
+      Phase 11 section 6.4's table lists only 4 of this render's objects as confirmed-defective;
+      this PRIMARY sword is not one of them, and no visual defect was reported for it in any
+      phase's inspection of this sample's rendered video.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: villainess_ending_scuffle_obj_cloth_5
+    source_page: examples/realworld/villainess_ending_scuffle.png
+    mask_path: outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_obj_cloth_5_mask.npy
+    semantic_label: cloth
+    bbox_xyxy: [48, 967, 442, 1615]
+    transform_kind: mesh_warp
+    ground_truth: bad
+    difficulty: typical
+    evidence: >
+      docs/phase11-results.md section 5.1/6.4: real mask covers 90.2% of its own tight bbox and
+      visibly includes a full speech bubble ("GIVE IT BACKK!!") and a hand/glove beneath it, not
+      merely cloth -- confirmed by direct mask-overlay visualization
+      (villainess_cloth_ORIGINAL_mask_overlay.png) and by the fact the defect was reproduced
+      byte-identical on a fresh GPU run.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 5.1/6.4"
+
+  - sample_id: wind_breaker_finish_obj_object_in_motion_12
+    source_page: examples/realworld/wind_breaker_finish.png
+    mask_path: outputs/debug/phase11_gpu_evidence/wind_breaker_finish_primary_mask.npy
+    semantic_label: object_in_motion
+    bbox_xyxy: [379, 869, 768, 2250]
+    transform_kind: translate
+    ground_truth: bad
+    difficulty: typical
+    evidence: >
+      docs/phase11-results.md section 3/6.4: grounded as "a bicycle wheel in motion"
+      (grounding_score=0.296), but the real mask is a narrow 389x1381px page-aligned vertical
+      stripe cutting through the rider's face, the wheel's spokes, the jersey, and the hand
+      gripping the handlebar -- not a single coherent object.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 3/6.4"
+
+  - sample_id: wind_breaker_finish_obj_character_hair_0
+    source_page: examples/realworld/wind_breaker_finish.png
+    mask_path: outputs/debug/phase11_gpu_evidence/wind_breaker_finish_obj_character_hair_0_mask.npy
+    semantic_label: character_hair
+    bbox_xyxy: [225, 1296, 363, 1477]
+    transform_kind: translate
+    ground_truth: good
+    difficulty: typical
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects; single connected component
+      (second_largest_fraction=0.0 in the real diagnostic JSON), no reported visual defect.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: wind_breaker_finish_obj_character_clothing_1
+    source_page: examples/realworld/wind_breaker_finish.png
+    mask_path: outputs/debug/phase11_gpu_evidence/wind_breaker_finish_obj_character_clothing_1_mask.npy
+    semantic_label: character_clothing
+    bbox_xyxy: [176, 770, 574, 1313]
+    transform_kind: mesh_warp
+    ground_truth: good
+    difficulty: difficult
+    evidence: >
+      docs/phase11-results.md section 3: "has a real mask that DOES plausibly correspond to
+      real clothing" -- explicitly confirmed clean by direct mask-overlay inspection
+      (wbf_clothing1_ORIGINAL_mask_overlay.png). Tagged difficult: a real mesh_warp clothing
+      mask is large (398x543px) and organically shaped, exactly the kind of legitimate object
+      Phase 11 warned a geometry-only check risks false-rejecting.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 3"
+
+  - sample_id: wind_breaker_finish_obj_character_hair_7
+    source_page: examples/realworld/wind_breaker_finish.png
+    mask_path: outputs/debug/phase11_gpu_evidence/wind_breaker_finish_obj_character_hair_7_mask.npy
+    semantic_label: character_hair
+    bbox_xyxy: [50, 6298, 800, 7135]
+    transform_kind: translate
+    ground_truth: bad
+    difficulty: typical
+    evidence: >
+      docs/phase11-results.md section 3/6.4: real mask covers the character's entire face
+      (sunglasses, both eyes, nose, mouth), not merely hair -- density within its own tight bbox
+      84.3% (wbf_hair7_ORIGINAL_mask_overlay.png).
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 3/6.4"
+
+  - sample_id: sss_hunter_gladiator_obj_raised_sword_18
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_primary_mask.npy
+    semantic_label: raised_sword
+    bbox_xyxy: [397, 935, 665, 1136]
+    transform_kind: rotate
+    ground_truth: good
+    difficulty: typical
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects; no reported visual defect for this
+      PRIMARY sword.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: sss_hunter_gladiator_obj_character_eyes_2
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_character_eyes_2_mask.npy
+    semantic_label: character_eyes
+    bbox_xyxy: [23, 1335, 798, 2546]
+    transform_kind: opacity
+    ground_truth: good
+    difficulty: difficult
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects. Tagged difficult: a real 775x1211px
+      bbox for "eyes" is unusually large and its own real connected-components count is 118 --
+      an organically fragmented real silhouette (anti-aliasing/eyelash detail), exactly the
+      shape a naive fragmentation-only geometric check would risk false-rejecting.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: sss_hunter_gladiator_obj_character_hair_7
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_character_hair_7_mask.npy
+    semantic_label: character_hair
+    bbox_xyxy: [195, 4273, 800, 4918]
+    transform_kind: translate
+    ground_truth: bad
+    difficulty: typical
+    evidence: >
+      docs/phase11-results.md section 5.2/6.4: real mask covers the creature's head AND a large
+      area of the red drape/curtain background behind it
+      (shg_hair7_ORIGINAL_mask_overlay.png) -- the same "semantically over-inclusive,
+      geometrically unremarkable" signature as the other 3 confirmed defects.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 5.2/6.4"
+
+  - sample_id: sss_hunter_gladiator_obj_hand_10
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_hand_10_mask.npy
+    semantic_label: hand
+    bbox_xyxy: [317, 5132, 606, 5355]
+    transform_kind: rotate
+    ground_truth: good
+    difficulty: typical
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects; no reported visual defect.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: sss_hunter_gladiator_obj_green_fluid_15
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_green_fluid_15_mask.npy
+    semantic_label: green_fluid
+    bbox_xyxy: [34, 8147, 399, 8658]
+    transform_kind: rotate
+    ground_truth: good
+    difficulty: difficult
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects. Tagged difficult: a real splatter/
+      fluid effect is an intrinsically irregular, non-convex silhouette by its actual subject
+      matter, not a defect -- a plausible false-positive case for a solidity-based geometric
+      check.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  - sample_id: sss_hunter_gladiator_obj_character_face_17
+    source_page: examples/realworld/sss_hunter_gladiator.png
+    mask_path: outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_character_face_17_mask.npy
+    semantic_label: character_face
+    bbox_xyxy: [593, 8452, 784, 9233]
+    transform_kind: rotate
+    ground_truth: good
+    difficulty: difficult
+    evidence: >
+      Not one of Phase 11's 4 confirmed-defective objects. Tagged difficult: a real 191x781px
+      bbox (4.1:1 aspect ratio) for "face" is unusually elongated for its label -- a plausible
+      false-positive case for an aspect-ratio-based geometric check.
+    provenance: "Phase 11 targeted GPU diagnostic capture, docs/phase11-results.md section 6"
+
+  # --- Phase 8.3 GPU capture (outputs/debug/phase8_3_verification/), Defect B ----------------
+
+  - sample_id: phase3_action_page_obj_character_hair_6
+    source_page: examples/phase3_action_page.png
+    mask_path: outputs/debug/phase8_3_verification/phase3_action_page_hair6_real_sam_mask.npy
+    semantic_label: character_hair
+    bbox_xyxy: [48, 3834, 551, 4551]
+    transform_kind: translate
+    ground_truth: bad
+    difficulty: typical
+    evidence: >
+      docs/phase8.3-results.md: real SAM 2.1 mask over-segmented into adjacent wall/panel
+      background along its own tight bbox's LEFT edge (45.5% edge coverage vs. 2.2-20.2% for
+      five other real masks from the same investigation) -- a DIFFERENT confirmed mechanism
+      than the Phase 11 objects above (geometrically remarkable, already caught by
+      segmentation/segment.py's own edge-asymmetry check in production), kept here as a
+      cross-check: a sound semantic method should also flag this mask's content as wrong,
+      redundantly with the existing geometric gate, not because this method is needed to catch
+      it in production.
+    provenance: "Phase 8.3, docs/phase8.3-results.md / docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md"

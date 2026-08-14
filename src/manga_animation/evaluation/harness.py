@@ -44,16 +44,17 @@ from manga_animation.evaluation.nondeterminism import (
 )
 from manga_animation.evaluation.schemas import (
     LoopMetricsOutcome,
+    MaskSemanticOutcome,
     ObjectAttemptOutcome,
     PageRunOutcome,
     RenderSummary,
     ValidationAttemptOutcome,
 )
 from manga_animation.pipeline.orchestrator import run_pipeline
-from manga_animation.pipeline.types import PipelineStageError, RenderResult
+from manga_animation.pipeline.types import MaskSemanticResult, PipelineStageError, RenderResult
 from manga_animation.schemas.animation_plan import MotionType
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 """The `PageRunOutcome.schema_version` every producer using this harness writes -- see that
 
 field's own docstring for what each version number means. Named here (not just inlined as a
@@ -133,6 +134,28 @@ def _decode_frames(video_path: Path) -> list[np.ndarray]:
     finally:
         cap.release()
     return frames
+
+
+def mask_semantics_outcome_from_result(
+    result: MaskSemanticResult | None,
+) -> MaskSemanticOutcome | None:
+    """`pipeline.types.MaskSemanticResult` -> `evaluation.schemas.MaskSemanticOutcome` -- `None`
+
+    in, `None` out (the gate didn't run for this object, or was disabled entirely), same
+    convention `render_summary_from_result` has no equivalent for since `RenderResult` always
+    exists on a completed run.
+    """
+    if result is None:
+        return None
+    return MaskSemanticOutcome(
+        verdict=result.verdict,
+        vlm_matches=result.vlm_matches,
+        vlm_confidence=result.vlm_confidence,
+        reason=result.reason,
+        method=result.method,
+        unexpected_content=list(result.unexpected_content),
+        geometric_signals=dict(result.geometric_signals),
+    )
 
 
 def render_summary_from_result(
@@ -240,6 +263,7 @@ def run_one_sample(
                 )
                 for v in obj.validation_attempts
             ],
+            mask_semantics=mask_semantics_outcome_from_result(obj.mask_semantics),
         )
         for obj in result.secondary_objects
     ] + [
@@ -250,9 +274,18 @@ def run_one_sample(
             status="dropped",
             # DroppedObjectResult.reason already carries a real, human-readable summary of why
             # this object was dropped -- surfacing it here means the saved JSON alone explains a
-            # drop. Only meaningful when the drop happened AT validation (`dropped.reason` is
-            # validation-attempt prose in that case); a grounding-stage drop never reached
-            # validation, so there is nothing validation-shaped to report.
+            # drop, for the two stages whose drop reason is validation-attempt-shaped prose
+            # ("validation" always was; "mask_semantics" too, Phase 12 -- orchestrator.py formats
+            # `DroppedObjectResult(failing_stage="mask_semantics", reason=f"{verdict.upper()}:
+            # {vlm_reason}")`, so this is real, human-readable evidence, not invented). A
+            # grounding-stage or segmentation-stage drop's own reason is shaped differently (a
+            # bbox/mask-geometry sentence, not a candidate-attempt one) and is intentionally left
+            # unsurfaced here rather than force-fit into `ValidationAttemptOutcome`'s fields --
+            # still a real, disclosed gap for those two stages (docs/phase12-results.md section
+            # 10), just not the one this fix closes. No structured `MaskSemanticResult` is
+            # retained for a dropped object (only kept/rendered objects carry the real result
+            # object this far) -- `mask_semantics=None` stays correct; only the free-text reason
+            # is recovered here.
             validation_attempts=(
                 [
                     ValidationAttemptOutcome(
@@ -262,7 +295,7 @@ def run_one_sample(
                         reason=dropped.reason,
                     )
                 ]
-                if dropped.failing_stage == "validation"
+                if dropped.failing_stage in ("validation", "mask_semantics")
                 else []
             ),
         )
@@ -286,6 +319,7 @@ def run_one_sample(
             )
             for v in result.validation_attempts
         ],
+        primary_mask_semantics=mask_semantics_outcome_from_result(result.mask_semantics),
         object_outcomes=object_outcomes,
         render_summary=render_summary_from_result(
             result.render, seam_artifact_suspected=_seam_artifact_suspected(result.render)
