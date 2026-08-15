@@ -247,8 +247,13 @@ def _extract_one(
     #    show what the model segmented, with the pipeline's rejection verdict recorded.
     from manga_animation.pipeline.types import PipelineStageError as _PSE
 
+    # Mirror the orchestrator's segmentation call: radial_expand gets the Phase 16
+    # max_mask_density gate (0.70), everything else gets None.
+    is_radial = TransformKind(target["transform_kind"]) == TransformKind.RADIAL_EXPAND
+    max_density = 0.70 if is_radial else None
+
     try:
-        seg = segment_object(crop, accepted, sam)
+        seg = segment_object(crop, accepted, sam, max_mask_density=max_density)
         mask = seg.mask
         segment_info = {
             "segment_accepted": True,
