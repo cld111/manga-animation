@@ -155,11 +155,17 @@ conclusion. Candidates without implemented adapters remain research entries.
   real false negative (`cloth_5`, visibly including a speech bubble and hand). Phase 16
   strengthened the prompt to direct the VLM at absorbed adjacent content (text/bubbles/
   hands/faces); a real-VLM re-run measured precision 0.67, recall 0.80, FPR 0.25, FNR 0.20 --
-  `cloth_5` is now caught, at the cost of two new false rejects (raised_sword_12,
-  character_eyes_2, each flagged "includes a speech bubble with text"), a deliberate
-  fail-closed trade-off pending visual adjudication of those two. The VLM confidence values
-  clustered at round numbers, and ABSTAIN was never observed in real calls, so its
-  confidence band is not a calibrated safety valve.
+  `cloth_5` is now caught. The two new "false rejects" (raised_sword_12, character_eyes_2,
+  each flagged "includes a speech bubble with text") were forensically investigated with a
+  neutral VLM probe: the VLM consistently reads multi-object scenes in both (raised_sword_12:
+  "sword with a speech bubble '으악' and another character"; character_eyes_2: "a character
+  holding a glowing orb, wearing armor, speaking"), while correctly reading the cloth_5
+  control -- and raised_sword_12's tight bbox is 271x386 (aspect 0.7, 50% dark), not a thin
+  sword. The provisional conclusion is that those two GOOD labels are more likely wrong than
+  the prompt over-rejected (FPR 0.25 partly an artifact of stale labels); final adjudication
+  still requires human visual inspection of `outputs/debug/phase16_forensics/*_vlm_crop.png`.
+  The VLM confidence values clustered at round numbers, and ABSTAIN was never observed in
+  real calls, so its confidence band is not a calibrated safety valve.
 - Same-category instance identity is unresolved: the gate can accept the correct category on
   the wrong physical instance. No real defect of this exact type has yet been observed.
 - `MESH_WARP` has no calibrated upper bound relative to panel/page geometry.
