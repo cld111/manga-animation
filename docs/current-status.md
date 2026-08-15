@@ -150,10 +150,16 @@ conclusion. Candidates without implemented adapters remain research entries.
 - `marika_love_meter` remains `UNKNOWN`; panel mode safely rejects its independent candidate,
   but this is mitigation, not root-cause repair.
 - SAM 2.1 can produce semantically over-inclusive masks that pass all geometric checks. The
-  semantic gate has a known real false negative (`cloth_5`, visibly including a speech bubble
-  and hand), and its 13-sample development result is provisional: precision 0.75, recall 0.60,
-  FPR 0.12, FNR 0.40. The VLM confidence values clustered at round numbers, and ABSTAIN was
-  never observed in real calls, so its confidence band is not a calibrated safety valve.
+  semantic gate's 13-sample development result is provisional and has evolved: Phase 12's
+  original prompt measured precision 0.75, recall 0.60, FPR 0.12, FNR 0.40, with a known
+  real false negative (`cloth_5`, visibly including a speech bubble and hand). Phase 16
+  strengthened the prompt to direct the VLM at absorbed adjacent content (text/bubbles/
+  hands/faces); a real-VLM re-run measured precision 0.67, recall 0.80, FPR 0.25, FNR 0.20 --
+  `cloth_5` is now caught, at the cost of two new false rejects (raised_sword_12,
+  character_eyes_2, each flagged "includes a speech bubble with text"), a deliberate
+  fail-closed trade-off pending visual adjudication of those two. The VLM confidence values
+  clustered at round numbers, and ABSTAIN was never observed in real calls, so its
+  confidence band is not a calibrated safety valve.
 - Same-category instance identity is unresolved: the gate can accept the correct category on
   the wrong physical instance. No real defect of this exact type has yet been observed.
 - `MESH_WARP` has no calibrated upper bound relative to panel/page geometry.
