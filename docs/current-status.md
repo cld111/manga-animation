@@ -218,6 +218,13 @@ conclusion. Candidates without implemented adapters remain research entries.
   class, not a lifecycle regression. The `impact_burst` -> `radial_expand` mapping was also
   confirmed on a real VLM after the label-keyed effect-classification fix (was `rotate` when
   the description mentioned a weapon).
+- Phase 16 text-animation guard (goal 4, real finding on `sss_hunter_gladiator`): the VLM
+  once labeled free-standing dedication text SECONDARY and the pipeline animated it (rotate)
+  -- both the semantic target check and mask-semantics ACCEPTed it because text was the
+  mask's only content. Fixed deterministically: `ANALYSIS_PROMPT` now forbids animating
+  text-like elements, `_is_text_label` forces text-like semantic_labels to STATIC, and
+  `_rank_candidates` excludes them from animated candidacy. Verified on a re-run: dedication
+  text no longer animated, motion confined to the drawn speed-lines/objects.
 
 ## Immediate Priorities
 
