@@ -50,11 +50,6 @@ def _shell(cmd: str) -> str:
     return (out.stdout + out.stderr).strip()
 
 
-# mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The cu118/torch2.0 openmmlab index provides
-# mmcv 2.0.1 prebuilt against CUDA 11.8 (matching torch 2.1.2+cu118) -- see the install step.
-MMCV_INDEX_URL = "https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html"
-
-
 def _mmcv_version_ok(env_python: str) -> bool:
     """True when the installed mmcv is a 2.0.x release (mmdet 3.1.0's compatible range)."""
     import re
@@ -146,13 +141,19 @@ def main() -> None:
 
     if not _mmcv_version_ok(env_python):
         # mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The cu118/torch2.1 openmmlab index
-        # only has 2.1.0 (rejected) and building mmcv from source is blocked by torch's CUDA
-        # version gate (nvcc 12.8 vs torch 2.1.2+cu118). The cu118/torch2.0 index has mmcv 2.0.1
-        # prebuilt against CUDA 11.8 -- matching torch's CUDA -- and torch 2.0->2.1 extension ABI
-        # is compatible in practice (verified: mmdet imports and ops work on torch 2.1.2).
+        # only ships mmcv 2.1.0 (rejected) and a torch2.0-built 2.0.x wheel is ABI-incompatible
+        # with torch 2.1.2 (missing c10::SymInt symbols), while compiling ops from source is
+        # blocked by torch's CUDA-version gate (nvcc 12.8 vs torch 2.1.2+cu118). The clean path:
+        # build mmcv 2.0.1 WITHOUT compiled ops (MMCV_WITH_OPS=0). mmdet's MSDeformAttn then
+        # falls back to the pure-PyTorch implementation, which is functionally identical (slower,
+        # higher VRAM) -- the measured numbers in the report reflect that, honestly.
         _run([env_python, "-m", "pip", "uninstall", "-y", "mmcv", "mmcv-full"])
-        _run([env_python, "-m", "pip", "install", "mmcv==2.0.1",
-              "-f", MMCV_INDEX_URL])
+        _run([env_python, "-m", "pip", "install", "-q", "setuptools<81"])
+        _run(
+            [env_python, "-m", "pip", "install", "--no-build-isolation", "mmcv==2.0.1"],
+            env=dict(os.environ, MMCV_WITH_OPS="0", FORCE_CUDA="0"),
+            timeout=1800,
+        )
         _run([env_python, "-m", "pip", "install",
               "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
               "mmengine", "transformers==4.36.0", "triton==2.1.0",
