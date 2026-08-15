@@ -18,6 +18,7 @@ from PIL import Image
 
 from manga_animation.benchmarking.phase17.dataset import (
     CATEGORY_IDS,
+    _page_from_file_name,
     decode_rle,
     ms92_book_annotations,
 )
@@ -242,13 +243,25 @@ def compute_forbidden_overlap(
     book_annotations: dict[str, dict[str, Any]] = {
         book: ms92_book_annotations(hf_token, book, cache_dir / "ms92") for book in books
     }
-    # forbidden GT masks per (book, page_index)
+    # forbidden GT masks per (book, within-book page) -- ONLY the pages the manifest uses
+    # (decoding a whole book's forbidden masks would be ~100x wasted work).
+    wanted_pages = {(s.book, s.page_index) for s in manifest.samples}
     forbidden_by_page: dict[tuple[str, int], dict[str, np.ndarray]] = {}
     for book, data in book_annotations.items():
         by_page: dict[int, list[dict[str, Any]]] = {}
+        img_by_id = {img["id"]: img for img in data["images"]}
+        page_size: dict[int, tuple[int, int]] = {}
         for ann in data["annotations"]:
-            by_page.setdefault(ann["image_id"], []).append(ann)
+            img = img_by_id.get(ann["image_id"])
+            if img is None:
+                continue
+            page = _page_from_file_name(img["file_name"])
+            page_size.setdefault(page, (img["height"], img["width"]))
+            if (book, page) not in wanted_pages:
+                continue
+            by_page.setdefault(page, []).append(ann)
         for page, anns in by_page.items():
+            h, w = page_size[page]
             forbidden_by_page[(book, page)] = {
                 name: (
                     np.stack(
@@ -259,9 +272,7 @@ def compute_forbidden_overlap(
                         ]
                     ).any(axis=0)
                     if any(a["category_id"] == CATEGORY_IDS[name] for a in anns)
-                    else np.zeros(
-                        (data["images"][0]["height"], data["images"][0]["width"]), dtype=bool
-                    )
+                    else np.zeros((h, w), dtype=bool)
                 )
                 for name in ("text", "balloon", "frame", "onomatopoeia")
             }

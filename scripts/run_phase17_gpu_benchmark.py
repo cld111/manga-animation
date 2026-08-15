@@ -57,6 +57,28 @@ def _trim_manifest(manifest, limit: int):
     )
 
 
+def _run_report_only(manifest, results_path: Path, run_dir: Path, out_dir: Path) -> None:
+    """Rebuild aggregate/report/visuals/forbidden-overlap from saved per-sample results (no
+    GPU): used after a GPU run whose report step failed or was skipped."""
+    from manga_animation.benchmarking.phase17.run import SampleResult
+
+    raw = json.loads(results_path.read_text(encoding="utf-8"))
+    results = [SampleResult(**entry) for entry in raw]
+    report = aggregate(results)
+    json_path, md_path = write_report(report, results, run_dir)
+    print(f"report: {json_path}\n        {md_path}")
+    visual_dir = run_dir / "visual_failures"
+    written = build_visual_failures(results, manifest, out_dir / "dataset", visual_dir)
+    print(f"visual failure packages: {len(written)} under {visual_dir}")
+    hf_token = os.environ.get("HF_TOKEN")
+    forbidden = {}
+    if hf_token:
+        forbidden = compute_forbidden_overlap(results, manifest, out_dir / "cache", hf_token)
+    (run_dir / "forbidden_overlap.json").write_text(
+        json.dumps(forbidden, indent=2), encoding="utf-8"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 17 object segmentation GPU benchmark")
     parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
@@ -65,6 +87,13 @@ def main() -> None:
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=None, help="run only the first N samples")
     parser.add_argument("--skip-report", action="store_true", help="skip CPU report/visualization")
+    parser.add_argument(
+        "--report-only",
+        metavar="RUN_DIR",
+        default=None,
+        help="rebuild report/visuals/forbidden-overlap from an existing run dir's saved "
+        "per_sample_results.json (no GPU work); RUN_DIR is relative to --out",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -76,6 +105,15 @@ def main() -> None:
 
     out_dir = Path(args.out)
     dataset_dir = out_dir / "dataset"
+
+    if args.report_only is not None:
+        run_dir = out_dir / args.report_only
+        results_path = run_dir / "per_sample_results.json"
+        if not results_path.exists():
+            raise SystemExit(f"no per_sample_results.json in {run_dir}")
+        _run_report_only(manifest, results_path, run_dir, out_dir)
+        return
+
     run_dir = out_dir / f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
