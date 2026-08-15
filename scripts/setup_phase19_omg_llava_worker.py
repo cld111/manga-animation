@@ -45,7 +45,7 @@ def _run(cmd: list[str], *, env: dict | None = None, timeout: int = 3600) -> Non
 
 def _shell(cmd: str) -> str:
     out = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return out.stdout.strip()
+    return (out.stdout + out.stderr).strip()
 
 
 def main() -> None:
@@ -79,6 +79,19 @@ def main() -> None:
         venv = Path("/kaggle/working/omgllava-venv")
         _shell(f"{py310} -m venv {venv}")
         env_python = str(venv / "bin" / "python")
+
+    # A Debian system python3.10 venv can be created WITHOUT pip (no ensurepip). Bootstrap pip
+    # explicitly if `python -m pip` is missing, so the torch install below can proceed.
+    if "No module named pip" in _shell(f"{env_python} -m pip --version"):
+        _run([env_python, "-m", "ensurepip", "--upgrade", "--default-pip"])
+        if "No module named pip" in _shell(f"{env_python} -m pip --version"):
+            _run([
+                env_python, "-c",
+                "import urllib.request; "
+                "urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', "
+                "'/tmp/get-pip.py')",
+            ])
+            _run([env_python, "/tmp/get-pip.py"])
 
     def in_env(pkg: str) -> bool:
         return _shell(f"{env_python} -c 'import importlib.util; "
