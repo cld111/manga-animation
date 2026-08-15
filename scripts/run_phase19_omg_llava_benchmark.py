@@ -35,20 +35,14 @@ import argparse
 import datetime as _datetime
 import json
 import os
-from datetime import datetime as _dt
 from pathlib import Path
 
+import _py310_compat  # noqa: F401 -- applies the py3.10 datetime.UTC shim before imports
 import numpy as np
 from PIL import Image
 
-# python-3.10 compat shim for the OMG-LLaVA worker env: the benchmark runs inside the
-# official omg_llava python-3.10 venv (the stack is pinned to 2024-era deps), but the
-# manga-animation harness modules use `datetime.UTC` (python 3.11+). `timezone.utc` is
-# identical; patch it into the datetime module before any manga_animation import so
-# `from datetime import UTC` resolves. Benchmark-harness-only, not a production change.
-if not hasattr(_datetime, "UTC"):
-    _datetime.UTC = _datetime.timezone.utc  # type: ignore[attr-defined]  # noqa: UP017
 UTC = _datetime.UTC
+_dt = _datetime.datetime
 
 from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest, load_manifest
 from manga_animation.benchmarking.phase19.adapter import OMGLLavaAdapter
