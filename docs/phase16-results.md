@@ -210,6 +210,17 @@ the mask would have dragged adjacent panel content along when translated. The ef
 prompt itself proposed no effect targets on this dialogue page (speech_bubble/panel_border
 static; see Run 8), so the drawn-effect track added nothing unsafe here.
 
+### Run 10: full pipeline on `villainess_ending_scuffle` (with effect-dominance fix)
+
+`run_phase16_gpu_effects.py --pages examples/realworld/villainess_ending_scuffle.png`.
+
+Panel statuses: `[STATIC, REJECTED, REJECTED, REJECTED]` -- every panel fail-closed
+correctly on real defects, none rendering a wrong animation:
+- a `raised_sword` PRIMARY candidate was caught by mask-semantics ("The bright region
+  includes the character's head, which is not part of the raised sword");
+- `impact_burst` and `eye` secondary/micro candidates failed grounding;
+- no effect label was mis-mapped to an object transform (the effect-dominance fix held).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
