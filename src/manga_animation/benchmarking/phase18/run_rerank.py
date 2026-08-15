@@ -160,7 +160,7 @@ def _collect_scores(
 def rerank_targets(
     manifest: BenchmarkManifest,
     detections_by_page: dict[str, list[dict[str, Any]]],
-    scores_by_page: dict[str, dict[str, VlmCandidateScore]],
+    scores_by_page: dict[str, dict[str, dict[str, Any]]],
     image_shapes: dict[str, tuple[int, int]],
     *,
     specific_scores_by_page: dict[str, dict[str, dict[str, Any]]] | None = None,

@@ -8,9 +8,6 @@ import pytest
 from manga_animation.benchmarking.phase17.dataset import CandidateInstance
 from manga_animation.benchmarking.phase17.manifest import build_manifest
 from manga_animation.benchmarking.phase18.report_rerank import build_report
-from manga_animation.benchmarking.phase18.rerank import (
-    VlmCandidateScore,
-)
 from manga_animation.benchmarking.phase18.run_rerank import rerank_targets
 
 
@@ -56,8 +53,8 @@ def test_rerank_targets_measures_selection_accuracy():
         return f"{box[0]}_{box[1]}_{box[2]}_{box[3]}"
 
     def score(box, dino, matches, conf):
-        return VlmCandidateScore(box=tuple(box), dino_score=dino, matches=matches,
-                                 confidence=conf, reason="r")
+        return {"box": list(box), "dino_score": dino, "matches": matches,
+                "confidence": conf, "reason": "r"}
 
     scores = {
         "BOOK_000": {
@@ -96,8 +93,8 @@ def test_build_report_splits_eligible_and_category_c():
     }
 
     def score(box, matches, conf):
-        return VlmCandidateScore(box=tuple(box), dino_score=0.9, matches=matches,
-                                 confidence=conf, reason="r")
+        return {"box": list(box), "dino_score": 0.9, "matches": matches,
+                "confidence": conf, "reason": "r"}
 
     def key(box):
         return f"{box[0]}_{box[1]}_{box[2]}_{box[3]}"
@@ -127,8 +124,8 @@ def test_classify_error_candidate_absent():
     detections = {"BOOK_002": [{"box": [150, 150, 170, 170], "score": 0.8}]}
 
     def score(box, matches, conf):
-        return VlmCandidateScore(box=tuple(box), dino_score=0.8, matches=matches,
-                                 confidence=conf, reason="r")
+        return {"box": list(box), "dino_score": 0.8, "matches": matches,
+                "confidence": conf, "reason": "r"}
 
     def key(box):
         return f"{box[0]}_{box[1]}_{box[2]}_{box[3]}"
