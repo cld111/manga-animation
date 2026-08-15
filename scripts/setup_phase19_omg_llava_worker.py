@@ -159,8 +159,10 @@ def main() -> None:
               "bitsandbytes", "peft", "accelerate", "sentencepiece", "einops",
               "scikit-image", "scipy", "pycocotools", "datasets", "kornia", "ftfy",
               "timm", "openpyxl", "lagent", "gradio==4.37.2", "gradio-image-prompter"])
-        # torch 2.1.2 and the 2024 mm stack were built against numpy 1.x (numpy 2 breaks the
-        # torch<->numpy bridge and opencv 5 needs numpy>=2), so pin both.
+
+    # torch 2.1.2 and the 2024 mm stack were built against numpy 1.x (numpy 2 breaks the
+    # torch<->numpy bridge and opencv 5 needs numpy>=2), so pin both unconditionally.
+    if "1.26" not in _shell(f"{env_python} -c 'import numpy; print(numpy.__version__)'"):
         _run([env_python, "-m", "pip", "install", "-q", "numpy<2", "opencv-python<5"])
 
     # --- 2. official repo at the pinned commit --------------------------------------------
