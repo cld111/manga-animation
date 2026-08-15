@@ -15,7 +15,6 @@ Run on the GPU worker. Usage:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -26,11 +25,14 @@ from manga_animation.pipeline.types import BBoxPx
 from manga_animation.validation.mask_semantics import _crop_with_mask_overlay
 
 SAMPLES = [
-    ("raised_sword_12", "outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_primary_mask.npy",
+    ("raised_sword_12",
+     "outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_primary_mask.npy",
      "examples/realworld/villainess_ending_scuffle.png", "good (new prompt: bad)"),
-    ("character_eyes_2", "outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_character_eyes_2_mask.npy",
+    ("character_eyes_2",
+     "outputs/debug/phase11_gpu_evidence/sss_hunter_gladiator_obj_character_eyes_2_mask.npy",
      "examples/realworld/sss_hunter_gladiator.png", "good (new prompt: bad)"),
-    ("cloth_5", "outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_obj_cloth_5_mask.npy",
+    ("cloth_5",
+     "outputs/debug/phase11_gpu_evidence/villainess_ending_scuffle_obj_cloth_5_mask.npy",
      "examples/realworld/villainess_ending_scuffle.png", "bad (control: really has bubble+hand)"),
 ]
 
