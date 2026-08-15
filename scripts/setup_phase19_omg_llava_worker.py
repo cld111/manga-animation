@@ -109,8 +109,12 @@ def main() -> None:
         ])
 
     if not in_env("mmcv"):
+        # mmcv 2.x has no PyPI wheels for torch 2.1 -- use the official openmmlab prebuilt
+        # index for cu118/torch2.1 (avoids a 20+ minute source build).
+        _run([env_python, "-m", "pip", "install", "mmcv==2.1.0",
+              "-f", "https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html"])
         _run([env_python, "-m", "pip", "install",
-              "mmcv==2.1.0", "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
+              "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
               "mmengine", "transformers==4.36.0", "triton==2.1.0",
               "bitsandbytes", "peft", "accelerate", "sentencepiece", "einops",
               "scikit-image", "scipy", "pycocotools", "datasets", "kornia", "ftfy",
