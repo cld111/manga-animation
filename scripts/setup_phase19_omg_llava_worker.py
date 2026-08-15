@@ -161,7 +161,7 @@ def main() -> None:
             MMCV_WITH_OPS="1",
         )
         _run(
-            [env_python, "-m", "pip", "install", MMCV_GIT_URL],
+            [env_python, "-m", "pip", "install", "--no-build-isolation", MMCV_GIT_URL],
             env=build_env,
             timeout=7200,
         )
