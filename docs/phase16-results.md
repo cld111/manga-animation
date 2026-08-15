@@ -199,6 +199,17 @@ not a pipeline regression; the PASS panel still rendered and verified.)
   `character_hair` translate). PRIMARY was `drinking` (a VLM label oddity, not a pipeline
   issue).
 
+### Run 9: full pipeline on `reality_lie_office`
+
+`run_phase16_gpu_effects.py --pages examples/realworld/reality_lie_office.png`.
+
+Panel status: `[REJECTED]`. The chosen PRIMARY (`character_hair`, translate) was correctly
+fail-closed at segmentation: its SAM mask hugged the tight bbox's top edge for 86.8% of that
+edge's length vs. 12.9% opposite -- the Phase 8.3 one-sided over-segmentation signature, so
+the mask would have dragged adjacent panel content along when translated. The effect-aware
+prompt itself proposed no effect targets on this dialogue page (speech_bubble/panel_border
+static; see Run 8), so the drawn-effect track added nothing unsafe here.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
