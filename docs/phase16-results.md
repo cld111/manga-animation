@@ -363,6 +363,36 @@ object and did not emit `green_fluid` this run, so the mesh_warp fluid path stil
 live end-to-end render (covered by the E2E speed_lines test and the green_fluid unit test,
 but not by a real render).
 
+### Run 22: mask-forensics -- are raised_sword_12 / character_eyes_2 real false-rejects?
+
+The strengthened mask prompt flagged two GOOD benchmark masks as bad ("includes a speech
+bubble with text"). To decide whether the prompt hallucinates bubbles or the ground-truth
+labels are wrong, a neutral forensic probe re-asked the VLM with an open question ("describe
+what is inside the bright region") on the exact same masked crops, with cloth_5 (a
+confirmed bubble+hand mask) as positive control:
+
+- `raised_sword_12` (GOOD label): VLM sees "a character holding a sword with a speech
+  bubble saying '으악' and another character in the background" -- it consistently reads a
+  multi-element scene, not a single sword.
+- `character_eyes_2` (GOOD label): VLM sees "a green-skinned character holding a glowing
+  orb, wearing armor, and speaking" -- a whole scene, not just eyes.
+- `cloth_5` (control): VLM correctly reads "a speech bubble with text 'GIVE IT BACKK!!' and
+  a hand" -- the probe is not a generic hallucinator.
+
+Deterministic corroboration: raised_sword_12's tight bbox is 271x386 (aspect 0.7) with 50%
+dark pixels -- a nearly square solid block, not a thin sword (aspect ~0.1-0.3). The
+confirmed-cloth_5 false negative (67% white + large white blob with dense dark text) is the
+same structure class the two disputed masks lack, but the disputed masks are not thin clean
+objects either.
+
+Interpretation: the two "false rejects" are more likely **incorrect GOOD benchmark labels**
+than prompt over-rejection -- two independent VLM prompts (old-style binary and open
+description) agree the masks contain multiple objects/scene content, and the mask geometry
+does not look like the labeled object. This means the new prompt's FPR 0.25 may be partly an
+artifact of stale labels, not pure over-rejection. Final adjudication still requires human
+visual inspection of the saved crops (`outputs/debug/phase16_forensics/*_vlm_crop.png`),
+which is outside this project's automated scope.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
