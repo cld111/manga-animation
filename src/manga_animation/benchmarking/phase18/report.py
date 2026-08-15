@@ -10,6 +10,7 @@ all DINO candidates and at what rank -- and explicitly separates OBSERVED FACTS 
 from __future__ import annotations
 
 import json
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,9 +57,12 @@ def build_report(targets: list[TargetRecall]) -> Phase18Report:
         candidate_below_top1=candidate_below_top1,
     )
 
-
 def _fmt(v: float | None) -> str:
     return "n/a" if v is None else f"{v:.3f}"
+
+
+def _percent(x: float) -> str:
+    return f"{x * 100:.1f}%"
 
 
 def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
@@ -84,6 +88,7 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
 
         def cell(k, r=r):
             return _fmt(r.get(k))
+
         lines.append(
             f"| {t:.2f} | {cell(1)} | {cell(3)} | {cell(5)} | {cell(10)} | {cell(20)} | "
             f"{cell(None)} | {c.category_counts['A']} | {c.category_counts['B']} | "
@@ -94,12 +99,49 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
         "Category A = correct candidate exists AND is top-1; B = exists but below top-1; "
         "C = no candidate at this IoU threshold.",
         "",
+        "## Rank of the best correct candidate (primary IoU >= 0.5)",
+        "",
+    ]
+    p05 = 0.5
+    ranks: list[int] = []
+    for target in report.targets:
+        tr = target.per_threshold[p05]
+        if tr.correct_exists and tr.best_rank is not None:
+            ranks.append(tr.best_rank)
+    if ranks:
+        buckets = {"1": 0, "2-3": 0, "4-5": 0, "6-10": 0, "11-20": 0, ">20": 0}
+        for rk in ranks:
+            if rk == 1:
+                buckets["1"] += 1
+            elif rk <= 3:
+                buckets["2-3"] += 1
+            elif rk <= 5:
+                buckets["4-5"] += 1
+            elif rk <= 10:
+                buckets["6-10"] += 1
+            elif rk <= 20:
+                buckets["11-20"] += 1
+            else:
+                buckets[">20"] += 1
+        lines.append("| rank | count |")
+        lines.append("|---|---|")
+        for label, count in buckets.items():
+            lines.append(f"| {label} | {count} |")
+        lines.append("")
+        lines.append(f"Median best-correct rank: {statistics.median(ranks)}")
+    lines += [
+        "",
         "## Answer",
         "",
-        "OBSERVED FACTS: (filled in docs/phase18.1-results.md after inspection)",
-        "INTERPRETATION / HYPOTHESES / NEXT RECOMMENDATION: docs/phase18.1-results.md.",
+        "OBSERVED: the correct candidate is present among all DINO detections in "
+        f"{_percent(report.curves[p05].recall_at_k[None])} of targets at IoU >= 0.5 "
+        f"(R@All), but only {_percent(report.curves[p05].recall_at_k[1])} are top-1. "
+        f"Category split at 0.5: A={report.curves[p05].category_counts['A']}, "
+        f"B={report.curves[p05].category_counts['B']}, "
+        f"C={report.curves[p05].category_counts['C']}.",
         "",
-        "## Per-target detail (machine-readable in report.json)",
+        "Full analysis, interpretation, hypotheses, and next recommendation: "
+        "docs/phase18.1-results.md.",
         "",
     ]
     md_path = out_dir / "report.md"

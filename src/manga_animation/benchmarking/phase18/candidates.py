@@ -61,6 +61,25 @@ class TargetRecall:
             },
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TargetRecall:
+        return cls(
+            sample_id=str(data["sample_id"]),
+            page_key=str(data["page_key"]),
+            gt_bbox=(
+                int(data["gt_bbox"][0]),
+                int(data["gt_bbox"][1]),
+                int(data["gt_bbox"][2]),
+                int(data["gt_bbox"][3]),
+            ),
+            n_candidates=int(data["n_candidates"]),
+            top1_iou=float(data["top1_iou"]),
+            best_iou_overall=float(data["best_iou_overall"]),
+            per_threshold={
+                float(t): ThresholdRecall.from_dict(tr) for t, tr in data["per_threshold"].items()
+            },
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ThresholdRecall:
@@ -83,6 +102,20 @@ class ThresholdRecall:
             "category": self.category,
             "topk_best_iou": {str(k): v for k, v in self.topk_best_iou.items()},
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ThresholdRecall:
+        return cls(
+            threshold=float(data["threshold"]),
+            correct_exists=bool(data["correct_exists"]),
+            best_rank=data["best_rank"],
+            best_score=data["best_score"],
+            category=str(data["category"]),
+            topk_best_iou={
+                (None if k == "None" else int(k)): float(v)
+                for k, v in data["topk_best_iou"].items()
+            },
+        )
 
 
 def rank_candidates(detections) -> list[RankedCandidate]:
