@@ -1,0 +1,42 @@
+# Phase 17 benchmark preparation config: which Manga109 books to draw the candidate pool from,
+# and how to select the committed manifest. See scripts/run_phase17_prepare_dataset.py and
+# src/manga_animation/benchmarking/phase17/{dataset,manifest}.py.
+#
+# `candidate_books` is a spread of Manga109 titles (26 books across different series/artists)
+# whose MS92/MangaSegmentation body annotations form the pool the benchmark manifest is
+# deterministically selected from. PrayerHaNemurenai is deliberately excluded (Manga109-v2026
+# resized that title's images; we do not want a size-provenance ambiguity in the benchmark).
+#
+# `seed`/`target_size` make the committed manifest reproducible; changing them regenerates a
+# different (equally valid) manifest.
+version: 1
+seed: 17
+target_size: 64
+verify_pages: 6
+candidate_books:
+  - ARMS
+  - AkkeraKanjinchou
+  - AosugiruHaru
+  - Arisa
+  - BEMADER_P
+  - BakuretsuKungFuGirl
+  - Count3DeKimeteAgeru
+  - DualJustice
+  - EverydayOsakanaChan
+  - GarakutayaManta
+  - HeiseiJimen
+  - HisokaReturns
+  - Joouari
+  - KimiHaBokuNoTaiyouDa
+  - LoveHina_vol01
+  - MAD_STONE
+  - MeteoSanStrikeDesu
+  - MoeruOnisan_vol19
+  - MutekiBoukenSyakuma
+  - NichijouSoup
+  - OL_Lunch
+  - RisingGirl
+  - TaiyouNiSmash
+  - UltraEleven
+  - YamatoNoHane
+  - YumeiroCooking

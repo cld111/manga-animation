@@ -142,6 +142,21 @@ conclusion. Candidates without implemented adapters remain research entries.
   page's `impact_burst` SECONDARY was correctly fail-closed by geometric validation instead
   of rendered. See `Known Limitations`/`Immediate Priorities` for what Phase 16 did and did
   not yet exercise.
+- Phase 17 (diagnostic only, no production changes; see docs/phase17-results.md) measured the
+  production DINO->SAM path against 64 human-annotated MangaSegmentation `body` instances
+  (23 books) in three independent experiments. **Result: the bottleneck is Grounding DINO
+  specific-instance localization, not SAM.** With a perfect GT box, SAM 2.1 segments manga
+  characters well (median IoU 0.884, mean 0.853, recall 0.953). Grounding DINO's top
+  "character body." detection on full pages is the wrong instance in 60/64 samples (median
+  bbox IoU 0.000; detection scores 0.44-0.67, so no threshold fix), and the production path
+  inherits this (median IoU 0.000; only 3/64 healthy end-to-end). When DINO's box is right
+  (4/64), DINO->SAM->gates IoU ~= SAM-only IoU (0.86-0.96). Production gates rejected 20/64
+  masks, 19 of already-bad masks + 1 false rejection (UltraEleven_111_695642). Safety track:
+  text/balloon/onomatopoeia are not absorbed into object masks (<=1-3%); frame overlap is a
+  background artifact of the localization failure, not a forbidden-target selection bug.
+  Measured on full pages (no panel GT in the dataset) -- a conservative lower bound for
+  panel-mode production. Comix Books v0 was excluded as GT (SAMv2-generated, aggregated
+  masks -- circular for a SAM benchmark).
 
 ## Known Limitations and Technical Debt
 
@@ -267,6 +282,12 @@ These are future work, not implemented capabilities:
    406 MiB free while the sharded Qwen held 13.4 GiB): the panel is correctly isolated and
    all models release, but a worker-level retry/fallback for OOM on large panels would make
    dense pages more robust (same class as Phase 11's documented LaMa OOMs).
+10. **Phase 17 follow-up (grounding is the measured bottleneck, docs/phase17-results.md):**
+    before touching anything, decide a direction -- e.g. (a) confirm panel-crop grounding on a
+    real panel-GT benchmark (the Phase 17 numbers are full-page and are a lower bound for
+    panel mode), (b) evaluate prompt phrasing / a second grounding model (OWLv2 is an existing
+    manifest candidate), or (c) accept instance-level ambiguity and redesign candidate
+    selection. Do not change production grounding on a 64-sample full-page result alone.
 
 ## Verification and Workflow
 
@@ -292,3 +313,5 @@ changes move between local and remote only through git.
 - [`kaggle-jupyter.md`](kaggle-jupyter.md): verified remote-Kaggle connection/execution/watchdog procedure.
 - [`decisions/`](decisions/): accepted decisions, supersession, and rationale.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
+  Phase 17 (object-segmentation diagnostic benchmark) lives in
+  [`phase17-results.md`](phase17-results.md).
