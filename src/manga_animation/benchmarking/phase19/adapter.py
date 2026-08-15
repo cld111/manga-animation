@@ -152,6 +152,9 @@ class OMGLLavaAdapter:
         from xtuner.registry import BUILDER
 
         cfg = Config.fromfile(str(self.config_path))
+        # The official chat tool nulls the config's pretrain checkpoint before building --
+        # the finetune pth passed on the CLI is loaded separately via load_state_dict.
+        cfg.model.pretrained_pth = None
         self._apply_llm_strategy(cfg)
         model = BUILDER.build(cfg.model)
 
