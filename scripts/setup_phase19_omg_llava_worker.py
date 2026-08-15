@@ -55,6 +55,20 @@ def main() -> None:
     parser.add_argument("--env-name", default="omg-llava")
     parser.add_argument("--omg-seg-commit", default=OMG_SEG_DEFAULT_COMMIT)
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""))
+    parser.add_argument(
+        "--python-bin", default=None,
+        help="interpreter used to CREATE the venv (default: conda python3.10, else python3.10/"
+        "3.11 on PATH). The official OMG stack was built for python 3.10, but python 3.11 works "
+        "too AND lets the manga-animation harness (requires >=3.11, uses StrEnum/datetime.UTC) "
+        "be pip-installed into the same env -- the phase-19 CLI then runs in one interpreter. "
+        "The phase brief's environment is honored either way; this flag is the pragmatic path "
+        "when the worker only has python3.10 and python3.11 must come from uv.",
+    )
+    parser.add_argument(
+        "--venv-path", default="/kaggle/working/omgllava-venv",
+        help="where the dedicated venv lives (default /kaggle/working/omgllava-venv; the "
+        "20GB /kaggle/working loop mount can fill up, so pass an overlay path when needed).",
+    )
     args = parser.parse_args()
 
     weights_dir = Path(args.weights_dir)
@@ -65,18 +79,22 @@ def main() -> None:
         raise SystemExit("HF_TOKEN is required to download the gated/interm LM weights")
 
     # --- 1. environment -------------------------------------------------------------------
-    # Prefer conda (Kaggle images ship miniconda); fall back to a python3.10 venv.
+    # Prefer an explicit --python-bin; else conda; else python3.10/3.11; then a plain venv.
     env_python = None
-    if shutil.which("conda"):
-        _shell(f"conda create -n {env_name} python=3.10 -y")
-        env_python = f"/opt/conda/envs/{env_name}/bin/python"
+    if args.python_bin:
+        venv = Path(args.venv_path)
+        _shell(f"{args.python_bin} -m venv {venv}")
+        env_python = str(venv / "bin" / "python")
+    elif shutil.which("conda"):
+        _shell("conda create -n {} python=3.10 -y".format(env_name))
+        env_python = "/opt/conda/envs/{}/bin/python".format(env_name)
         if not Path(env_python).exists():
             env_python = None
     if env_python is None:
         py310 = shutil.which("python3.10") or shutil.which("python3.11")
         if py310 is None:
             raise SystemExit("no conda and no python3.10/3.11 -- cannot build the OMG-LLaVA env")
-        venv = Path("/kaggle/working/omgllava-venv")
+        venv = Path(args.venv_path)
         _shell(f"{py310} -m venv {venv}")
         env_python = str(venv / "bin" / "python")
 
@@ -127,10 +145,12 @@ def main() -> None:
     _run(["git", "-C", str(src_dir), "fetch", "--all"], timeout=1800)
     _run(["git", "-C", str(src_dir), "checkout", args.omg_seg_commit])
     _run([env_python, "-m", "pip", "install", "-e", str(src_dir / "omg_llava")])
-    # The manga-animation package cannot be pip-installed here: it requires python>=3.11 and
-    # this env is python 3.10. The phase-19 benchmark only imports its light modules
-    # (manifest/config/metrics -- no torch/transformers at import time), so the run commands
-    # set PYTHONPATH=/kaggle/working/manga-animation/src instead of installing it.
+    # The phase-19 benchmark CLI imports the manga-animation package (manifest/config/metrics,
+    # light, no torch at import time). On python 3.11+ it pip-installs cleanly (requires >=3.11);
+    # on python 3.10 the run commands set PYTHONPATH=/kaggle/working/manga-animation/src instead.
+    pyver = _shell(f"{env_python} -c 'import sys; print(f\"{{sys.version_info.major}}.{{sys.version_info.minor}}\")'")
+    if tuple(int(p) for p in pyver.split(".")) >= (3, 11):
+        _run([env_python, "-m", "pip", "install", "-q", "-e", "/kaggle/working/manga-animation"])
 
     # --- 3. weights -----------------------------------------------------------------------
     weights_dir.mkdir(parents=True, exist_ok=True)
