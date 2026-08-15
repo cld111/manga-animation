@@ -294,7 +294,7 @@ def main() -> None:
                 {
                     "sample": target["semantic_label"],
                     "source_page": target["page"],
-                    "panel": target["panel_id"],
+                    "panel": result["panel"],
                     "semantic_label": target["semantic_label"],
                     "transform_kind": target["transform_kind"],
                     "mask_path": str(mask_path),
