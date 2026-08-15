@@ -26,9 +26,12 @@ _GRID_LABELS = (
 )
 
 
-def _rank_priority(targets: list[PerTargetMetrics]) -> list[str]:
-    """Deterministic priority list of sample_ids for visual review."""
+def _rank_priority(targets: list[PerTargetMetrics], max_cases: int = 12) -> list[str]:
+    """Deterministic priority list of sample_ids for visual review: the worst failures first,
+    always including the best successes (so the review can see what a correct localization
+    looks like, not only the failures)."""
     scored: list[tuple[float, str, str]] = []
+    successes: list[tuple[float, str, str]] = []
     for t in targets:
         iou = t.bbox_iou
         scored.append(
@@ -40,10 +43,14 @@ def _rank_priority(targets: list[PerTargetMetrics]) -> list[str]:
             scored.append((1.0, f"notfound:{t.sample_id}", t.sample_id))
         if t.qs_mask_iou is not None:
             scored.append((t.qs_mask_iou, f"qs_worst:{t.sample_id}", t.sample_id))
-        scored.append((iou if iou is not None else -1.0, f"best_iou:{t.sample_id}", t.sample_id))
+        if iou is not None and iou >= 0.5:
+            successes.append((-iou, f"best_iou:{t.sample_id}", t.sample_id))
     scored.sort(key=lambda item: (item[0], item[1]))
+    successes.sort(key=lambda item: (item[0], item[1]))
+    n_success = min(3, len(successes))
+    keep_failures = max_cases - n_success
     seen: list[str] = []
-    for _, _reason, sample_id in scored:
+    for _, _reason, sample_id in scored[:keep_failures] + successes[:n_success]:
         if sample_id not in seen:
             seen.append(sample_id)
     return seen
@@ -93,7 +100,7 @@ def build_visual_packages(
     samples_by_id = {s.sample_id: s for s in manifest.samples}
     targets_by_id = {t.sample_id: t for t in targets}
     written: list[Path] = []
-    for sample_id in _rank_priority(targets)[:max_cases]:
+    for sample_id in _rank_priority(targets, max_cases):
         sample = samples_by_id.get(sample_id)
         target = targets_by_id.get(sample_id)
         if sample is None or target is None:
