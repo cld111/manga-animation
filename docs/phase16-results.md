@@ -231,6 +231,22 @@ and the object heuristic won). Post-fix: `impact_burst` -> **`radial_expand`** a
 `speed_lines` -> `mesh_warp`; ordinary objects (`character_hair`, `speech_bubble`, `weapon`)
 unchanged. Confirms the label-keyed effect classification holds against a real VLM output.
 
+### Run 12: full pipeline on `space_monster_creature` and `wind_breaker_finish` (regression)
+
+`run_phase16_gpu_effects.py` on two pages:
+
+- `space_monster_creature`: `[PASS, PASS]` -- ordinary objects (`alien_wing` translate
+  PRIMARY, `alien_tail` secondary) rendered fine; the effect-aware prompt changed nothing
+  for non-effect pages. First PASS video numerically verified: seamless loop (wrap 0.93 <=
+  2x ordinary 0.88), 92.6% of pixels static.
+- `wind_breaker_finish`: `[ERROR, STATIC, STATIC, STATIC, REJECTED, STATIC, REJECTED]`.
+  panel_001 ERROR was a CUDA OOM on the shared Kaggle T4 (578 MiB request, 406 MiB free on
+  GPU 1 while the sharded Qwen held 13.4 GiB) -- the same documented resource-pressure class
+  as Phase 11's LaMa OOMs on a shared worker, isolated to that panel (remaining panels
+  processed, all six model stages still released). panel_007 was correctly REJECTED by
+  mask-semantics: the speed_lines mask "includes the glasses frame" -- artwork preservation
+  on yet another page. panel_005 REJECTED at grounding (no "raised sword" in that panel).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
