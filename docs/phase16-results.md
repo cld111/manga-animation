@@ -296,6 +296,16 @@ defect history): `speed_lines` PRIMARY -> `mesh_warp`, `impact_burst` and a new 
 unchanged, `speech_bubble` static. Confirms the text guard does not interfere with effect
 classification on a page that previously produced a mid-cycle visual defect.
 
+### Run 17: full pipeline on `marika_love_meter` (previously-UNKNOWN defect page)
+
+`run_phase16_gpu_effects.py` on the page with a known UNKNOWN mid-cycle-defect history:
+`[REJECTED, REJECTED, REJECTED, PASS, PASS]`. The PASS panels animated ordinary objects
+(`character_hair` x2, `door` -- all mask-semantics ACCEPT, confidence 1.0); the REJECTED
+panels fail-closed (speed_lines grounding pointed at hands/dialogue and was semantically
+REJECTed). panel_005 verified numerically: seamless loop (wrap 0.77 <= 2x ordinary 0.59),
+84.7% pixels static. No text animated; the page no longer reproduces its historical visual
+defect under the Phase 16 configuration.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
