@@ -174,11 +174,20 @@ def rerank_targets(
         page_key = f"{sample.book}_{sample.page_index:03d}"
         dets = detections_by_page.get(page_key, [])
         page_scores = scores_by_page.get(page_key, {})
-        scores = [
-            page_scores[_box_key([int(v) for v in d["box"]])]
-            for d in dets
-            if _box_key([int(v) for v in d["box"]]) in page_scores
-        ]
+        scores: list[VlmCandidateScore] = []
+        for d in dets:
+            e = page_scores.get(_box_key([int(v) for v in d["box"]]))
+            if e is None:
+                continue
+            scores.append(
+                VlmCandidateScore(
+                    box=tuple(e["box"]),
+                    dino_score=float(e.get("dino_score", 0.0)),
+                    matches=e.get("matches"),
+                    confidence=e.get("confidence"),
+                    reason=e.get("reason"),
+                )
+            )
         gt = sample.gt_bbox
         entry: dict[str, Any] = {
             "sample_id": sample.sample_id,
