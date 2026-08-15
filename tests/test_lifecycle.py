@@ -35,6 +35,29 @@ pytestmark = pytest.mark.filterwarnings("ignore")
 # tests/test_pipeline.py).
 _VALIDATION_PROMPT_MARKER = "Does the image above show"
 _MASK_SEMANTICS_PROMPT_MARKER = "Does the bright region show"
+_OBJECT_DESCRIPTION_PROMPT_MARKER = "evaluating ONE proposed animation candidate"
+
+
+def _fake_object_description_response() -> str:
+    return json.dumps(
+        {
+            "bbox_assessment": "pass",
+            "object_identity": "fake_object",
+            "matches_semantic_label": True,
+            "animatable": True,
+            "movable_parts": ["fake movable part"],
+            "static_parts": ["fake static part"],
+            "motion_kind": "sway",
+            "direction": None,
+            "amplitude_band": "moderate",
+            "speed_band": "slow",
+            "pivot_hint": "center",
+            "constraints": ["fake constraint"],
+            "neighbor_conflicts": [],
+            "confidence": 0.9,
+            "reason": "fake object description response",
+        }
+    )
 
 
 # --- ModelStage unit tests -------------------------------------------------------------------
@@ -264,6 +287,8 @@ class StageLevelVLMClient:
                     "reason": "fake mask semantics response",
                 }
             )
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+            return _fake_object_description_response()
         if _VALIDATION_PROMPT_MARKER in prompt:
             return json.dumps(
                 {"matches": True, "confidence": 0.9, "reason": "fake validation response"}
@@ -342,9 +367,9 @@ def test_run_page_panels_loads_each_model_once_for_the_whole_page(
     assert segmentation.unload_calls == 1
     assert reconstruction.load_calls == 1
     assert reconstruction.unload_calls == 1
-    # VLM: three stages (analysis, validation, semantic-mask), each releasing once -- not
-    # three times per panel as the per-panel path did.
-    assert vlm.unload_calls == 3
+    # VLM: four stages (analysis, validation, semantic-mask, object-description), each
+    # releasing once -- not four times per panel as the per-panel path did.
+    assert vlm.unload_calls == 4
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")

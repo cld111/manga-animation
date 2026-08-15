@@ -75,6 +75,53 @@ just for the pre-segmentation `_VALIDATION_PROMPT_MARKER` check); dedicated mask
 override this via each fake's `mask_semantics_matches` parameter.
 """
 
+_OBJECT_DESCRIPTION_PROMPT_MARKER = "evaluating ONE proposed animation candidate"
+"""Distinctive substring of object_description/prompt.py's full-image+bbox prompt (Phase 18.3)
+
+-- same role as the two markers above, but for the per-candidate VLM stage between
+mask_semantics and animation. Every fake VLM client defaults to ACCEPTing this prompt too
+(the stage is enabled by default -- `PipelineConfig.enable_object_description_validation=True`
+-- so every pre-existing test needs a passing response for it); dedicated object_description
+tests override it per-fake.
+"""
+
+
+def _fake_object_description_response(
+    assessment: str = "pass",
+    *,
+    matches: bool = True,
+    animatable: bool = True,
+    motion_kind: str | None = "sway",
+    direction: str | None = None,
+    speed_band: str = "slow",
+    confidence: float = 0.9,
+) -> str:
+    """A schema-valid `ObjectDescriptionResponse` for the Phase 18.3 stage's fake. `motion_kind`
+    and `direction` follow the schema's own cross-field rules (drift requires a direction).
+    Defaults to `speed_band="slow"` (1 cycle per loop) because several pre-existing tests run a
+    minimal 4-frame loop (`PipelineConfig(duration_s=0.5, fps=8)`) where a 2-cycle motion
+    samples only sine zero-crossings and would be invisibly "still" -- the same sampling
+    constraint `tests/test_animation.py` already documents for coarse loops."""
+    return json.dumps(
+        {
+            "bbox_assessment": assessment,
+            "object_identity": "fake_object",
+            "matches_semantic_label": matches,
+            "animatable": animatable,
+            "movable_parts": ["fake movable part"],
+            "static_parts": ["fake static part"],
+            "motion_kind": motion_kind,
+            "direction": direction,
+            "amplitude_band": "moderate",
+            "speed_band": speed_band,
+            "pivot_hint": "center",
+            "constraints": ["fake constraint"],
+            "neighbor_conflicts": [] if assessment == "pass" else ["fake conflict"],
+            "confidence": confidence,
+            "reason": "fake object description response",
+        }
+    )
+
 
 def _fake_mask_semantics_response(matches: bool, *, confidence: float | None = None) -> str:
     resolved_confidence = confidence if confidence is not None else (0.9 if matches else 0.1)
@@ -104,6 +151,8 @@ class FakeVLMClient:
         verification_matches: bool = True,
         mask_semantics_matches: bool = True,
         mask_semantics_confidence: float | None = None,
+        object_description_assessment: str = "pass",
+        object_description_matches: bool = True,
     ):
         self._decisions = decisions
         self._verification_matches = verification_matches
@@ -116,12 +165,23 @@ class FakeVLMClient:
         lets a test assert exactly which/how many objects reached this stage (e.g. proving an
         object dropped by an earlier guard, such as the cross-object overlap check, never wastes
         a mask_semantics call at all -- an independent adversarial QA review finding)."""
+        self._object_description_assessment = object_description_assessment
+        self._object_description_matches = object_description_matches
+        self.object_description_prompts: list[str] = []
+        """Phase 18.3 counterpart of `mask_semantics_prompts`: every prompt this fake answered
+        as an object_description-stage call, in call order."""
 
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
             self.mask_semantics_prompts.append(prompt)
             return _fake_mask_semantics_response(
                 self._mask_semantics_matches, confidence=self._mask_semantics_confidence
+            )
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+            self.object_description_prompts.append(prompt)
+            return _fake_object_description_response(
+                self._object_description_assessment,
+                matches=self._object_description_matches,
             )
         if _VALIDATION_PROMPT_MARKER in prompt:
             return json.dumps(
@@ -153,6 +213,8 @@ class ValidationSequenceVLMClient:
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
             return _fake_mask_semantics_response(True)
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+            return _fake_object_description_response()
         if _VALIDATION_PROMPT_MARKER in prompt:
             self._validation_calls += 1
             matches = self._validation_calls > self._reject_first_n
@@ -183,6 +245,8 @@ class RejectFromNthValidationVLMClient:
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
             return _fake_mask_semantics_response(True)
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+            return _fake_object_description_response()
         if _VALIDATION_PROMPT_MARKER in prompt:
             self._validation_calls += 1
             matches = self._validation_calls < self._reject_from_call
@@ -486,10 +550,22 @@ def test_run_pipeline_end_to_end_with_radial_expand_primary(
     from manga_animation.schemas.animation_plan import TransformKind
 
     out_dir = tmp_path / "out"
+
+    class ImpactBurstDescriptionVLMClient(FakeVLMClient):
+        """Phase 18.3: the object-description stage decides the transform -- an impact burst
+        must be described as `pulse` (-> RADIAL_EXPAND) for the drawn-effect path to run."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                return _fake_object_description_response(motion_kind="pulse")
+            return super().generate(image, prompt)
+
     result = run_pipeline(
         page_path,
         config,
-        vlm_client=FakeVLMClient([_primary_decision("impact_burst"), _static_decision()]),
+        vlm_client=ImpactBurstDescriptionVLMClient(
+            [_primary_decision("impact_burst"), _static_decision()]
+        ),
         grounding_client=FakeGroundingClient(box=(40, 60, 80, 100)),
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
@@ -517,10 +593,22 @@ def test_run_pipeline_end_to_end_with_speed_lines_mesh_warp_primary(
     from manga_animation.schemas.animation_plan import TransformKind
 
     out_dir = tmp_path / "out"
+
+    class SpeedLinesDescriptionVLMClient(FakeVLMClient):
+        """Phase 18.3: the object-description stage decides the transform -- speed lines
+        must be described as `flow` (-> MESH_WARP) for the flow-effect path to run."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                return _fake_object_description_response(motion_kind="flow")
+            return super().generate(image, prompt)
+
     result = run_pipeline(
         page_path,
         config,
-        vlm_client=FakeVLMClient([_primary_decision("speed_lines"), _static_decision()]),
+        vlm_client=SpeedLinesDescriptionVLMClient(
+            [_primary_decision("speed_lines"), _static_decision()]
+        ),
         grounding_client=FakeGroundingClient(box=(40, 60, 80, 100)),
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
@@ -556,7 +644,7 @@ def test_run_pipeline_loads_and_unloads_grounding_and_segmentation_clients(
     # pipeline run.
     assert grounding_client.loaded is True
     assert grounding_client.unloaded is True
-    assert vlm_client.unload_count == 3  # analysis, validation and semantic-mask stages
+    assert vlm_client.unload_count == 4  # analysis, validation, semantic-mask, object-description
 
 
 # --- Phase 3.2: grounding-candidate validation ---------------------------------------------
@@ -1047,6 +1135,8 @@ class ExplodingVLMClient:
     def generate(self, image, prompt: str) -> str:
         if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
             return _fake_mask_semantics_response(True)
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+            return _fake_object_description_response()
         if _VALIDATION_PROMPT_MARKER in prompt:
             return json.dumps(
                 {"matches": True, "confidence": 0.9, "reason": "fallback target confirmed"}
@@ -1426,11 +1516,25 @@ def test_run_pipeline_multi_object_no_color_bleed_between_objects_across_the_loo
         {"character_hair": box_primary, "raised_hand": box_secondary}
     )
 
+    class LabelAwareDescriptionVLMClient(FakeVLMClient):
+        """The Phase 18.3 object-description stage replaces the plan's keyword-heuristic
+        motion with the per-candidate VLM read -- so this fake answers motion kinds that map
+        to the SAME two distinct transform kinds the test needs to exercise (hair -> drift/
+        translate, raised hand -> rotate), preserving the test's original intent of running
+        two genuinely different transforms through the real animation/compositing path."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                if "raised hand" in prompt:
+                    return _fake_object_description_response(motion_kind="rotate")
+                return _fake_object_description_response(motion_kind="drift", direction="right")
+            return super().generate(image, prompt)
+
     out_dir = tmp_path / "out"
     result = run_pipeline(
         page_path,
         config,
-        vlm_client=FakeVLMClient(decisions),
+        vlm_client=LabelAwareDescriptionVLMClient(decisions),
         grounding_client=grounding_client,
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
@@ -1818,11 +1922,23 @@ def test_run_pipeline_multi_object_e2e_encode_decode_regression(config, tmp_path
         {"character_hair": box_primary, "raised_hand": box_secondary}
     )
 
+    class LabelAwareDescriptionVLMClient(FakeVLMClient):
+        """Phase 18.3: the description stage decides each object's transform -- hair as
+        drift/translate and raised hand as rotate, the same two distinct transform kinds
+        the original heuristic path produced (see the sibling color-bleed test)."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                if "raised hand" in prompt:
+                    return _fake_object_description_response(motion_kind="rotate")
+                return _fake_object_description_response(motion_kind="drift", direction="right")
+            return super().generate(image, prompt)
+
     out_dir = tmp_path / "out"
     result = run_pipeline(
         page_path,
         config,
-        vlm_client=FakeVLMClient(decisions),
+        vlm_client=LabelAwareDescriptionVLMClient(decisions),
         grounding_client=grounding_client,
         segmentation_client=FakeSegmentationClient(),
         reconstruction_client=FakeReconstructionClient(),
@@ -2428,6 +2544,8 @@ def test_run_pipeline_drops_a_secondary_whose_mask_semantics_is_rejected_without
             if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
                 matches = "trailing cloth" not in prompt
                 return _fake_mask_semantics_response(matches)
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                return _fake_object_description_response()
             if _VALIDATION_PROMPT_MARKER in prompt:
                 return json.dumps({"matches": True, "confidence": 0.9, "reason": "ok"})
             return json.dumps(decisions)
@@ -2543,6 +2661,8 @@ def test_run_pipeline_drops_two_simultaneously_bad_secondary_objects(config, tmp
             if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
                 matches = "hanging banner" in prompt  # only PRIMARY passes
                 return _fake_mask_semantics_response(matches)
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                return _fake_object_description_response()
             if _VALIDATION_PROMPT_MARKER in prompt:
                 return json.dumps({"matches": True, "confidence": 0.9, "reason": "ok"})
             return json.dumps(decisions)
@@ -2621,3 +2741,173 @@ def test_run_pipeline_overlap_dropped_secondary_never_reaches_mask_semantics(
         for p in vlm_client.mask_semantics_prompts
     }
     assert checked_labels == {"raised hand", "left hair"}
+
+
+# --- Phase 18.3: per-candidate VLM object description --------------------------------------
+
+
+def test_run_pipeline_raises_stage_object_description_when_primary_bbox_is_ambiguous(
+    page_path: Path, config, tmp_path: Path
+):
+    """The Phase 18.3 stage is a fail-closed semantic validation layer: a PRIMARY candidate
+    whose bbox the VLM judges ambiguous (several objects / unclear target) must reject the
+    run with stage="object_description", never animate an unvalidated candidate."""
+    with pytest.raises(PipelineStageError) as excinfo:
+        run_pipeline(
+            page_path,
+            config,
+            vlm_client=FakeVLMClient(
+                [_primary_decision()], object_description_assessment="ambiguous"
+            ),
+            grounding_client=FakeGroundingClient(),
+            segmentation_client=FakeSegmentationClient(),
+            reconstruction_client=FakeReconstructionClient(),
+            out_dir=tmp_path / "out",
+        )
+    assert excinfo.value.stage == "object_description"
+    assert "bbox_assessment=ambiguous" in excinfo.value.detail
+    assert excinfo.value.object_description is not None
+    assert excinfo.value.object_description.accepted is False
+    assert not (tmp_path / "out" / "output.mp4").exists()
+
+
+def test_run_pipeline_drops_a_secondary_whose_bbox_description_is_rejected_without_failing_the_run(
+    config, tmp_path: Path
+):
+    """Non-PASS description for a SECONDARY/MICRO object drops only that object -- the PRIMARY
+    render still completes (ADR 0010's failure policy, applied to the Phase 18.3 gate)."""
+    decisions = [_primary_decision("hanging_banner"), _secondary_decision("trailing_cloth")]
+    grounding_client = MultiObjectFakeGroundingClient(
+        {"hanging_banner": (10, 10, 60, 90), "trailing_cloth": (70, 100, 110, 150)}
+    )
+
+    class PerObjectDescriptionVLMClient:
+        """Accepts every prompt except an object_description check for "trailing cloth"."""
+
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                if "trailing cloth" in prompt:
+                    return _fake_object_description_response(assessment="partial")
+                return _fake_object_description_response()
+            if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
+                return _fake_mask_semantics_response(True)
+            if _VALIDATION_PROMPT_MARKER in prompt:
+                return json.dumps({"matches": True, "confidence": 0.9, "reason": "ok"})
+            return json.dumps(decisions)
+
+    image = np.full((220, 200, 3), (240, 240, 245), dtype=np.uint8)
+    page_path = tmp_path / "page.png"
+    Image.fromarray(image).save(page_path)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=PerObjectDescriptionVLMClient(),
+        grounding_client=grounding_client,
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    assert result.render.output_path.exists()  # PRIMARY alone still renders
+    assert result.primary_object.semantic_label == "hanging_banner"
+    assert result.secondary_objects == []
+    assert len(result.dropped_objects) == 1
+    dropped = result.dropped_objects[0]
+    assert dropped.object_plan.semantic_label == "trailing_cloth"
+    assert dropped.failing_stage == "object_description"
+    assert "bbox_assessment=partial" in dropped.reason
+
+
+def test_run_pipeline_description_motion_drives_the_animation_and_is_recorded(
+    page_path: Path, config, tmp_path: Path
+):
+    """The main Phase 18.3 contract: the description's deterministically-mapped MotionSpec
+    REPLACES the plan's keyword-heuristic motion and is what the animation stage actually
+    applies -- and the run result records the description for evaluation."""
+    class PulseDescriptionVLMClient(FakeVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
+                return _fake_object_description_response(motion_kind="pulse")
+            return super().generate(image, prompt)
+
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=PulseDescriptionVLMClient([_primary_decision("character_hair")]),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+
+    # The heuristic for "character_hair" is TRANSLATE; the description stage's "pulse"
+    # (RADIAL_EXPAND) must be what actually animates.
+    assert result.primary_object.motion is not None
+    assert result.primary_object.motion.transform_kind == "radial_expand"
+    assert result.object_description is not None
+    assert result.object_description.accepted is True
+    assert result.object_description.motion_spec is not None
+    assert result.object_description.motion_spec.transform_kind == "radial_expand"
+    assert result.render.output_path.exists()
+
+
+def test_run_pipeline_can_disable_the_object_description_gate_via_config(
+    page_path: Path, config, tmp_path: Path
+):
+    """`PipelineConfig.enable_object_description_validation=False` skips the stage entirely --
+    the heuristic-only motion path stays available (the documented opt-out for callers that
+    characterized the gate's behavior on their own data)."""
+    disabled_config = config.model_copy(update={"enable_object_description_validation": False})
+
+    result = run_pipeline(
+        page_path,
+        disabled_config,
+        vlm_client=FakeVLMClient([_primary_decision()], object_description_assessment="ambiguous"),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    # Even an "ambiguous" VLM read must not matter with the stage off -- the heuristic motion
+    # drives the render (the object_description field records that the stage never ran).
+    assert result.render.output_path.exists()
+    assert result.object_description is None
+    assert result.primary_object.motion is not None
+    assert result.primary_object.motion.transform_kind == "mesh_warp"  # banner heuristic
+
+
+def test_run_pipeline_object_description_receives_the_full_image_not_a_crop(
+    page_path: Path, config, tmp_path: Path
+):
+    """The task brief's critical input contract, verified at the pipeline level: the VLM call
+    for the object-description stage receives the FULL pipeline image plus the bbox as text
+    coordinates -- never a crop of the candidate region and never a bbox visualization."""
+    from manga_animation.object_description.prompt import PROMPT_MARKER
+
+    seen: list[tuple[tuple[int, int], str]] = []
+
+    class RecordingDescriptionVLMClient(FakeVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            if PROMPT_MARKER in prompt:
+                seen.append((image.size, prompt))
+            return super().generate(image, prompt)
+
+    page = Image.open(page_path).convert("RGB")
+    w, h = page.size
+    result = run_pipeline(
+        page_path,
+        config,
+        vlm_client=RecordingDescriptionVLMClient([_primary_decision()]),
+        grounding_client=FakeGroundingClient(),
+        segmentation_client=FakeSegmentationClient(),
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    assert result.render.output_path.exists()
+    assert len(seen) == 1  # exactly one object-description call (PRIMARY)
+    sent_size, prompt = seen[0]
+    # The image is the full page (resized to the analysis resolution + patch grid), not a
+    # crop around the grounded bbox (10,10,60,90 on a 120x160 page).
+    assert sent_size[0] > 90 and sent_size[1] > 60
+    assert f"{sent_size[0]}x{sent_size[1]}" in prompt  # the stated coordinate space

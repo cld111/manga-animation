@@ -60,6 +60,19 @@ class PipelineConfig(BaseModel):
             "can disable it deliberately -- see docs/decisions/0018-semantic-mask-validation.md."
         ),
     )
+    enable_object_description_validation: bool = Field(
+        default=True,
+        description=(
+            "Phase 18.3: run the per-candidate VLM object-description stage "
+            "(object_description.describe_object) between mask_semantics and animation. The "
+            "VLM sees the full pipeline image plus the grounded candidate bbox as pixel "
+            "coordinates, judges the candidate itself (pass/ambiguous/partial/reject/"
+            "not_animatable), and produces a structured animation description whose "
+            "deterministically-mapped MotionSpec drives the animation stage. Fail-closed: a "
+            "non-accepted PRIMARY candidate rejects the run, a SECONDARY/MICRO one is dropped. "
+            "Exposed as a config toggle so the old heuristic-only motion path stays available."
+        ),
+    )
     def resolve_device(self) -> Literal["cpu", "cuda", "mps"]:
         """Resolve "auto" to a concrete device, without requiring torch to be installed."""
         if self.device != "auto":

@@ -57,6 +57,7 @@ from manga_animation.grounding import (
     GroundingDinoClient,
     ground_object_candidates,
 )
+from manga_animation.object_description import describe_object
 from manga_animation.pipeline.lifecycle import ModelStage
 from manga_animation.pipeline.types import (
     BBoxPx,
@@ -65,6 +66,7 @@ from manga_animation.pipeline.types import (
     Layer,
     MaskArray,
     MaskSemanticResult,
+    ObjectDescriptionResult,
     PipelineStageError,
     ReconstructionResult,
     RenderResult,
@@ -261,7 +263,9 @@ class DroppedObjectResult:
     """
 
     object_plan: ObjectPlan
-    failing_stage: Literal["grounding", "validation", "segmentation", "mask_semantics"]
+    failing_stage: Literal[
+        "grounding", "validation", "segmentation", "mask_semantics", "object_description"
+    ]
     reason: str
     mask_semantics: MaskSemanticResult | None = None
 
@@ -284,6 +288,10 @@ class ObjectRunResult:
     """`None` only when `PipelineConfig.enable_semantic_mask_validation` is `False` -- the gate
     never ran, not that it produced no opinion (see Phase 12's config toggle)."""
     reconstruction: ReconstructionResult | None
+    object_description: ObjectDescriptionResult | None
+    """Phase 18.3: the per-candidate VLM read on the grounded bbox against the full image
+    (see `pipeline.types.ObjectDescriptionResult`). `None` when the stage is disabled via
+    `PipelineConfig.enable_object_description_validation`."""
 
 
 @dataclass
@@ -307,6 +315,9 @@ class PipelineRunResult:
     """Phase 12, PRIMARY object only -- see `ObjectRunResult.mask_semantics`'s docstring for the
     `None` case."""
     reconstruction: ReconstructionResult | None
+    object_description: ObjectDescriptionResult | None
+    """Phase 18.3, PRIMARY object only -- see `ObjectRunResult.object_description`'s docstring
+    for the `None` case."""
     render: RenderResult
     secondary_objects: list[ObjectRunResult] = field(default_factory=list)
     dropped_objects: list[DroppedObjectResult] = field(default_factory=list)
@@ -770,6 +781,113 @@ def _mask_semantics_objects(
     return kept, kept_segmentation, mask_semantics_by_object, dropped_objects
 
 
+def _describe_objects(
+    image: np.ndarray,
+    animated_objects: list[ObjectPlan],
+    accepted_by_object: dict[str, GroundingResult],
+    vlm_client: VLMClient,
+    config: PipelineConfig,
+    primary_object_id: str,
+) -> tuple[
+    list[ObjectPlan],
+    dict[str, ObjectDescriptionResult],
+    list[DroppedObjectResult],
+]:
+    """Phase 18.3: per-candidate VLM object description / semantic bbox validation.
+
+    Runs after mask_semantics, before animation. For every animated object the VLM sees the
+    FULL pipeline image plus the accepted grounding candidate's bbox as pixel coordinates and
+    produces a structured animation description (object_description.describe_object). The
+    description's deterministically-mapped `MotionSpec` REPLACES the plan's heuristic motion
+    for the object (the VLM judged the actual candidate region, not a label keyword), and the
+    animation stage applies it. A non-accepted read is fail-closed: PRIMARY rejects the run,
+    SECONDARY/MICRO drops the object (see `ObjectDescriptionResult` for the acceptance rule).
+    The SAM mask is not an input here -- it stays for the stages that consume it.
+    """
+    descriptions_by_object: dict[str, ObjectDescriptionResult] = {}
+    dropped_objects: list[DroppedObjectResult] = []
+    kept: list[ObjectPlan] = []
+    for obj in animated_objects:
+        grounding = accepted_by_object[obj.object_id]
+        try:
+            description = describe_object(
+                image,
+                grounding.bbox,
+                obj,
+                vlm_client,
+                max_long_edge=config.resolution,
+            )
+        except Exception as exc:  # noqa: BLE001 -- apply stage failure policy below
+            reason = f"object description VLM call failed: {type(exc).__name__}: {exc}"
+            if obj.object_id == primary_object_id:
+                raise PipelineStageError(
+                    stage="object_description",
+                    input_ref=obj.object_id,
+                    detail=reason,
+                    root_cause="the object description model could not complete",
+                    architectural=False,
+                    proposed_fix="retry the VLM call or inspect GPU/model resources",
+                ) from exc
+            dropped_objects.append(
+                DroppedObjectResult(
+                    object_plan=obj, failing_stage="object_description", reason=reason
+                )
+            )
+            continue
+        descriptions_by_object[obj.object_id] = description
+        if description.accepted:
+            assert description.motion_spec is not None
+            kept.append(
+                obj.model_copy(
+                    update={
+                        "motion": description.motion_spec,
+                        "confidence": description.confidence or obj.confidence,
+                    }
+                )
+            )
+            continue
+        if obj.object_id == primary_object_id:
+            raise PipelineStageError(
+                stage="object_description",
+                input_ref=obj.object_id,
+                detail=(
+                    f"object description rejected the PRIMARY candidate for "
+                    f"semantic_label={obj.semantic_label!r} (rejection_reason="
+                    f"{description.rejection_reason!r}): {description.reason}"
+                ),
+                root_cause=(
+                    "the VLM judged the grounded bbox against the full image as not a "
+                    "good single animatable object (see ObjectDescriptionResult.accepted)"
+                ),
+                architectural=False,
+                proposed_fix=(
+                    "retry with a different page/object, or supply a controlled-fallback "
+                    "AnimationPlan for a human-verified target"
+                ),
+                object_description=description,
+            )
+        logger.warning(
+            "object description %s for %s object_id=%s semantic_label=%s "
+            "(rejection_reason=%s) -- dropping it from this render (PRIMARY is unaffected): %s",
+            "REJECT" if description.assessment is not None else "UNPARSEABLE",
+            obj.motion_type.value,
+            obj.object_id,
+            obj.semantic_label,
+            description.rejection_reason,
+            description.reason,
+        )
+        dropped_objects.append(
+            DroppedObjectResult(
+                object_plan=obj,
+                failing_stage="object_description",
+                reason=(
+                    f"{description.rejection_reason or 'unparseable'}: {description.reason}"
+                ),
+            )
+        )
+    return kept, descriptions_by_object, dropped_objects
+
+
 def _animate_objects(
     image: np.ndarray,
     animated_objects: list[ObjectPlan],
@@ -1031,6 +1149,37 @@ def run_pipeline(
             )
             dropped_objects.extend(dropped)
 
+    descriptions_by_object: dict[str, ObjectDescriptionResult] = {}
+    if config.enable_object_description_validation:
+        with (
+            ModelStage(vlm_client, name="object_description"),
+            StageTimer(
+                "object_description",
+                logger,
+                device=device,
+                model=config.model_variants.get("vlm"),
+            ),
+        ):
+            (
+                animated_objects,
+                descriptions_by_object,
+                dropped,
+            ) = _describe_objects(
+                image,
+                animated_objects,
+                accepted_by_object,
+                vlm_client,
+                config,
+                primary.object_id,
+            )
+            dropped_objects.extend(dropped)
+        # The description stage replaces the PRIMARY's heuristic MotionSpec with the
+        # per-candidate VLM-mapped one -- point `primary` at the updated object so
+        # PipelineRunResult.primary_object (and its motion) reflect what actually animates.
+        primary = next(
+            obj for obj in animated_objects if obj.object_id == primary.object_id
+        )
+
     with StageTimer("animation", logger, device="cpu", model=None):
         layers, layers_by_object = _animate_objects(
             image,
@@ -1074,6 +1223,7 @@ def run_pipeline(
             segmentation=segmentation_by_object[obj.object_id],
             mask_semantics=mask_semantics_by_object.get(obj.object_id),
             reconstruction=reconstructions.get(obj.object_id),
+            object_description=descriptions_by_object.get(obj.object_id),
         )
         for obj in animated_objects
         if not _is_primary(obj.object_id)
@@ -1088,6 +1238,7 @@ def run_pipeline(
         segmentation=segmentation_by_object[primary.object_id],
         mask_semantics=mask_semantics_by_object.get(primary.object_id),
         reconstruction=reconstructions.get(primary.object_id),
+        object_description=descriptions_by_object.get(primary.object_id),
         render=render_result,
         secondary_objects=secondary_results,
         dropped_objects=dropped_objects,

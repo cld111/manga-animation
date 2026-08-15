@@ -23,6 +23,7 @@ from manga_animation.pipeline.orchestrator import (
     DroppedObjectResult,
     _animate_objects,
     _composite_and_render,
+    _describe_objects,
     _ground_objects,
     _mask_semantics_objects,
     _reconstruct_objects,
@@ -35,6 +36,7 @@ from manga_animation.pipeline.types import (
     BBoxPx,
     GroundingResult,
     MaskSemanticResult,
+    ObjectDescriptionResult,
     PanelStatus,
     PanelUnit,
     PipelineStageError,
@@ -56,7 +58,13 @@ class PagePanelsResult:
     panels: list[PanelUnit]
 
 
-_SAFE_REJECTION_STAGES = {"grounding", "validation", "segmentation", "mask_semantics"}
+_SAFE_REJECTION_STAGES = {
+    "grounding",
+    "validation",
+    "segmentation",
+    "mask_semantics",
+    "object_description",
+}
 
 
 def _failure_status(stage: str) -> PanelStatus:
@@ -392,7 +400,40 @@ def run_page_panels(
         write_manifest()
 
     # -------------------------------------------------------------------------------------
-    # Stage 6: animation + reconstruction + compositing + rendering. The CV work is CPU-only;
+    # Stage 6: per-candidate VLM object description / semantic bbox validation -- the VLM
+    # processes every eligible panel, releases.
+    # -------------------------------------------------------------------------------------
+    object_description_by_panel: dict[str, dict[str, ObjectDescriptionResult]] = {}
+    if config.enable_object_description_validation:
+        with ModelStage(vlm_client, name="object_description"):
+            for panel in panels:
+                panel_id = panel.panel_id
+                if panel_id not in animated_by_panel or panel_id in failed:
+                    continue
+                try:
+                    kept, desc, dropped = _describe_objects(
+                        crops[panel_id],
+                        animated_by_panel[panel_id],
+                        accepted_by_panel[panel_id],
+                        vlm_client,
+                        config,
+                        primary_by_panel[panel_id].object_id,
+                    )
+                except PipelineStageError as exc:
+                    finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                    failed.add(panel_id)
+                    continue
+                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                    finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                    failed.add(panel_id)
+                    continue
+                animated_by_panel[panel_id] = kept
+                object_description_by_panel[panel_id] = desc
+                dropped_by_panel[panel_id].extend(dropped)
+        write_manifest()
+
+    # -------------------------------------------------------------------------------------
+    # Stage 7: animation + reconstruction + compositing + rendering. The CV work is CPU-only;
     # LaMa is loaded once for the whole stage and kept resident only while eligible panels'
     # motion-revealed holes are filled (its own reconstruction stage), then released.
     # -------------------------------------------------------------------------------------

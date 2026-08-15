@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from manga_animation.schemas.animation_plan import BBox
+from manga_animation.schemas.animation_plan import BBox, MotionSpec
 
 ImageArray = np.ndarray
 """RGB uint8 array, shape (H, W, 3). See module docstring for the channel-order convention."""
@@ -302,6 +302,59 @@ class MaskSemanticResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectDescriptionResult:
+    """Phase 18.3: the per-candidate VLM read on a grounded bounding box, seen against the
+    FULL pipeline image (never a crop of the candidate).
+
+    The VLM gets the original image plus the candidate bbox as pixel coordinates and must
+    (a) judge the candidate itself (one coherent object / several / partial / background /
+    unsafe to animate) and (b) produce a structured animation description. This result is the
+    structured, fail-closed record of both, so a bad candidate is never silently passed on to
+    the animation stage: `accepted` is `True` only when the VLM's `bbox_assessment` is
+    `"pass"`, `matches_semantic_label` is `True`, and `animatable` is `True`. A non-accepted
+    PRIMARY candidate fails the run; a non-accepted SECONDARY/MICRO candidate drops the
+    object (`pipeline.orchestrator._describe_objects`). `motion_spec` is the schema-valid
+    `MotionSpec` mapped deterministically from the description's semantic fields
+    (`object_description.mapping`) and is what the animation stage actually applies.
+    """
+
+    object_id: str
+    accepted: bool
+    """Fail-closed verdict: `assessment == "pass"` AND `matches_semantic_label` AND
+    `animatable`. Everything else (including an unparseable VLM response) is a rejection --
+    never silently promoted to an accept."""
+    assessment: str | None
+    """The VLM's `BBoxAssessment` value ("pass"/"ambiguous"/"partial"/"reject"/
+    "not_animatable"), or `None` when the response could not be parsed."""
+    matches_semantic_label: bool | None
+    animatable: bool | None
+    object_identity: str | None
+    """Short snake_case name of the object the VLM sees inside the box, or `None` on a
+    parse failure."""
+    motion_spec: MotionSpec | None
+    """The deterministic `MotionSpec` mapped from the accepted description; `None` unless
+    `accepted` (and the mapping itself succeeded)."""
+    movable_parts: tuple[str, ...] = ()
+    static_parts: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    """Rules the VLM says must not be violated (e.g. "keep the face static", "do not move
+    the speech bubble") -- recorded for humans/evaluation; the deterministic CV stage does
+    not parse free text."""
+    neighbor_conflicts: tuple[str, ...] = ()
+    """Problems the VLM noticed with neighboring objects, background or occlusions."""
+    confidence: float | None = None
+    reason: str = ""
+    rejection_reason: str | None = None
+    """Machine-readable cause of a non-accept (unparseable / assessment / label mismatch /
+    not animatable), so a failure is always attributable."""
+    model_id: str = "unknown"
+    raw_responses: tuple[str, ...] = ()
+    """The VLM's raw text from every attempt (initial + recovery) -- the audit trail the
+    task brief requires (log the original model answer)."""
+    method: str = "vlm_full_image_bbox_v1"
+
+
+@dataclass(frozen=True, slots=True)
 class SegmentationResult:
     """A pixel-accurate mask for one grounded object.
 
@@ -458,6 +511,7 @@ Stage = Literal[
     "validation",
     "segmentation",
     "mask_semantics",
+    "object_description",
     "reconstruction",
     "animation",
     "compositing",
@@ -481,6 +535,7 @@ class PipelineStageError(Exception):
     architectural: bool | None = None
     proposed_fix: str | None = None
     mask_semantics: MaskSemanticResult | None = None
+    object_description: ObjectDescriptionResult | None = None
 
     def __str__(self) -> str:
         return f"[{self.stage}] {self.detail} (input={self.input_ref})"

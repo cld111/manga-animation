@@ -46,15 +46,21 @@ from manga_animation.evaluation.schemas import (
     LoopMetricsOutcome,
     MaskSemanticOutcome,
     ObjectAttemptOutcome,
+    ObjectDescriptionOutcome,
     PageRunOutcome,
     RenderSummary,
     ValidationAttemptOutcome,
 )
 from manga_animation.pipeline.orchestrator import run_pipeline
-from manga_animation.pipeline.types import MaskSemanticResult, PipelineStageError, RenderResult
+from manga_animation.pipeline.types import (
+    MaskSemanticResult,
+    ObjectDescriptionResult,
+    PipelineStageError,
+    RenderResult,
+)
 from manga_animation.schemas.animation_plan import MotionType
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 """The `PageRunOutcome.schema_version` every producer using this harness writes -- see that
 
 field's own docstring for what each version number means. Named here (not just inlined as a
@@ -159,6 +165,31 @@ def mask_semantics_outcome_from_result(
     )
 
 
+def object_description_outcome_from_result(
+    result: ObjectDescriptionResult | None,
+) -> ObjectDescriptionOutcome | None:
+    """`pipeline.types.ObjectDescriptionResult` -> `evaluation.schemas.ObjectDescriptionOutcome`
+    -- `None` in, `None` out (the stage didn't run for this object, or was disabled)."""
+    if result is None:
+        return None
+    return ObjectDescriptionOutcome(
+        accepted=result.accepted,
+        assessment=result.assessment,
+        matches_semantic_label=result.matches_semantic_label,
+        animatable=result.animatable,
+        object_identity=result.object_identity,
+        motion=result.motion_spec.model_dump() if result.motion_spec is not None else None,
+        movable_parts=list(result.movable_parts),
+        static_parts=list(result.static_parts),
+        constraints=list(result.constraints),
+        neighbor_conflicts=list(result.neighbor_conflicts),
+        confidence=result.confidence,
+        rejection_reason=result.rejection_reason,
+        model_id=result.model_id,
+        method=result.method,
+    )
+
+
 def render_summary_from_result(
     render: RenderResult, *, seam_artifact_suspected: bool | None = None
 ) -> RenderSummary:
@@ -234,6 +265,9 @@ def run_one_sample(
             panel_count=panel_count,
             panel_sources=panel_sources,
             primary_mask_semantics=mask_semantics_outcome_from_result(exc.mask_semantics),
+            primary_object_description=object_description_outcome_from_result(
+                exc.object_description
+            ),
             schema_version=CURRENT_SCHEMA_VERSION,
         )
     except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
@@ -266,6 +300,7 @@ def run_one_sample(
                 for v in obj.validation_attempts
             ],
             mask_semantics=mask_semantics_outcome_from_result(obj.mask_semantics),
+            object_description=object_description_outcome_from_result(obj.object_description),
             failing_stage=None,
             failure_reason=None,
         )
@@ -327,6 +362,9 @@ def run_one_sample(
             for v in result.validation_attempts
         ],
         primary_mask_semantics=mask_semantics_outcome_from_result(result.mask_semantics),
+        primary_object_description=object_description_outcome_from_result(
+            result.object_description
+        ),
         object_outcomes=object_outcomes,
         render_summary=render_summary_from_result(
             result.render, seam_artifact_suspected=_seam_artifact_suspected(result.render)
