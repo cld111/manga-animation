@@ -127,9 +127,10 @@ def main() -> None:
     _run(["git", "-C", str(src_dir), "fetch", "--all"], timeout=1800)
     _run(["git", "-C", str(src_dir), "checkout", args.omg_seg_commit])
     _run([env_python, "-m", "pip", "install", "-e", str(src_dir / "omg_llava")])
-    # The phase-19 benchmark CLI imports the manga-animation package (manifest/config/metrics);
-    # its base dependencies are light (numpy/pillow/yaml/pycocotools) and do not need torch.
-    _run([env_python, "-m", "pip", "install", "-q", "-e", "/kaggle/working/manga-animation"])
+    # The manga-animation package cannot be pip-installed here: it requires python>=3.11 and
+    # this env is python 3.10. The phase-19 benchmark only imports its light modules
+    # (manifest/config/metrics -- no torch/transformers at import time), so the run commands
+    # set PYTHONPATH=/kaggle/working/manga-animation/src instead of installing it.
 
     # --- 3. weights -----------------------------------------------------------------------
     weights_dir.mkdir(parents=True, exist_ok=True)
