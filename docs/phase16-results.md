@@ -184,6 +184,21 @@ working speed-lines path. (The VLM chose a different PRIMARY this run -- `cyclin
 translate instead of the previous run's `speed_lines` PRIMARY -- a known VLM nondeterminism,
 not a pipeline regression; the PASS panel still rendered and verified.)
 
+### Run 8: analysis signal on `reality_lie_office` and `sss_hunter_gladiator`
+
+`run_phase16_analysis_signal.py` on two previously-untested-for-effects pages:
+
+- `reality_lie_office` (a dialogue-heavy office scene): `speech_bubble` and `panel_border`
+  both stayed STATIC (artwork preservation), while only ordinary objects were proposed
+  animated (`character_eyes` opacity micro, `character_hair` translate primary,
+  `character_hand` rotate micro). The effect-aware prompt did NOT invent effect targets on
+  a page with no drawn effects.
+- `sss_hunter_gladiator`: the VLM proposed `impact_burst` -> `radial_expand` (secondary) and
+  two `speed_lines` -> `mesh_warp` (secondary) -- both already-validated effect paths -- plus
+  ordinary objects correctly mapped (`character_clothing` mesh_warp, `weapon` rotate,
+  `character_hair` translate). PRIMARY was `drinking` (a VLM label oddity, not a pipeline
+  issue).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
