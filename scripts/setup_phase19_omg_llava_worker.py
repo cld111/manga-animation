@@ -52,7 +52,6 @@ def _shell(cmd: str) -> str:
 
 def _venv_site_packages(env_python: str) -> Path:
     """The site-packages dir of the venv's python (sysconfig-based)."""
-    import sysconfig
 
     out = subprocess.run(
         [env_python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
