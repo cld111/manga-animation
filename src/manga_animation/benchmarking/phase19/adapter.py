@@ -190,26 +190,37 @@ class OMGLLavaAdapter:
     def _apply_llm_strategy(self, cfg: Any) -> None:
         """Override the config's LLM build for the documented hardware strategies.
 
-        - llm_bits is None: leave the official config untouched (it already carries the 4-bit
-          bitsandbytes quantization_config).
-        - llm_bits == "4"/"8": keep/force the corresponding quantization.
-        - llm_bits == "fp16": drop quantization, run float16.
-        - shard_two_gpus: `device_map="auto"` for the LLM so its weights split across the two
-          T4s (fp16 7B alone is ~14 GB, too large for one 16 GB card with activations).
+        The official config's `quantization_config` is a dict that mmengine may or may not
+        resolve into a `BitsAndBytesConfig` instance depending on build path; an unresolved
+        dict silently disables quantization and loads the 7B LLM in fp16 (~14 GiB -- exactly
+        the measured resident footprint, and why the official README asks for >= 32 GB).
+        This method forces a real `BitsAndBytesConfig` for the 4-bit strategy so the model
+        fits 2xT4-16GB, and supports fp16+sharding as the alternative strategy.
         """
         import torch
+        from transformers import BitsAndBytesConfig
 
         llm_cfg = cfg.model.llm
         bits_cfg = llm_cfg.get("quantization_config", {})
         has_quant = bool(bits_cfg)
         if self.llm_bits is None:
-            return  # official config as-is
+            # official config as-is -- but materialize its quantization dict so 4-bit is real.
+            if has_quant and not isinstance(bits_cfg, BitsAndBytesConfig):
+                llm_cfg["quantization_config"] = BitsAndBytesConfig(**dict(bits_cfg))
+            return
         if self.llm_bits in ("4", "8"):
             if self.llm_bits == "4":
-                llm_cfg.setdefault("quantization_config", {})["load_in_4bit"] = True
-                llm_cfg["quantization_config"]["load_in_8bit"] = False
+                llm_cfg["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    load_in_8bit=False,
+                    llm_int8_threshold=6.0,
+                    llm_int8_has_fp16_weight=False,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
             else:
-                llm_cfg["quantization_config"] = {"load_in_8bit": True}
+                llm_cfg["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
             llm_cfg["torch_dtype"] = torch.float16
         elif self.llm_bits == "fp16":
             if has_quant:
