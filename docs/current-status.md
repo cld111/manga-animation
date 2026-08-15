@@ -157,6 +157,15 @@ conclusion. Candidates without implemented adapters remain research entries.
   Measured on full pages (no panel GT in the dataset) -- a conservative lower bound for
   panel-mode production. Comix Books v0 was excluded as GT (SAMv2-generated, aggregated
   masks -- circular for a SAM benchmark).
+- Phase 18.1 (diagnostic only, docs/phase18.1-results.md) answered the follow-up: is the
+  correct target present among ALL DINO detections, and at what rank? On the same 64 targets:
+  **the correct candidate exists (R@All) in 89.1% at IoU >= 0.5 (78.1% at IoU >= 0.75), but
+  only 6.2% are top-1** (R@3 23.4%, R@10 59.4%, R@20 78.1%; median best-correct rank 8).
+  Category split at 0.5: A=4 (top-1), B=53 (below top-1), C=7 (absent). DINO's own confidence
+  is not a usable ordering signal (correct candidates score ~0.74x the wrong top-1). This is
+  Case A (candidate exists, ranking is the problem): next step is candidate selection /
+  reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
+  grounding-scale floor, not fixable by a selector.
 
 ## Known Limitations and Technical Debt
 
@@ -288,6 +297,12 @@ These are future work, not implemented capabilities:
     panel mode), (b) evaluate prompt phrasing / a second grounding model (OWLv2 is an existing
     manifest candidate), or (c) accept instance-level ambiguity and redesign candidate
     selection. Do not change production grounding on a 64-sample full-page result alone.
+11. **Phase 18.1 follow-up (docs/phase18.1-results.md):** the correct candidate exists among
+    DINO detections in 89% of targets but is top-1 in only 6% -- so Phase 18.2 should build a
+    candidate selector/reranker over top-K using an independent signal (the production
+    `validate_target` VLM check is the existing candidate signal), measure reranked Recall@K
+    and end-to-end DINO->SAM->gates IoU on the same 64 targets, and keep the 7 category-C
+    targets (no candidate at all) out of the selector's success claim.
 
 ## Verification and Workflow
 
@@ -314,4 +329,5 @@ changes move between local and remote only through git.
 - [`decisions/`](decisions/): accepted decisions, supersession, and rationale.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
   Phase 17 (object-segmentation diagnostic benchmark) lives in
-  [`phase17-results.md`](phase17-results.md).
+  [`phase17-results.md`](phase17-results.md); Phase 18.1 (DINO candidate recall) in
+  [`phase18.1-results.md`](phase18.1-results.md).
