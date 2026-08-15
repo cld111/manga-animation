@@ -92,13 +92,23 @@ _TRANSFORM_GEOMETRY_PROFILES: dict[TransformKind, TransformGeometryProfile] = {
     # RADIAL_EXPAND is a spatially-varying radial pulse about the object's own center (the
     # drawn-effect motion model: impact bursts, energy fields, glow). Its mechanism combines
     # MESH_WARP's "local, continuous, anchored" risk profile (center stays fixed, rim moves
-    # most) with SCALE's "grows the footprint outward" behavior, so it gets the same loose
-    # area bound as MESH_WARP plus a modest edge margin so the rim has room to breathe
-    # outward without clipping the reference region's boundary. No aspect-ratio check: a
-    # legitimately elongated radiating burst (a wide speed-line fan, a tall energy plume) is
-    # a real RADIAL_EXPAND target.
+    # most) with SCALE's "grows the footprint outward" behavior.
+    #
+    # Phase 16 evidence (scripts/run_phase16_effect_mask_diagnostic.py, real 2xT4 worker):
+    # a drawn effect's bbox is a POOR proxy for its moved-pixel footprint -- real
+    # speed_lines/impact_burst grounding boxes up to 98% of their panel produced sparse masks
+    # covering only 6-17% of it (density 0.28-0.50), because a burst is radiating lines, not a
+    # filled region. The 35% bbox-area bound therefore fail-closed every real effect tried
+    # this phase even though animating its sparse mask would move almost nothing. The area
+    # bound is relaxed to 60% so legitimately large bursts can proceed, and the actual
+    # animation-safety decision is deferred to the POST-segmentation mask check
+    # (`segmentation/segment.py::_validate_mask_region_coverage`, which measures the real
+    # mask's area fraction of the panel -- a dense "select everything" mask still fails
+    # there). The edge margin stays: the rim must have room to breathe without clipping the
+    # reference region's boundary. No aspect-ratio check: a legitimately elongated radiating
+    # burst (a wide speed-line fan, a tall energy plume) is a real RADIAL_EXPAND target.
     TransformKind.RADIAL_EXPAND: TransformGeometryProfile(
-        max_area_fraction=0.35, min_edge_margin_fraction=0.02, max_aspect_ratio=None
+        max_area_fraction=0.60, min_edge_margin_fraction=0.02, max_aspect_ratio=None
     ),
     # TRANSLATE moves the bbox's content rigidly, but only by a small amplitude in this
     # codebase's real usage (amplitude = fraction of the panel diagonal; e.g. the hair

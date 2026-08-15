@@ -78,8 +78,14 @@ from manga_animation.reconstruction import (
     reconstruct_hidden_region,
 )
 from manga_animation.rendering import render
-from manga_animation.schemas.animation_plan import AnimationPlan, MotionType, ObjectPlan
+from manga_animation.schemas.animation_plan import (
+    AnimationPlan,
+    MotionType,
+    ObjectPlan,
+    TransformKind,
+)
 from manga_animation.segmentation import Sam21Client, SegmentationClient, segment_object
+from manga_animation.segmentation.segment import _MAX_EFFECT_MASK_DENSITY
 from manga_animation.validation import validate_target, verify_mask_semantics
 
 logger = get_logger(__name__)
@@ -636,7 +642,15 @@ def _segment_objects(
             continue  # already dropped at grounding or validation
         try:
             segmentation_by_object[obj.object_id] = segment_object(
-                image, accepted_by_object[obj.object_id], segmentation_client
+                image,
+                accepted_by_object[obj.object_id],
+                segmentation_client,
+                max_mask_density=(
+                    _MAX_EFFECT_MASK_DENSITY
+                    if obj.motion is not None
+                    and obj.motion.transform_kind == TransformKind.RADIAL_EXPAND
+                    else None
+                ),
             )
         except PipelineStageError as exc:
             if obj.object_id == primary_object_id:

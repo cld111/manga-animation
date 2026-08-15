@@ -239,3 +239,59 @@ def test_segment_object_model_id_comes_from_the_client():
     client = FakeSegmentationClient([candidate])
     result = segment_object(make_image(), make_grounding(), client)
     assert result.model_id == "fake-segmentation"
+
+
+def test_segment_object_accepts_sparse_effect_mask_under_density_bound():
+    """Phase 16: a SPARSE drawn-effect mask (thin rays radiating from a center -- the real
+    signature of an impact burst / speed lines) inside a large bbox must pass
+    `max_mask_density`: the density check exists to reject dense "select everything" masks,
+    not sparse effect artwork. Here the mask is 8 thin rays in a 40x40 box, so its tight-bbox
+    density is far under the 0.70 bound even though the box itself is large."""
+    mask = np.zeros((64, 64), dtype=np.uint8)
+    cx = cy = 30
+    for angle in range(0, 180, 22):  # 8 rays from the center
+        import math
+
+        dx, dy = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        for t in range(1, 16):
+            mask[cy + int(round(dy * t)), cx + int(round(dx * t))] = 255
+            mask[cy - int(round(dy * t)), cx - int(round(dx * t))] = 255
+    assert (mask[10:50, 10:50] > 0).sum() / (40 * 40) < 0.70  # sanity: genuinely sparse
+    client = FakeSegmentationClient([MaskCandidate(mask=mask, iou_score=0.9)])
+    grounding = make_grounding(BBoxPx(x0=10, y0=10, x1=50, y1=50))
+
+    result = segment_object(make_image(), grounding, client, max_mask_density=0.70)
+
+    assert result.mask is not None
+
+
+def test_segment_object_rejects_dense_filled_effect_mask_over_density_bound():
+    """Phase 16: a DENSE filled mask -- the confirmed "select everything" signature (real
+    defective cloth_5 at density 0.902, character_hair_7 at 0.843, docs/phase11-results.md)
+    -- must be REJECTED by `max_mask_density` when a RADIAL_EXPAND effect expects sparse
+    artwork: animating a nearly-solid mask would drag a large filled region (including panel
+    background) when the rim breathes."""
+    mask = np.zeros((64, 64), dtype=np.uint8)
+    mask[12:48, 12:48] = 255  # 36x36 solid fill: density = 1296/1600 = 0.81 > 0.70
+    client = FakeSegmentationClient([MaskCandidate(mask=mask, iou_score=0.9)])
+    grounding = make_grounding(BBoxPx(x0=10, y0=10, x1=50, y1=50))
+
+    with pytest.raises(PipelineStageError) as exc_info:
+        segment_object(make_image(), grounding, client, max_mask_density=0.70)
+    assert exc_info.value.stage == "segmentation"
+    assert "density" in exc_info.value.detail.lower()
+
+
+def test_segment_object_without_density_bound_accepts_dense_mask():
+    """Phase 16: `max_mask_density` is opt-in -- an ordinary (non-effect) object's dense mask
+    must pass exactly as before when no bound is given (the density check is the drawn-effect
+    safety net, not a general segmentation restriction)."""
+    mask = np.zeros((64, 64), dtype=np.uint8)
+    mask[12:48, 12:48] = 255
+    client = FakeSegmentationClient([MaskCandidate(mask=mask, iou_score=0.9)])
+
+    result = segment_object(
+        make_image(), make_grounding(BBoxPx(x0=10, y0=10, x1=50, y1=50)), client
+    )
+
+    assert result.mask is not None
