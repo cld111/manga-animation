@@ -92,7 +92,7 @@ def main() -> None:
         manifest, dataset_dir, detections_by_page, out_dir, vlm_client
     )
     perf["wall_s"] = round(time.perf_counter() - t0, 2)
-    image_shapes = {}
+    image_shapes: dict[str, tuple[int, int]] = {}
     for sample in manifest.samples:
         page_key = f"{sample.book}_{sample.page_index:03d}"
         from PIL import Image
