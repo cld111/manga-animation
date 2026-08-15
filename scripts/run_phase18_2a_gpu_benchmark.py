@@ -54,7 +54,9 @@ def _trim_manifest(manifest: BenchmarkManifest, limit: int) -> BenchmarkManifest
     )
 
 
-def _report_only(manifest: BenchmarkManifest, run_dir: Path, out_dir: Path) -> None:
+def _report_only(
+    manifest: BenchmarkManifest, run_dir: Path, out_dir: Path, dataset_dir: Path
+) -> None:
     """Rebuild metrics/report/visuals from a saved run dir (no GPU)."""
     from manga_animation.benchmarking.phase18a.metrics import PerTargetMetrics
 
@@ -100,9 +102,7 @@ def _report_only(manifest: BenchmarkManifest, run_dir: Path, out_dir: Path) -> N
     report = build_report(targets)
     json_path, md_path = write_report(report, run_dir)
     print(f"report: {json_path}\n        {md_path}")
-    written = build_visual_packages(
-        targets, manifest, out_dir / "dataset", run_dir / "visuals"
-    )
+    written = build_visual_packages(targets, manifest, dataset_dir, run_dir / "visuals")
     print(f"visual packages: {len(written)} under {run_dir / 'visuals'}")
 
 
@@ -146,7 +146,7 @@ def main() -> None:
 
     if args.report_only is not None:
         run_dir = out_dir / args.report_only
-        _report_only(manifest, run_dir, out_dir)
+        _report_only(manifest, run_dir, out_dir, dataset_dir)
         return
 
     run_dir = out_dir / f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
