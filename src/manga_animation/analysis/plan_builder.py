@@ -82,6 +82,15 @@ impact point", "the energy field pulses and radiates", "smoke drifts upward", "w
 splashes and flows". Do NOT invent an effect that is not actually drawn, and do NOT list \
 speech bubbles, dialogue text, or panel borders as effects -- those must stay static.
 
+CRITICAL: text-like elements must NEVER be animated. This includes speech bubbles, dialogue \
+text, sound-effect lettering (e.g. "BOOM", "척"), captions, narration boxes, page/logos \
+text, dedication/pledge text, and any other written lettering, whether inside a bubble or \
+free-standing on the page. A text element may still be listed as an entry with \
+motion_type "static" (so it is recorded as a known non-target), but it must NEVER be given \
+"primary"/"secondary"/"micro". Do not rename text to something that sounds like an object \
+(e.g. do not label dialogue as "dedication" and animate it) -- if the region is lettering, \
+it is text, it is static.
+
 A visually justified reason for motion can come from ANY of these, not only deformation \
 drawn on the object itself:
 1. Deformation/distortion drawn directly on the object (wavy linework, a bent/curved shape).
@@ -402,7 +411,11 @@ def _rank_candidates(
     Is a Valid Result" in docs/architecture.md; this ranking does not loosen that case, only
     the case where non-STATIC signal existed but wasn't labeled "primary".
     """
-    candidates = [d for d in decisions if d.motion_type != MotionType.STATIC]
+    candidates = [
+        d
+        for d in decisions
+        if d.motion_type != MotionType.STATIC and not _is_text_label(d.semantic_label)
+    ]
     if not candidates and allow_all_static:
         return []
     if not candidates:
@@ -452,6 +465,39 @@ def _checksum(image_path: Path) -> str:
     return "sha256:" + hashlib.sha256(image_path.read_bytes()).hexdigest()
 
 
+# Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled free-standing
+# dedication text as a SECONDARY object and the pipeline animated it (rotate) -- a direct
+# goal-4 violation (never animate text). The analysis prompt forbids animating text, but a
+# VLM can still label text with a non-STATIC motion_type; this label-keyed guard forces any
+# text-like semantic_label to STATIC no matter what the VLM said, as a deterministic
+# backstop. It matches the LABEL only (not the free-text motion_description), mirroring the
+# effect-classification design. "texture" is deliberately NOT matched (a legitimately
+# animatable cloth-texture pattern is not lettering).
+_TEXT_LABEL_KEYWORDS: tuple[str, ...] = (
+    "dedication",
+    "pledge",
+    "caption",
+    "lettering",
+    "dialogue",
+    "speech",
+    "bubble",
+    "narration",
+    "sfx",
+    "sound_effect",
+    "sound_effect_text",
+    "logo",
+    "text_",
+    "_text",
+    "textblock",
+    "title",
+)
+
+
+def _is_text_label(semantic_label: str) -> bool:
+    label = semantic_label.lower()
+    return any(kw in label for kw in _TEXT_LABEL_KEYWORDS)
+
+
 def _non_primary_object_plan(
     decision: _RawObjectDecision, index: int, panel_id: str, image_path: Path
 ) -> ObjectPlan:
@@ -472,7 +518,9 @@ def _non_primary_object_plan(
     invent a new policy for demoting an unchosen PRIMARY to SECONDARY; it only stops
     overriding an already-real SECONDARY/MICRO read.
     """
-    if decision.motion_type in (MotionType.SECONDARY, MotionType.MICRO):
+    if decision.motion_type in (MotionType.SECONDARY, MotionType.MICRO) and not _is_text_label(
+        decision.semantic_label
+    ):
         try:
             return ObjectPlan(
                 object_id=_slugify(decision.semantic_label, index),
@@ -650,7 +698,11 @@ def _rank_panel_candidates(
     `analyze_page_panels` deliberately does NOT retry at the page level (see its docstring):
     that would let VLM nondeterminism silently overrule a real panel-level finding.
     """
-    candidates = [(pid, d) for pid, d in decisions if d.motion_type != MotionType.STATIC]
+    candidates = [
+        (pid, d)
+        for pid, d in decisions
+        if d.motion_type != MotionType.STATIC and not _is_text_label(d.semantic_label)
+    ]
     if not candidates and allow_all_static:
         return []
     if not candidates:

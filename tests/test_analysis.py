@@ -424,6 +424,83 @@ def test_analysis_prompt_explicitly_asks_for_drawn_effects_as_animation_targets(
     assert "must stay static" in lowered
 
 
+def test_analysis_prompt_forbids_animating_text_like_elements():
+    """Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled free-standing
+    dedication text as a SECONDARY object and the pipeline animated it with a rotate -- a
+    direct violation of goal 4 (never animate text). The prompt must forbid text-like
+    elements (speech bubbles, dialogue, sound-effect lettering, captions, dedication/pledge
+    text, logos) from being animated, and must not let text be relabeled as an object."""
+    from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT
+
+    lowered = ANALYSIS_PROMPT.lower()
+    assert "must never be animated" in lowered
+    for phrase in ["speech bubbles", "sound-effect lettering", "captions", "dedication",
+                   "pledge", "logos", "narration"]:
+        assert phrase in lowered, phrase
+    # Text may be listed as static (recorded as a known non-target) but never animated.
+    assert "motion_type \"static\"" in lowered or "static" in lowered
+    assert "never" in lowered and "animated" in lowered
+
+
+def test_text_like_labels_are_never_animated_despite_vlm_motion():
+    """Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled dedication text
+    SECONDARY and the pipeline animated it with a rotate. Even if a VLM mislabels text with a
+    non-STATIC motion_type, the plan must never animate it -- a deterministic label-keyed
+    backstop forces text-like semantic_labels to STATIC and excludes them from PRIMARY
+    candidacy."""
+    from manga_animation.analysis.plan_builder import (
+        _is_text_label,
+        _RawObjectDecision,
+    )
+    from manga_animation.schemas.animation_plan import MotionType
+
+    text_labels = [
+        "dedication", "pledge", "caption", "speech_bubble", "dialogue_text",
+        "sound_effect_lettering", "narration_box", "logo_text",
+    ]
+    for label in text_labels:
+        assert _is_text_label(label), label
+    non_text = ["character_hair", "cloth", "bicycle", "texture_pattern", "flag"]
+    for label in non_text:
+        assert not _is_text_label(label), label
+
+    # A text label with a VLM-given motion description still yields a valid decision for
+    # listing purposes, but the ranking layer excludes it from animated candidacy.
+    decision = _RawObjectDecision(
+        semantic_label="dedication",
+        motion_type=MotionType.SECONDARY,
+        confidence=0.9,
+        reason="x",
+        motion_description="the dedication text swings with the sword",
+    )
+    assert _is_text_label(decision.semantic_label) is True
+
+
+def test_rank_candidates_excludes_text_labels():
+    """Phase 16: `_rank_candidates` must not rank a text label as an animated candidate even
+    when the VLM marked it SECONDARY -- otherwise a text-only page would silently animate
+    its lettering instead of failing closed."""
+    import pytest
+
+    from manga_animation.analysis.plan_builder import _rank_candidates, _RawObjectDecision
+    from manga_animation.pipeline.types import PipelineStageError
+    from manga_animation.schemas.animation_plan import MotionType
+
+    decisions = [
+        _RawObjectDecision(
+            semantic_label="dedication",
+            motion_type=MotionType.SECONDARY,
+            confidence=0.9,
+            reason="x",
+            motion_description="the text is prominent",
+        )
+    ]
+    with pytest.raises(PipelineStageError) as exc_info:
+        _rank_candidates(decisions, "ref")
+    assert exc_info.value.stage == "analysis"
+    assert "STATIC" in exc_info.value.detail
+
+
 # --- Phase 3.3: panel-aware analysis --------------------------------------------------------
 
 
