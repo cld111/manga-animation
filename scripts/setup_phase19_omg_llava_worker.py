@@ -50,6 +50,17 @@ def _shell(cmd: str) -> str:
     return (out.stdout + out.stderr).strip()
 
 
+def _venv_site_packages(env_python: str) -> Path:
+    """The site-packages dir of the venv's python (sysconfig-based)."""
+    import sysconfig
+
+    out = subprocess.run(
+        [env_python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True, timeout=60,
+    )
+    return Path(out.stdout.strip())
+
+
 def _mmcv_version_ok(env_python: str) -> bool:
     """True when the installed mmcv is a 2.0.x release (mmdet 3.1.0's compatible range)."""
     import re
@@ -192,12 +203,11 @@ def main() -> None:
         ("mmpretrain", "mmcv_maximum_version = '2.2.0'"),
         ("mmseg", "MMCV_MAX = '2.1.0'"),
     ]:
-        init = f"{env_python}/../lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/{pkg}/__init__.py"
-        init = str(Path(init).resolve())
-        text = Path(init).read_text(encoding="utf-8")
+        init = _venv_site_packages(env_python) / pkg / "__init__.py"
+        text = init.read_text(encoding="utf-8")
         if pat in text:
             new = pat.replace("'2.1.0'", "'2.3.0'").replace("'2.2.0'", "'2.3.0'")
-            Path(init).write_text(text.replace(pat, new), encoding="utf-8")
+            init.write_text(text.replace(pat, new), encoding="utf-8")
             print(f"patched {pkg} mmcv gate: {pat} -> {new}")
     # The phase-19 benchmark CLI imports the manga-animation package (manifest/config/metrics,
     # light, no torch at import time). On python 3.11+ it pip-installs cleanly (requires >=3.11);
