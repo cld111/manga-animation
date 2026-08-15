@@ -306,6 +306,30 @@ REJECTed). panel_005 verified numerically: seamless loop (wrap 0.77 <= 2x ordina
 84.7% pixels static. No text animated; the page no longer reproduces its historical visual
 defect under the Phase 16 configuration.
 
+### Run 18: semantic-mask prompt strengthening benchmark
+
+The mask-semantics VLM prompt was strengthened (Phase 12 false negative `cloth_5`: mask
+included a speech bubble + hand, old prompt said "shows only the cloth") to explicitly
+direct the VLM at the failure mode manga masks actually have -- silently absorbing adjacent
+text/bubbles/hands/faces/background into the same bright region. Real-VLM re-run of the
+13-sample Phase 12 benchmark:
+
+| metric | Phase 12 baseline | Phase 16 prompt |
+|---|---|---|
+| precision | 0.750 | 0.667 |
+| recall | 0.600 | **0.800** |
+| FPR | 0.125 | 0.250 |
+| FNR | 0.400 | **0.200** |
+
+The confirmed false negative `cloth_5` is now caught. This is a deliberate fail-closed
+trade-off: the stricter prompt rejects 2 more masks (one false-reject on each of
+`raised_sword_12` and `character_eyes_2`, both flagged "includes a speech bubble with
+text") while catching the confirmed-defective cloth_5 that previously passed. For this
+project's fail-closed stance (STATIC is preferable to a bad animation), reducing the
+confirmed-defect false-negative rate is the higher-value change; the two new false rejects
+are exactly the "might be right" cases a visual QA pass should adjudicate. The 13-sample
+set remains development data, not a held-out calibration (docs/phase12-results.md).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
