@@ -136,4 +136,4 @@ def test_classify_error_candidate_absent():
     scores = {"BOOK_002": {key([150, 150, 170, 170]): score([150, 150, 170, 170], False, 0.6)}}
     per_target = rerank_targets(m, detections, scores, {"BOOK_002": (200, 200)})
     report = build_report(per_target, {})
-    assert report.error_classes.get("8_candidate_absent", 0) >= 1
+    assert report.error_classes.get("A:8_candidate_absent", 0) >= 1

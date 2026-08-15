@@ -22,10 +22,12 @@ production prompt.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image
+from pydantic import BaseModel, Field, ValidationError
 
 from manga_animation.analysis.client import VLMClient
 from manga_animation.benchmarking.phase17.metrics import bbox_iou
@@ -126,6 +128,117 @@ def _attach_dino_score(score: VlmCandidateScore, dino_score: float) -> VlmCandid
         confidence=score.confidence,
         reason=score.reason,
     )
+
+
+# --- Instance-specific contrastive prompt (benchmark-only, Phase 18.2.1) --------------------
+#
+# The production verification prompt is a PRESENCE check ("does the crop show character
+# body?") and is satisfied by every character on a page -- the measured reason the VLM
+# reranker falls into semantic confusion. This benchmark-only prompt instead forces the VLM to
+# discriminate ONE specific, cleanly-isolated instance: it must reject crops that contain
+# multiple characters, partial figures cut by the crop edge, or content dominated by text /
+# bubbles / panel borders. It deliberately does NOT see the GT box and does NOT use DINO score.
+# This is a research variant, NOT the production prompt; nothing here changes production.
+
+SPECIFIC_INSTANCE_PROMPT_TEMPLATE = """You are selecting the ONE candidate region that \
+isolates a single, complete, distinct character body on a manga page, so that region can be \
+treated as one specific character.
+
+Target object: "character body"
+
+Look at the image above. Does it show EXACTLY ONE character body as its clear, prominent \
+subject: a single complete figure (head, torso, clothing) that is NOT cut off by the crop \
+edge, does NOT contain a second character or a stray limb of another character, and is NOT \
+dominated by a speech bubble, dialogue text, or panel border?
+
+Only answer true when the crop isolates exactly one such specific character and nothing else \
+claims the frame. Otherwise answer false -- a crop with several characters, a partial figure, \
+or a dominating bubble/text/frame is NOT a specific single-instance crop.
+
+Answer with ONLY one JSON object, no prose: {{"is_specific": true or false, "confidence": a \
+float 0-1, "reason": "one short sentence"}}"""
+
+
+@dataclass(frozen=True, slots=True)
+class SpecificCandidateScore:
+    """The VLM's instance-specific read on one candidate crop (benchmark-only prompt)."""
+
+    box: BBox
+    is_specific: bool | None  # None -> unparseable response (fail closed)
+    confidence: float | None
+    reason: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "box": list(self.box),
+            "is_specific": self.is_specific,
+            "confidence": self.confidence,
+            "reason": self.reason,
+        }
+
+
+class _SpecificResponse(BaseModel):
+    is_specific: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(min_length=1)
+
+
+def _parse_specific_response(raw_text: str) -> _SpecificResponse | None:
+    """Parse the specific-prompt JSON; None (fail closed) on anything unparseable."""
+    from manga_animation.validation.validate import _extract_json_object
+
+    try:
+        object_text = _extract_json_object(raw_text)
+        data = json.loads(object_text)
+        return _SpecificResponse.model_validate(data)
+    except (json.JSONDecodeError, ValueError, ValidationError):
+        return None
+
+
+def specific_score_candidate(
+    vlm_client: VLMClient, image: ImageArray, box: BBox
+) -> SpecificCandidateScore:
+    """One instance-specific contrastive VLM read on one candidate's margin crop (the same
+    production crop, a benchmark-only prompt -- see SPECIFIC_INSTANCE_PROMPT_TEMPLATE)."""
+    bbox = BBoxPx(x0=box[0], y0=box[1], x1=box[2], y1=box[3])
+    crop = _crop_with_margin(image, bbox)
+    raw_text = vlm_client.generate(Image.fromarray(crop), SPECIFIC_INSTANCE_PROMPT_TEMPLATE)
+    parsed = _parse_specific_response(raw_text)
+    if parsed is None:
+        return SpecificCandidateScore(box=box, is_specific=None, confidence=None, reason=None)
+    return SpecificCandidateScore(
+        box=box, is_specific=parsed.is_specific, confidence=parsed.confidence, reason=parsed.reason
+    )
+
+
+def rank_specific(scores: list[SpecificCandidateScore]) -> list[SpecificCandidateScore]:
+    """Strategy S ranking: instance-specific signal only (no DINO score): is_specific=True
+    first (confidence desc), then False, then unparseable (fail closed) last."""
+    def key(s: SpecificCandidateScore) -> tuple[int, float]:
+        if s.is_specific is None:
+            return (0, -1.0)
+        if s.is_specific:
+            return (2, s.confidence if s.confidence is not None else -1.0)
+        return (1, s.confidence if s.confidence is not None else -1.0)
+
+    return sorted(scores, key=key, reverse=True)
+
+
+def specific_is_correct(
+    gt_bbox: BBox, ranked: list[SpecificCandidateScore], threshold: float = 0.5
+) -> bool:
+    """Whether the top-ranked instance-specific candidate matches the GT (evaluation only)."""
+    return bool(ranked) and bbox_iou(gt_bbox, ranked[0].box) >= threshold
+
+
+def rank_of_best_specific(
+    gt_bbox: BBox, ranked: list[SpecificCandidateScore], threshold: float = 0.5
+) -> int | None:
+    """1-based rank of the highest-positioned specific candidate with IoU >= threshold."""
+    for i, cand in enumerate(ranked):
+        if bbox_iou(gt_bbox, cand.box) >= threshold:
+            return i + 1
+    return None
 
 
 def _semantic_rank_key(score: VlmCandidateScore) -> tuple[int, float]:

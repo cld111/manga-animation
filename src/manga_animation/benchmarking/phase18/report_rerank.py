@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-STRATEGIES = ("A", "B", "C")
+STRATEGIES = ("A", "B", "C", "S")
 
 BASELINE_DINO_R1 = 0.062  # Phase 18.1: DINO top-1 selection accuracy
 CANDIDATE_UPPER_BOUND = 0.891  # Phase 18.1: R@All at IoU >= 0.5 (57/64)
@@ -69,6 +69,8 @@ class Phase18Report:
 def classify_error(entry: dict[str, Any], strategy: str) -> str:
     """Provisional, data-driven error class for a target whose VLM selection was wrong
     (evaluation-only; the visual packages are the authoritative adjudication)."""
+    if strategy not in entry["strategies"]:
+        return "not_run"
     sel = entry["strategies"][strategy]
     if entry["best_available_iou"] < 0.5:
         return "8_candidate_absent"
@@ -89,8 +91,11 @@ def build_report(
     n_category_c = sum(1 for e in per_target if e["best_available_iou"] < 0.5)
     strategies: dict[str, StrategyResult] = {}
     for strategy in STRATEGIES:
-        eligible = [e for e in per_target if e["best_available_iou"] >= 0.5]
-        sel_all = sum(1 for e in per_target if e["strategies"][strategy]["selected_correct"])
+        present = [e for e in per_target if strategy in e["strategies"]]
+        if not present:
+            continue  # strategy not run for any target (e.g. S when the specific pass was skipped)
+        eligible = [e for e in present if e["best_available_iou"] >= 0.5]
+        sel_all = sum(1 for e in present if e["strategies"][strategy]["selected_correct"])
         sel_elig = sum(1 for e in eligible if e["strategies"][strategy]["selected_correct"])
         recall_at_k: dict[int, float] = {}
         for k in (1, 3, 5, 10):
@@ -108,18 +113,20 @@ def build_report(
         )
         strategies[strategy] = StrategyResult(
             strategy=strategy,
-            n_targets=n,
+            n_targets=len(present),
             n_eligible=len(eligible),
-            sel_acc_all=sel_all / n if n else 0.0,
+            sel_acc_all=sel_all / len(present) if present else 0.0,
             sel_acc_eligible=sel_elig / len(eligible) if eligible else 0.0,
             recall_at_k=recall_at_k,
             n_selected_wrong=n_selected_wrong,
         )
-    # Error classes for strategy A over all targets.
+    # Error classes for the two semantic strategies of interest (presence=A, specific=S).
     error_classes: dict[str, int] = {}
-    for e in per_target:
-        cls = classify_error(e, "A")
-        error_classes[cls] = error_classes.get(cls, 0) + 1
+    for strategy in ("A", "S"):
+        for e in per_target:
+            cls = classify_error(e, strategy)
+            key = f"{strategy}:{cls}"
+            error_classes[key] = error_classes.get(key, 0) + 1
     return Phase18Report(
         baseline_dino_r1=BASELINE_DINO_R1,
         candidate_upper_bound=CANDIDATE_UPPER_BOUND,
@@ -154,7 +161,7 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
         "| strategy | sel@1 all | sel@1 eligible | n_eligible | n_selected_wrong |",
         "|---|---|---|---|---|",
     ]
-    for s in ("A", "B", "C"):
+    for s in ("A", "B", "C", "S"):
         r = report.strategies[s]
         lines.append(
             f"| {s} | {_pct(r.sel_acc_all)} | {_pct(r.sel_acc_eligible)} | "
@@ -162,12 +169,16 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
         )
     lines += [
         "",
+        "Strategies: A = semantic (production prompt); B = semantic + DINO score; "
+        "C = plausibility gate then semantic; S = instance-specific contrastive prompt "
+        "(benchmark-only, no DINO score).",
+        "",
         "## Recall@K of the correct candidate in the VLM-ranked order (eligible targets)",
         "",
         "| strategy | R@1 | R@3 | R@5 | R@10 |",
         "|---|---|---|---|---|",
     ]
-    for s in ("A", "B", "C"):
+    for s in ("A", "B", "C", "S"):
         r = report.strategies[s]
         lines.append(
             f"| {s} | {_pct(r.recall_at_k[1])} | {_pct(r.recall_at_k[3])} | "
@@ -177,11 +188,14 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
         "",
         "## Cost (measured)",
         "",
-        f"- VLM calls: {report.perf.get('vlm_calls', 'n/a')} "
+        f"- presence-pass VLM calls: {report.perf.get('vlm_calls', 'n/a')} "
         f"(cached: {report.perf.get('cached_calls', 'n/a')})",
+        f"- specific-pass VLM calls: {report.perf.get('specific', {}).get('vlm_calls', 'n/a')} "
+        f"(cached: {report.perf.get('specific', {}).get('cached_calls', 'n/a')})",
         f"- total elapsed: {report.perf.get('total_elapsed_s', 'n/a')} s",
         "",
-        "## Error classes (strategy A, provisional -- visual packages are authoritative)",
+        "## Error classes (strategy A = presence prompt, S = specific prompt; provisional -- "
+        "visual packages are authoritative)",
         "",
         "| class | count |",
         "|---|---|",

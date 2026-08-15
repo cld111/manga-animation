@@ -28,6 +28,7 @@ from manga_animation.analysis import Qwen25VLClient
 from manga_animation.benchmarking.phase17.manifest import load_manifest
 from manga_animation.benchmarking.phase18.report_rerank import build_report, write_report
 from manga_animation.benchmarking.phase18.run_rerank import (
+    collect_specific_scores,
     collect_vlm_scores,
     rerank_targets,
 )
@@ -91,7 +92,12 @@ def main() -> None:
     scores_by_page, perf = collect_vlm_scores(
         manifest, dataset_dir, detections_by_page, out_dir, vlm_client
     )
+    # Instance-specific contrastive pass (benchmark-only prompt; strategy S, no DINO score).
+    specific_scores, specific_perf = collect_specific_scores(
+        manifest, dataset_dir, detections_by_page, out_dir, vlm_client
+    )
     perf["wall_s"] = round(time.perf_counter() - t0, 2)
+    perf["specific"] = specific_perf
     image_shapes: dict[str, tuple[int, int]] = {}
     for sample in manifest.samples:
         page_key = f"{sample.book}_{sample.page_index:03d}"
@@ -99,7 +105,13 @@ def main() -> None:
 
         with Image.open(dataset_dir / f"{sample.sample_id}.png") as img:
             image_shapes.setdefault(page_key, img.size[::-1])  # (h, w)
-    per_target = rerank_targets(manifest, detections_by_page, scores_by_page, image_shapes)
+    per_target = rerank_targets(
+        manifest,
+        detections_by_page,
+        scores_by_page,
+        image_shapes,
+        specific_scores_by_page=specific_scores,
+    )
     (out_dir / "per_target_rerank.json").write_text(
         json.dumps(per_target, indent=1), encoding="utf-8"
     )

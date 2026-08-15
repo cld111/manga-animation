@@ -23,11 +23,16 @@ from PIL import Image
 from manga_animation.analysis.client import VLMClient
 from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest
 from manga_animation.benchmarking.phase18.rerank import (
+    SpecificCandidateScore,
     VlmCandidateScore,
     production_object_plan,
     rank_of_best_correct,
+    rank_of_best_specific,
     rank_scores,
+    rank_specific,
     selected_is_correct,
+    specific_is_correct,
+    specific_score_candidate,
     vlm_score_candidate,
 )
 from manga_animation.pipeline.lifecycle import ModelStage
@@ -43,22 +48,72 @@ def collect_vlm_scores(
     detections_by_page: dict[str, list[dict[str, Any]]],
     out_dir: Path,
     vlm_client: VLMClient,
-) -> tuple[dict[str, dict[str, VlmCandidateScore]], dict[str, Any]]:
-    """Score every unique candidate box per page with the production VLM prompt. Returns
-    `(scores_by_page, perf)`; `scores_by_page[page_key][box_key]` is the cached score."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Score every unique candidate box per page. `mode` selects the prompt/scorer:
+    "presence" (production `validate_target` prompt) or "specific" (benchmark-only
+    instance-specific contrastive prompt). Returns `(scores_by_page, perf)`; caches per
+    (page, box) to `vlm_scores_by_page.json` / `specific_scores_by_page.json` (resumable)."""
+    return _collect_scores(
+        manifest,
+        dataset_dir,
+        detections_by_page,
+        out_dir,
+        vlm_client,
+        mode="presence",
+    )
+
+
+def collect_specific_scores(
+    manifest: BenchmarkManifest,
+    dataset_dir: Path,
+    detections_by_page: dict[str, list[dict[str, Any]]],
+    out_dir: Path,
+    vlm_client: VLMClient,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    return _collect_scores(
+        manifest,
+        dataset_dir,
+        detections_by_page,
+        out_dir,
+        vlm_client,
+        mode="specific",
+    )
+
+
+def _collect_scores(
+    manifest: BenchmarkManifest,
+    dataset_dir: Path,
+    detections_by_page: dict[str, list[dict[str, Any]]],
+    out_dir: Path,
+    vlm_client: VLMClient,
+    *,
+    mode: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    object_plan_ref = production_object_plan()
+    score_fn: Any
+    if mode == "presence":
+        cache_name = "vlm_scores_by_page.json"
+        score_fn = lambda image, box: vlm_score_candidate(  # noqa: E731
+            vlm_client, image, object_plan_ref, box
+        )
+    else:
+        cache_name = "specific_scores_by_page.json"
+        score_fn = lambda image, box: specific_score_candidate(  # noqa: E731
+            vlm_client, image, box
+        )
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / "vlm_scores_by_page.json"
+    cache_path = out_dir / cache_name
     cached: dict[str, dict[str, dict[str, Any]]] = {}
     if cache_path.exists():
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        print(f"resuming from cached VLM scores: {len(cached)} pages")
+        print(f"resuming from cached {cache_name}: {len(cached)} pages")
 
-    object_plan = production_object_plan()
     sample_by_page: dict[str, Any] = {}
     for sample in manifest.samples:
         sample_by_page.setdefault(f"{sample.book}_{sample.page_index:03d}", sample)
 
-    scores_by_page: dict[str, dict[str, VlmCandidateScore]] = {}
+    scores_by_page: dict[str, dict[str, dict[str, Any]]] = {}
     perf: dict[str, Any] = {
         "vlm_calls": 0,
         "cached_calls": 0,
@@ -70,19 +125,12 @@ def collect_vlm_scores(
         for page_key, detections in sorted(detections_by_page.items()):
             page_start = time.perf_counter()
             image = None
-            page_scores: dict[str, VlmCandidateScore] = {}
+            page_scores: dict[str, dict[str, Any]] = {}
             for det in detections:
                 box = [int(v) for v in det["box"]]
                 key = _box_key(box)
                 if key in cached.get(page_key, {}):
-                    entry = cached[page_key][key]
-                    page_scores[key] = VlmCandidateScore(
-                        box=tuple(entry["box"]),
-                        dino_score=float(entry["dino_score"]),
-                        matches=entry["matches"],
-                        confidence=entry["confidence"],
-                        reason=entry["reason"],
-                    )
+                    page_scores[key] = dict(cached[page_key][key])
                     perf["cached_calls"] += 1
                     continue
                 if image is None:
@@ -90,20 +138,11 @@ def collect_vlm_scores(
                     image = np.asarray(
                         Image.open(dataset_dir / f"{sample.sample_id}.png").convert("RGB")
                     )
-                raw = vlm_score_candidate(
-                    vlm_client,
-                    image,
-                    object_plan,
-                    (box[0], box[1], box[2], box[3]),
-                )
-                scored = VlmCandidateScore(
-                    box=raw.box,
-                    dino_score=float(det["score"]),
-                    matches=raw.matches,
-                    confidence=raw.confidence,
-                    reason=raw.reason,
-                )
-                page_scores[key] = scored
+                raw = score_fn(image, (box[0], box[1], box[2], box[3]))
+                entry = raw.as_dict()
+                if mode == "presence":
+                    entry["dino_score"] = float(det["score"])
+                page_scores[key] = entry
                 perf["vlm_calls"] += 1
             scores_by_page[page_key] = page_scores
             perf["per_page_elapsed_s"][page_key] = round(time.perf_counter() - page_start, 2)
@@ -111,13 +150,8 @@ def collect_vlm_scores(
                 print(f"  {page_key}: {perf['vlm_calls']} VLM calls so far", flush=True)
 
     perf["total_elapsed_s"] = round(time.perf_counter() - start, 2)
-
-    # Persist cache (best-effort: encode as dict).
-    def _enc(scores: dict[str, VlmCandidateScore]) -> dict[str, dict[str, Any]]:
-        return {key: s.as_dict() for key, s in scores.items()}
-
     cache_path.write_text(
-        json.dumps({page: _enc(scores) for page, scores in scores_by_page.items()}, indent=1),
+        json.dumps({page: scores for page, scores in scores_by_page.items()}, indent=1),
         encoding="utf-8",
     )
     return scores_by_page, perf
@@ -128,8 +162,11 @@ def rerank_targets(
     detections_by_page: dict[str, list[dict[str, Any]]],
     scores_by_page: dict[str, dict[str, VlmCandidateScore]],
     image_shapes: dict[str, tuple[int, int]],
+    *,
+    specific_scores_by_page: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Rank each target's page candidates per strategy and measure selection accuracy."""
+    """Rank each target's page candidates per strategy (A/B/C) and, when the instance-specific
+    scores are provided, strategy S (specific-instance contrastive, no DINO score)."""
     from manga_animation.benchmarking.phase17.metrics import bbox_iou
 
     results: list[dict[str, Any]] = []
@@ -167,6 +204,31 @@ def rerank_targets(
                 "selected_matches": top1.matches if top1 else None,
                 "selected_confidence": top1.confidence if top1 else None,
                 "selected_dino_score": top1.dino_score if top1 else None,
+            }
+        if specific_scores_by_page is not None:
+            sp_page = specific_scores_by_page.get(page_key, {})
+            sp_scores: list[SpecificCandidateScore] = []
+            for d in dets:
+                e = sp_page.get(_box_key([int(v) for v in d["box"]]))
+                if e is None:
+                    continue
+                sp_scores.append(
+                    SpecificCandidateScore(
+                        box=tuple(e["box"]),
+                        is_specific=e.get("is_specific"),
+                        confidence=e.get("confidence"),
+                        reason=e.get("reason"),
+                    )
+                )
+            ranked_s = rank_specific(sp_scores)
+            top_s = ranked_s[0] if ranked_s else None
+            entry["strategies"]["S"] = {
+                "selected_correct": specific_is_correct(gt, ranked_s),
+                "best_correct_rank": rank_of_best_specific(gt, ranked_s),
+                "selected_box": list(top_s.box) if top_s else None,
+                "selected_matches": top_s.is_specific if top_s else None,
+                "selected_confidence": top_s.confidence if top_s else None,
+                "selected_dino_score": None,
             }
         results.append(entry)
     return results
