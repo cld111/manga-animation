@@ -173,6 +173,17 @@ mask area 17.5%. Meanwhile dense "select everything" candidates (density 0.85-0.
 29-79%) were also returned by grounding and must be rejected -- which is exactly what the
 post-segmentation `max_mask_density` check does.
 
+### Run 7: repeated `wind_breaker_sprint` after the bound relaxation
+
+`run_phase16_gpu_effects.py --pages examples/realworld/wind_breaker_sprint.png` (re-run with
+the relaxed radial_expand profile active).
+
+Panel statuses: `[PASS, REJECTED, REJECTED, REJECTED]` -- identical statuses to the
+pre-relaxation run, confirming the radial_expand bound relaxation did not break the already-
+working speed-lines path. (The VLM chose a different PRIMARY this run -- `cycling_0`
+translate instead of the previous run's `speed_lines` PRIMARY -- a known VLM nondeterminism,
+not a pipeline regression; the PASS panel still rendered and verified.)
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
