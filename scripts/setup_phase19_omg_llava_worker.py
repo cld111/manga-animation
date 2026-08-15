@@ -149,7 +149,9 @@ def main() -> None:
     # light, no torch at import time). On python 3.11+ it pip-installs cleanly (requires >=3.11);
     # on python 3.10 the run commands set PYTHONPATH=/kaggle/working/manga-animation/src instead.
     pyver = _shell(
-        f"{env_python} -c 'import sys; print(f\"{{sys.version_info.major}}.{{sys.version_info.minor}}\")'"
+        f"{env_python} -c 'import sys; "
+        'print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+        "'"
     )
     if tuple(int(p) for p in pyver.split(".")) >= (3, 11):
         _run([env_python, "-m", "pip", "install", "-q", "-e", "/kaggle/working/manga-animation"])
