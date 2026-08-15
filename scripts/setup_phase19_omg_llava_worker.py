@@ -29,7 +29,9 @@ from pathlib import Path
 # The verified upstream commit this benchmark pins (auto-bumped when verified).
 OMG_SEG_DEFAULT_COMMIT = "48ab9407a45c2ecf78b4e980d6a6ccddf9a7ec9f"
 HF_REPO = "zhangtao-whu/OMG-LLaVA"
-FINETUNE_CONFIG = "omg_llava/configs/finetune/omg_llava_7b_finetune_8gpus.py"
+# Full-repo path to the finetune config (the official README uses the omg_llava-subtree-relative
+# path; after cloning the whole OMG-Seg repo the config lives one level deeper).
+FINETUNE_CONFIG = "omg_llava/omg_llava/configs/finetune/omg_llava_7b_finetune_8gpus.py"
 WEIGHTS = (
     "internlm2-chat-7b",
     "omg_llava_7b_finetune_8gpus.pth",

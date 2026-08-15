@@ -18,7 +18,7 @@ OMG_LLAVA_SUBTREE = "omg_llava"
 HF_REPO = "zhangtao-whu/OMG-LLaVA"
 OFFICIAL_INFERENCE_ENTRY = "omg_llava/tools/chat_omg_llava.py"
 OFFICIAL_GRADIO_ENTRY = "omg_llava/tools/app.py"
-FINETUNE_CONFIG = "omg_llava/configs/finetune/omg_llava_7b_finetune_8gpus.py"
+FINETUNE_CONFIG = "omg_llava/omg_llava/configs/finetune/omg_llava_7b_finetune_8gpus.py"
 PAPER = "https://arxiv.org/abs/2406.19389"
 
 # --- Weights -----------------------------------------------------------------------------
