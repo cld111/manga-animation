@@ -480,7 +480,6 @@ _TEXT_LABEL_KEYWORDS: tuple[str, ...] = (
     "lettering",
     "dialogue",
     "speech",
-    "bubble",
     "narration",
     "sfx",
     "sound_effect",
