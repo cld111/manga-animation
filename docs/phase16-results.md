@@ -354,6 +354,15 @@ threshold was added. The two new VLM false-rejects (raised_sword_12, character_e
 remain to be adjudicated by visual QA -- the numerical evidence here does not settle whether
 they contain real bubbles.
 
+### Run 21: repeated `sss_hunter_gladiator` -- stability confirmation
+
+Third full run of `sss_hunter_gladiator` (text-guard + new mask prompt + effect heuristics
+all active): `[PASS, PASS, REJECTED, REJECTED, REJECTED]` -- identical to Run 14, confirming
+run-to-run stability on this page. The VLM again chose `speed_lines` as the single animated
+object and did not emit `green_fluid` this run, so the mesh_warp fluid path still lacks a
+live end-to-end render (covered by the E2E speed_lines test and the green_fluid unit test,
+but not by a real render).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
