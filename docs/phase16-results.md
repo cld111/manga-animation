@@ -340,6 +340,20 @@ in production; the drawn-effect path remains functional. (VLM nondeterminism sel
 bicycle/rider as PRIMARY this run rather than the previous runs' speed_lines, so statuses
 differ across runs -- not a pipeline regression.)
 
+### Run 20: deterministic text-in-mask signal -- negative result
+
+After the mask-prompt re-benchmark, I tested whether a deterministic "speech-bubble-in-mask"
+signal (large white region with dense dark text inside: max dark-inside density over white
+connected components, plus white/dark fractions) could separate the 13 benchmark masks --
+as a post-segmentation gate that would not depend on the VLM. It does not: good
+`raised_sword_12` (max density 0.307) exceeds bad `cloth_5` (0.229), good `character_eyes_2`
+(0.293) is close to bad `character_hair_7` (0.588); white/dark fractions also overlap
+between confirmed-bad and good masks. This is a fresh confirmation of Phase 11's finding
+that deterministic contrast/geometric signals do not separate these masks; no speculative
+threshold was added. The two new VLM false-rejects (raised_sword_12, character_eyes_2)
+remain to be adjudicated by visual QA -- the numerical evidence here does not settle whether
+they contain real bubbles.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
