@@ -50,6 +50,24 @@ def _shell(cmd: str) -> str:
     return (out.stdout + out.stderr).strip()
 
 
+# mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The official INSTALL.md pins mmcv at a
+# 2.0.x-era commit; mmcv 2.1.0 (the only 2.x prebuilt wheel on the cu118/torch2.1 openmmlab
+# index) is rejected by mmdet's hard version gate, so the setup builds it from source.
+MMCV_INSTALL_COMMIT = "4f65f91db6502d990ce2ee5de0337441fb69dd10"
+MMCV_GIT_URL = f"git+https://github.com/open-mmlab/mmcv.git@{MMCV_INSTALL_COMMIT}"
+
+
+def _mmcv_version_ok(env_python: str) -> bool:
+    """True when the installed mmcv is a 2.0.x release (mmdet 3.1.0's compatible range)."""
+    import re
+
+    v = _shell(f"{env_python} -c 'import mmcv; print(mmcv.__version__)'")
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", v or "")
+    if not match:
+        return False
+    return tuple(int(x) for x in match.groups()[:2]) == (2, 0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Install the official OMG-LLaVA stack on a worker")
     parser.add_argument("--weights-dir", default="/kaggle/working/models/omg_llava")
@@ -128,11 +146,22 @@ def main() -> None:
             "--index-url", "https://download.pytorch.org/whl/cu118",
         ])
 
-    if not in_env("mmcv"):
-        # mmcv 2.x has no PyPI wheels for torch 2.1 -- use the official openmmlab prebuilt
-        # index for cu118/torch2.1 (avoids a 20+ minute source build).
-        _run([env_python, "-m", "pip", "install", "mmcv==2.1.0",
-              "-f", "https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html"])
+    if not _mmcv_version_ok(env_python):
+        # mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0; the only prebuilt 2.x wheel on the
+        # cu118/torch2.1 openmmlab index is 2.1.0 (rejected), so build the official INSTALL.md
+        # mmcv commit from source. T4 is sm_75 (INSTALL.md's 8.0 targets A100).
+        _run([env_python, "-m", "pip", "uninstall", "-y", "mmcv", "mmcv-full"])
+        build_env = dict(
+            os.environ,
+            TORCH_CUDA_ARCH_LIST="7.5",
+            FORCE_CUDA="1",
+            MMCV_WITH_OPS="1",
+        )
+        _run(
+            [env_python, "-m", "pip", "install", MMCV_GIT_URL],
+            env=build_env,
+            timeout=7200,
+        )
         _run([env_python, "-m", "pip", "install",
               "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
               "mmengine", "transformers==4.36.0", "triton==2.1.0",
