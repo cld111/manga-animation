@@ -151,6 +151,9 @@ def main() -> None:
         # cu118/torch2.1 openmmlab index is 2.1.0 (rejected), so build the official INSTALL.md
         # mmcv commit from source. T4 is sm_75 (INSTALL.md's 8.0 targets A100).
         _run([env_python, "-m", "pip", "uninstall", "-y", "mmcv", "mmcv-full"])
+        # mmcv 2.0.x setup.py uses pkg_resources, which modern setuptools (>=81) removed;
+        # the get-pip bootstrap installs a too-new setuptools, so pin a compatible one first.
+        _run([env_python, "-m", "pip", "install", "-q", "setuptools<81"])
         build_env = dict(
             os.environ,
             TORCH_CUDA_ARCH_LIST="7.5",
