@@ -247,6 +247,28 @@ unchanged. Confirms the label-keyed effect classification holds against a real V
   mask-semantics: the speed_lines mask "includes the glasses frame" -- artwork preservation
   on yet another page. panel_005 REJECTED at grounding (no "raised sword" in that panel).
 
+### Run 13: text-animation finding + fix (`sss_hunter_gladiator`)
+
+Real goal-4 violation found on `sss_hunter_gladiator`: the VLM labeled free-standing
+dedication text (`dedication`) as a SECONDARY object and the pipeline animated it with a
+rotate. Both the semantic target check ("The text 'I dedicate my blood' clearly indicates
+the target") and mask-semantics ("The bright region contains only the text ... and no other
+content", confidence 1.0) ACCEPTed it, because text was the mask's only content -- so the
+animation-safety gates could not catch a purely-text mask. This is the exact artwork
+preservation failure the phase brief's goal 4 forbids.
+
+Fix (deterministic, three layers):
+- `ANALYSIS_PROMPT` now has an explicit CRITICAL rule that text-like elements (speech
+  bubbles, dialogue, sound-effect lettering, captions, dedication/pledge text, narration,
+  logos) must never be animated and must never be relabeled as objects;
+- `_TEXT_LABEL_KEYWORDS`/`_is_text_label` force text-like semantic_labels to STATIC even if
+  the VLM gave them motion (label-keyed, mirroring the effect-classification design;
+  "texture" deliberately not matched);
+- `_rank_candidates`/`_rank_panel_candidates` exclude text labels from animated candidacy,
+  so a text-only page fails closed instead of animating its lettering.
+
+Tests: prompt rule, label guard, ranking exclusion (618 local tests pass).
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
