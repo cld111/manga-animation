@@ -102,13 +102,16 @@ _TRANSFORM_GEOMETRY_PROFILES: dict[TransformKind, TransformGeometryProfile] = {
     # this phase even though animating its sparse mask would move almost nothing. The area
     # bound is relaxed to 60% so legitimately large bursts can proceed, and the actual
     # animation-safety decision is deferred to the POST-segmentation mask check
-    # (`segmentation/segment.py::_validate_mask_region_coverage`, which measures the real
-    # mask's area fraction of the panel -- a dense "select everything" mask still fails
-    # there). The edge margin stays: the rim must have room to breathe without clipping the
-    # reference region's boundary. No aspect-ratio check: a legitimately elongated radiating
-    # burst (a wide speed-line fan, a tall energy plume) is a real RADIAL_EXPAND target.
+    # (`segmentation/segment.py::_validate_mask_density`, which measures the real mask's
+    # density -- a dense "select everything" mask still fails there). The edge-margin
+    # requirement is dropped to 0 for the same reason: an effect covering most of its panel
+    # legitimately has a bbox touching the panel edges, but its sparse mask sits at the
+    # center and its rim barely reaches those edges when pulsing (the real fleet
+    # impact_burst's bbox reached 98% of the panel while its mask covered only 32%, density
+    # 0.32). No aspect-ratio check: a legitimately elongated radiating burst (a wide
+    # speed-line fan, a tall energy plume) is a real RADIAL_EXPAND target.
     TransformKind.RADIAL_EXPAND: TransformGeometryProfile(
-        max_area_fraction=0.60, min_edge_margin_fraction=0.02, max_aspect_ratio=None
+        max_area_fraction=0.60, min_edge_margin_fraction=0.0, max_aspect_ratio=None
     ),
     # TRANSLATE moves the bbox's content rigidly, but only by a small amplitude in this
     # codebase's real usage (amplitude = fraction of the panel diagonal; e.g. the hair

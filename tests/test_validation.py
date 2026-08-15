@@ -316,6 +316,28 @@ def test_radial_expand_has_a_transform_specific_geometry_profile():
     assert "radial_expand" in radial_reason.lower()
 
 
+def test_radial_expand_accepts_a_bbox_touching_the_reference_edge():
+    """Phase 16: a RADIAL_EXPAND effect whose bbox reaches its reference region's edge must
+    still be ACCEPTed -- real evidence (`angels_of_war_fleet` impact_burst bbox reached 98%
+    of its panel while its sparse mask covered only 32%, density 0.32) shows an effect
+    covering most of its panel legitimately has an edge-touching bbox even though its mask
+    sits at the center and barely reaches the edge when pulsing. The pre-segmentation edge
+    margin is deliberately 0 for radial_expand; the post-segmentation mask-density check is
+    the real safety gate."""
+    from manga_animation.validation.transform_geometry import check_transform_geometry
+
+    edge_box = BBoxPx(x0=0, y0=50, x1=80, y1=150)  # touches left edge, area well under 60%
+    rotate_ok, _ = check_transform_geometry(
+        edge_box, TransformKind.ROTATE, panel_bbox_px=None, image_shape=(200, 200)
+    )
+    radial_ok, radial_reason = check_transform_geometry(
+        edge_box, TransformKind.RADIAL_EXPAND, panel_bbox_px=None, image_shape=(200, 200)
+    )
+    assert rotate_ok is False  # the same edge-touching box is still unsafe to rotate
+    assert radial_ok is True
+    assert "radial_expand" in radial_reason.lower()
+
+
 def test_translate_accepts_a_bbox_flush_against_the_reference_edge():
     """Real regression guard: a TRANSLATE candidate flush against its reference region's top
 

@@ -225,6 +225,12 @@ These are future work, not implemented capabilities:
    render), and consider effect-aware semantic labels for the mask-semantics gate.
 7. Add more effect-heavy pages to the real evaluation set (speed lines confirmed working;
    impact/energy/glow/smoke/water render paths remain unexercised end-to-end).
+8. Confirm the relaxed RADIAL_EXPAND bounds on real renders: Phase 16 evidence showed drawn
+   effect masks are sparse (real speed_lines/impact_burst masks covered 6-17% of their panel
+   at density 0.28-0.50 while their grounding boxes reached 98%), so `transform_geometry.py`
+   now allows a 60% bbox area for radial_expand and `segmentation/segment.py` rejects dense
+   masks (density > 0.70, the confirmed "select everything" signature) post-segmentation.
+   Neither threshold is statistically calibrated.
 
 ## Verification and Workflow
 
