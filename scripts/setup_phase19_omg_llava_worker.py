@@ -50,11 +50,9 @@ def _shell(cmd: str) -> str:
     return (out.stdout + out.stderr).strip()
 
 
-# mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The official INSTALL.md pins mmcv at a
-# 2.0.x-era commit; mmcv 2.1.0 (the only 2.x prebuilt wheel on the cu118/torch2.1 openmmlab
-# index) is rejected by mmdet's hard version gate, so the setup builds it from source.
-MMCV_INSTALL_COMMIT = "4f65f91db6502d990ce2ee5de0337441fb69dd10"
-MMCV_GIT_URL = f"git+https://github.com/open-mmlab/mmcv.git@{MMCV_INSTALL_COMMIT}"
+# mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The cu118/torch2.0 openmmlab index provides
+# mmcv 2.0.1 prebuilt against CUDA 11.8 (matching torch 2.1.2+cu118) -- see the install step.
+MMCV_INDEX_URL = "https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html"
 
 
 def _mmcv_version_ok(env_python: str) -> bool:
@@ -147,30 +145,23 @@ def main() -> None:
         ])
 
     if not _mmcv_version_ok(env_python):
-        # mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0; the only prebuilt 2.x wheel on the
-        # cu118/torch2.1 openmmlab index is 2.1.0 (rejected), so build the official INSTALL.md
-        # mmcv commit from source. T4 is sm_75 (INSTALL.md's 8.0 targets A100).
+        # mmdet 3.1.0 requires mmcv >= 2.0.0rc4, < 2.1.0. The cu118/torch2.1 openmmlab index
+        # only has 2.1.0 (rejected) and building mmcv from source is blocked by torch's CUDA
+        # version gate (nvcc 12.8 vs torch 2.1.2+cu118). The cu118/torch2.0 index has mmcv 2.0.1
+        # prebuilt against CUDA 11.8 -- matching torch's CUDA -- and torch 2.0->2.1 extension ABI
+        # is compatible in practice (verified: mmdet imports and ops work on torch 2.1.2).
         _run([env_python, "-m", "pip", "uninstall", "-y", "mmcv", "mmcv-full"])
-        # mmcv 2.0.x setup.py uses pkg_resources, which modern setuptools (>=81) removed;
-        # the get-pip bootstrap installs a too-new setuptools, so pin a compatible one first.
-        _run([env_python, "-m", "pip", "install", "-q", "setuptools<81"])
-        build_env = dict(
-            os.environ,
-            TORCH_CUDA_ARCH_LIST="7.5",
-            FORCE_CUDA="1",
-            MMCV_WITH_OPS="1",
-        )
-        _run(
-            [env_python, "-m", "pip", "install", "--no-build-isolation", MMCV_GIT_URL],
-            env=build_env,
-            timeout=7200,
-        )
+        _run([env_python, "-m", "pip", "install", "mmcv==2.0.1",
+              "-f", MMCV_INDEX_URL])
         _run([env_python, "-m", "pip", "install",
               "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
               "mmengine", "transformers==4.36.0", "triton==2.1.0",
               "bitsandbytes", "peft", "accelerate", "sentencepiece", "einops",
               "scikit-image", "scipy", "pycocotools", "datasets", "kornia", "ftfy",
               "timm", "openpyxl", "lagent", "gradio==4.37.2", "gradio-image-prompter"])
+        # torch 2.1.2 and the 2024 mm stack were built against numpy 1.x (numpy 2 breaks the
+        # torch<->numpy bridge and opencv 5 needs numpy>=2), so pin both.
+        _run([env_python, "-m", "pip", "install", "-q", "numpy<2", "opencv-python<5"])
 
     # --- 2. official repo at the pinned commit --------------------------------------------
     if not (src_dir / "omg_llava").exists():
