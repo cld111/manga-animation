@@ -166,6 +166,20 @@ conclusion. Candidates without implemented adapters remain research entries.
   Case A (candidate exists, ranking is the problem): next step is candidate selection /
   reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
   grounding-scale floor, not fixable by a selector.
+- Phase 19 (diagnostic only, no production changes; docs/phase19-omg-llava-results.md)
+  evaluated OMG-LLaVA 7B (official finetune checkpoint) as a replacement for the whole
+  Qwen->DINO->selection->SAM perception chain on the same 64 targets. On 2xT4-16GB the
+  official 1024px config OOMs (measured: 13.6-14.0 GiB resident; 1024 and 768 both fail, 512
+  fits at 13.3 GiB peak on one T4, 4-bit bitsandbytes). With the production-available
+  description ("character body", condition D): END_TO_END_SUCCESS 4.7% (3/64) and
+  instance-correct 7.8% -- statistically equal to DINO top-1's 6.2% and to the current
+  pipeline's 3/64; 58/64 masks have zero overlap, 47/64 are dominated by panel frames (H in
+  the failure taxonomy). Masks are excellent when the model commits (IoU 0.87-0.92, ~SAM's
+  GT-box quality). Autonomous discovery over 52 pages: 29/52 real masks, but only 3/52
+  page-grounded targets (28/52 generic prompt-echo, 21/52 degenerate "Pillow."). Latency
+  2.5 s/target + 3.5 min load vs sub-second DINO+SAM. Recommendation: **D. keep the current
+  pipeline** -- OMG-LLaVA does not improve instance selection, which remains the bottleneck
+  (Phase 18.2 reranking is still the evidence-backed direction).
 
 ## Known Limitations and Technical Debt
 
@@ -303,6 +317,13 @@ These are future work, not implemented capabilities:
     `validate_target` VLM check is the existing candidate signal), measure reranked Recall@K
     and end-to-end DINO->SAM->gates IoU on the same 64 targets, and keep the 7 category-C
     targets (no candidate at all) out of the selector's success claim.
+12. **Phase 19 follow-up (docs/phase19-omg-llava-results.md):** OMG-LLaVA was measured as a
+    whole-chain replacement candidate and does not improve instance selection (7.8% vs DINO
+    top-1's 6.2% on the same 64 targets), does not fit the official resolution on 2xT4, and
+    its autonomous discovery is mostly degenerate. The evidence-backed direction stays the
+    Phase 18.2 candidate reranker; if a referring-segmentation model is revisited, it needs
+    (a) a GPU with >24 GiB so the official 1024px config runs, and (b) a production-realistic
+    description signal to feed it.
 
 ## Verification and Workflow
 
