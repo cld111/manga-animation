@@ -32,10 +32,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as _datetime
 import json
 import os
-from datetime import UTC, datetime
 from pathlib import Path
+
+# python-3.10 compat shim for the OMG-LLaVA worker env: the benchmark runs inside the
+# official omg_llava python-3.10 venv (the stack is pinned to 2024-era deps), but the
+# manga-animation harness modules use `datetime.UTC` (python 3.11+). `datetime.timezone.utc`
+# is identical; patch it before any manga_animation import so `from datetime import UTC`
+# resolves. This is benchmark-harness-only, not a production change.
+if not hasattr(_datetime, "UTC"):
+    # noqa: UP017 -- the alias is py3.11+; this shim intentionally provides it for py3.10.
+    _datetime.UTC = _datetime.timezone.utc  # type: ignore[attr-defined]
+
+from datetime import UTC, datetime as _dt
 
 import numpy as np
 from PIL import Image
@@ -148,7 +159,7 @@ def main() -> None:
         manifest = _trim_manifest(manifest, args.limit)
 
     out_dir = Path(args.out)
-    run_dir = out_dir / f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+    run_dir = out_dir / f"run_{_dt.now(UTC).strftime('%Y%m%d_%H%M%S')}"
     dataset_dir = out_dir.parent / "phase17_object_segmentation" / "dataset"
     if not (dataset_dir / f"{manifest.samples[0].sample_id}.png").exists():
         dataset_dir = out_dir / "dataset"
@@ -180,7 +191,7 @@ def main() -> None:
         "shard_two_gpus": args.shard_two_gpus,
         "resolution": args.resolution,
         "max_new_tokens": args.max_new_tokens,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": _dt.now(UTC).isoformat(),
         "environment": environment_metadata(device),
     }
     (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
