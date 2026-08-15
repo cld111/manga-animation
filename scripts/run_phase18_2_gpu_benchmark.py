@@ -49,6 +49,12 @@ def main() -> None:
     parser.add_argument("--vlm", required=True, help="Qwen VLM model dir on the worker")
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=None, help="limit unique pages")
+    parser.add_argument(
+        "--profile",
+        default="kaggle",
+        help="config profile (default 'kaggle' -> VLM dtype float16, the only verified 2xT4 "
+        "configuration for Qwen2.5-VL-7B; float32 OOMs on a shared T4 pair)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -71,7 +77,7 @@ def main() -> None:
     if not (dataset_dir / f"{manifest.samples[0].sample_id}.png").exists():
         raise SystemExit(f"dataset artifacts not found under {dataset_dir}")
 
-    config = load_config()
+    config = load_config(env=args.profile)
     device = config.resolve_device()
     vlm_client = Qwen25VLClient(source=args.vlm, dtype=config.dtype)
 
