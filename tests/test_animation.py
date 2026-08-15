@@ -74,6 +74,7 @@ PANEL_BBOX = BBoxPx(x0=0, y0=0, x1=PAGE_SHAPE[1], y1=PAGE_SHAPE[0])
         (TransformKind.SHEAR, Vector2(x=0.0, y=1.0)),
         (TransformKind.MESH_WARP, None),
         (TransformKind.OPACITY, None),
+        (TransformKind.RADIAL_EXPAND, None),
     ],
 )
 def test_generate_transformed_layer_is_deterministic(kind, direction):
@@ -280,6 +281,203 @@ def test_mesh_warp_default_direction_ties_toward_vertical_for_a_square_mask():
     assert warped_bbox.x0 == orig_bbox.x0
     assert warped_bbox.x1 == orig_bbox.x1
     assert warped_bbox.y1 != orig_bbox.y1
+
+
+# --- Phase 16: RADIAL_EXPAND -- the drawn-effect motion model ------------------------------
+#
+# Real, locally-proven gap (this phase's cheap validation, no GPU needed): every effect label
+# the VLM produces (`rain`, `green_fluid`, `speed_lines`, `impact_effect`, `energy_effect`,
+# `smoke`) fell through `_MOTION_HEURISTICS` to the SAME rigid `_DEFAULT_MOTION` -- a uniform
+# translate with amplitude 0.02 -- i.e. exactly the "simple geometric displacement" the phase
+# brief's goal 2 rejects, applied to drawn effects whose natural motion is radial (impact,
+# energy, glow), flow (smoke, water), or directional (rain, speed lines). RADIAL_EXPAND is the
+# new motion model for the radial class: a spatially-varying pulse about the object's own
+# center where the center stays fixed and the rim breathes outward/inward.
+
+
+def _radial_mask(x0: int, y0: int, x1: int, y1: int) -> tuple[np.ndarray, np.ndarray]:
+    """A simple filled-rectangle effect "burst" mask/object (used for geometry assertions --
+    real bursts are radial lines; a filled box still exercises the same displacement math and
+    is deterministic to assert on)."""
+    h, w = PAGE_SHAPE
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    image[y0:y1, x0:x1] = (120, 60, 200)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    return image, mask
+
+
+def test_radial_expand_center_stays_fixed_rim_moves():
+    """The defining property: at peak positive value, the mask's center region is unchanged
+    while the rim extends outward -- spatially-varying motion, NOT a uniform scale (a uniform
+    scale would move the whole footprint by one factor)."""
+    image, mask = _radial_mask(15, 15, 45, 45)  # 30x30 burst centered at (30, 30)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND,
+        direction=None,
+        amplitude=0.3,
+        phase=0.25,  # sin(2*pi*0.25) = 1.0 -> peak positive displacement (expand)
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    # Rim moved outward on all four sides...
+    assert warped_bbox.x0 < orig_bbox.x0
+    assert warped_bbox.x1 > orig_bbox.x1
+    assert warped_bbox.y0 < orig_bbox.y0
+    assert warped_bbox.y1 > orig_bbox.y1
+    # ...but the center stayed fixed (a ~5px radius around the pivot keeps the original pixels).
+    cx, cy = (orig_bbox.x0 + orig_bbox.x1) // 2, (orig_bbox.y0 + orig_bbox.y1) // 2
+    np.testing.assert_array_equal(
+        warped_mask[cy - 3 : cy + 4, cx - 3 : cx + 4], mask[cy - 3 : cy + 4, cx - 3 : cx + 4]
+    )
+
+
+def test_radial_expand_negative_value_contracts_inward():
+    """At peak negative value the same burst contracts: rim moves inward, center stays fixed.
+    Together with the positive case this confirms the pulse is symmetric about the pivot --
+    "breathes", not "drifts"."""
+    image, mask = _radial_mask(15, 15, 45, 45)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND,
+        direction=None,
+        amplitude=0.3,
+        phase=0.75,  # sin(2*pi*0.75) = -1.0 -> peak contraction
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    assert warped_bbox.x0 > orig_bbox.x0
+    assert warped_bbox.x1 < orig_bbox.x1
+    assert warped_bbox.y0 > orig_bbox.y0
+    assert warped_bbox.y1 < orig_bbox.y1
+
+
+def test_radial_expand_identity_at_value_zero():
+    """At rest (`value == 0`) the map is identity: layer and mask are byte-identical to the
+    input -- the loop returns exactly to its start state, structurally (same convention as the
+    other transform kinds' rest behavior)."""
+    image, mask = _radial_mask(15, 15, 45, 45)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND, direction=None, amplitude=0.3
+    )
+    layer, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    np.testing.assert_array_equal(layer, image)
+    np.testing.assert_array_equal(warped_mask, mask)
+
+
+def test_radial_expand_static_region_preserved_outside_mask():
+    """Compositing-safety contract (goal 4 / original-artwork preservation): pixels outside the
+    transformed mask's footprint are untouched, and compositing a fully-warped layer over a
+    fresh original leaves non-mask pixels bit-identical to the source."""
+    image, mask = _radial_mask(15, 15, 45, 45)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND,
+        direction=None,
+        amplitude=0.3,
+        phase=0.25,
+    )
+    warped_layer, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    from manga_animation.compositing import composite_frame
+
+    composited = composite_frame(image, warped_layer, warped_mask)
+    outside = warped_mask == 0
+    np.testing.assert_array_equal(composited[outside], image[outside])
+
+
+def test_radial_expand_seamless_loop_boundary():
+    """Frame 0 and the post-loop frame (t_frac = frame_count/frame_count == 1.0) are
+    identical: a `cycle` RADIAL_EXPAND with integer speed returns to rest, so the loop is
+    seamless by construction."""
+    image, mask = _radial_mask(15, 15, 45, 45)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND, direction=None, amplitude=0.3, speed=2.0
+    )
+    frame_count = 24
+    f0_layer, f0_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    f1_layer, f1_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE,
+        t_frac=frame_count / frame_count, loop_duration_s=4.0,
+    )
+    np.testing.assert_array_equal(f0_layer, f1_layer)
+    np.testing.assert_array_equal(f0_mask, f1_mask)
+
+
+def test_radial_expand_deterministic():
+    image, mask = _radial_mask(15, 15, 45, 45)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND, direction=None, amplitude=0.3, phase=0.31
+    )
+    a_layer, a_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.37, loop_duration_s=4.0
+    )
+    b_layer, b_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.37, loop_duration_s=4.0
+    )
+    np.testing.assert_array_equal(a_layer, b_layer)
+    np.testing.assert_array_equal(a_mask, b_mask)
+
+
+def test_radial_expand_offcenter_pivot_pulls_toward_panel_reference():
+    """A burst whose pivot is anchored to the PANEL (not its own bbox) still expands about
+    that external point, not about its own center -- the `pivot.reference` resolution used by
+    all pivot-aware kinds is honored (the phase-16 heuristic itself uses object_bbox center,
+    but the transform must not hardcode that)."""
+    image, mask = _radial_mask(30, 20, 50, 40)  # small burst, center (40, 30)
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND,
+        direction=None,
+        amplitude=0.4,
+        phase=0.25,
+        pivot=PivotSpec(x=0.0, y=0.0, reference="panel"),  # panel top-left == page top-left here
+    )
+    _, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    orig_bbox = bbox_of_mask(mask)
+    warped_bbox = bbox_of_mask(warped_mask)
+    # Expansion about the top-left corner pushes the burst's content away from that corner:
+    # every edge moves further from (0,0) -- the left edge shifts right (x0 grows), the right
+    # edge shifts right (x1 grows), and the vertical edges shift down likewise.
+    assert warped_bbox.x0 > orig_bbox.x0
+    assert warped_bbox.x1 > orig_bbox.x1
+    assert warped_bbox.y0 > orig_bbox.y0
+    assert warped_bbox.y1 > orig_bbox.y1
+
+
+def test_radial_expand_single_pixel_mask_is_finite_and_does_not_crash():
+    """A degenerate sub-2px mask (single pixel) must not crash and must not produce NaN/Inf
+    in either layer or mask -- the radial unit-vector division is guarded, and the result is
+    a finite interpolated frame (a 1x1 footprint has r_max ~ 0.7px, below the INTER_LINEAR
+    kernel, so the pixel may smear; the invariant being tested is finiteness, not identity)."""
+    h, w = PAGE_SHAPE
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    image[30, 30] = (5, 5, 5)
+    mask[30, 30] = 255
+    motion = make_motion(
+        transform_kind=TransformKind.RADIAL_EXPAND,
+        direction=None,
+        amplitude=0.5,
+        phase=0.25,
+    )
+    layer, warped_mask = generate_transformed_layer(
+        image, mask, motion, PANEL_BBOX, PAGE_SHAPE, t_frac=0.0, loop_duration_s=4.0
+    )
+    assert np.isfinite(layer).all()
+    assert np.isfinite(warped_mask).all()
+    assert warped_mask.max() <= 255
+    assert warped_mask.min() >= 0
 
 
 # --- periodic trajectory / seamless loop --------------------------------------

@@ -89,6 +89,30 @@ _TRANSFORM_GEOMETRY_PROFILES: dict[TransformKind, TransformGeometryProfile] = {
     TransformKind.MESH_WARP: TransformGeometryProfile(
         max_area_fraction=0.35, min_edge_margin_fraction=0.02, max_aspect_ratio=None
     ),
+    # RADIAL_EXPAND is a spatially-varying radial pulse about the object's own center (the
+    # drawn-effect motion model: impact bursts, energy fields, glow). Its mechanism combines
+    # MESH_WARP's "local, continuous, anchored" risk profile (center stays fixed, rim moves
+    # most) with SCALE's "grows the footprint outward" behavior.
+    #
+    # Phase 16 evidence (scripts/run_phase16_effect_mask_diagnostic.py, real 2xT4 worker):
+    # a drawn effect's bbox is a POOR proxy for its moved-pixel footprint -- real
+    # speed_lines/impact_burst grounding boxes up to 98% of their panel produced sparse masks
+    # covering only 6-17% of it (density 0.28-0.50), because a burst is radiating lines, not a
+    # filled region. The 35% bbox-area bound therefore fail-closed every real effect tried
+    # this phase even though animating its sparse mask would move almost nothing. The area
+    # bound is relaxed to 60% so legitimately large bursts can proceed, and the actual
+    # animation-safety decision is deferred to the POST-segmentation mask check
+    # (`segmentation/segment.py::_validate_mask_density`, which measures the real mask's
+    # density -- a dense "select everything" mask still fails there). The edge-margin
+    # requirement is dropped to 0 for the same reason: an effect covering most of its panel
+    # legitimately has a bbox touching the panel edges, but its sparse mask sits at the
+    # center and its rim barely reaches those edges when pulsing (the real fleet
+    # impact_burst's bbox reached 98% of the panel while its mask covered only 32%, density
+    # 0.32). No aspect-ratio check: a legitimately elongated radiating burst (a wide
+    # speed-line fan, a tall energy plume) is a real RADIAL_EXPAND target.
+    TransformKind.RADIAL_EXPAND: TransformGeometryProfile(
+        max_area_fraction=0.60, min_edge_margin_fraction=0.0, max_aspect_ratio=None
+    ),
     # TRANSLATE moves the bbox's content rigidly, but only by a small amplitude in this
     # codebase's real usage (amplitude = fraction of the panel diagonal; e.g. the hair
     # heuristic's amplitude=0.03, see _MOTION_HEURISTICS). No edge-margin requirement:

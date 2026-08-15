@@ -328,6 +328,179 @@ def test_analysis_prompt_broadens_evidence_beyond_deformation_on_the_object_itse
     assert "pose" in lowered
 
 
+def test_drawn_effects_get_effect_specific_motion_specs():
+    """Phase 16 Drawn Effect Track: effect labels (`impact_burst`, `energy_field`, `smoke`,
+    `rain`, `speed_lines`) must each get a natural effect-specific MotionSpec -- NOT the
+    generic rigid translate that every effect received before this phase (the locally-proven
+    gap: `rain`/`green_fluid`/`speed_lines`/`impact_effect` all collapsed to
+    `_DEFAULT_MOTION` = TRANSLATE amplitude 0.02)."""
+    from manga_animation.analysis.plan_builder import _motion_spec_for, _RawObjectDecision
+    from manga_animation.schemas.animation_plan import MotionType
+
+    cases = {
+        # label, motion_description -> expected transform_kind
+        "impact_burst": ("impact burst radiates outward from the hit point", "radial_expand"),
+        "energy_field": ("the energy field pulses and glows", "radial_expand"),
+        "glow_effect": ("the glow expands in a ring", "radial_expand"),
+        "smoke_cloud": ("smoke drifts upward", "mesh_warp"),
+        "water_splash": ("water splashes outward", "mesh_warp"),
+        "green_fluid": ("fluid flows and ripples", "mesh_warp"),
+        "rain": ("rain falls downward", "translate"),
+        "speed_lines": ("speed lines streak along the motion direction", "mesh_warp"),
+        "spark_shower": ("sparks flicker", "opacity"),
+    }
+    for label, (desc, expected_kind) in cases.items():
+        decision = _RawObjectDecision(
+            semantic_label=label,
+            motion_type=MotionType.SECONDARY,
+            confidence=0.7,
+            reason="a drawn effect present in the panel",
+            motion_description=desc,
+        )
+        spec = _motion_spec_for(decision)
+        assert spec.transform_kind.value == expected_kind, (
+            f"{label} should map to {expected_kind}, got {spec.transform_kind.value}"
+        )
+    # The radial class anchors at the object's own center -- the natural burst origin.
+    decision = _RawObjectDecision(
+        semantic_label="impact_burst",
+        motion_type=MotionType.SECONDARY,
+        confidence=0.7,
+        reason="x",
+        motion_description="impact burst radiates outward",
+    )
+    spec = _motion_spec_for(decision)
+    assert spec.pivot.reference == "object_bbox"
+    assert spec.pivot.x == pytest.approx(0.5)
+    assert spec.pivot.y == pytest.approx(0.5)
+
+
+def test_effect_label_dominates_object_words_in_its_description():
+    """Phase 16 regression (real GPU finding on `villainess_ending_scuffle`): an effect's
+    motion_description routinely names the object it is attached to ("bursts outward from
+    the weapon clash"), and matching on label+description let the earlier object heuristics
+    (`sword/blade/weapon` -> ROTATE) steal the effect and give it a rigid rotation instead
+    of its natural pulse. The effect's own label must decide the effect class; object words
+    inside its description must not override it."""
+    from manga_animation.analysis.plan_builder import _motion_spec_for, _RawObjectDecision
+    from manga_animation.schemas.animation_plan import MotionType
+
+    cases = [
+        ("impact_burst", "impact burst radiates around the sword swing", "radial_expand"),
+        ("impact_burst", "bursts outward from the weapon clash", "radial_expand"),
+        ("speed_lines", "speed lines streak behind the character's hand", "mesh_warp"),
+        ("smoke_cloud", "smoke drifts from the burning cloth", "mesh_warp"),
+        ("energy_field", "energy pulses around the character's arm", "radial_expand"),
+    ]
+    for label, desc, expected_kind in cases:
+        decision = _RawObjectDecision(
+            semantic_label=label,
+            motion_type=MotionType.SECONDARY,
+            confidence=0.7,
+            reason="x",
+            motion_description=desc,
+        )
+        spec = _motion_spec_for(decision)
+        assert spec.transform_kind.value == expected_kind, (
+            f"{label!r} with description {desc!r} should map to {expected_kind}, "
+            f"got {spec.transform_kind.value}"
+        )
+
+
+def test_analysis_prompt_explicitly_asks_for_drawn_effects_as_animation_targets():
+    """Phase 16: the analysis prompt must instruct the VLM to list ALREADY-DRAWN effects
+    (speed lines, impact bursts, energy fields, smoke, water, glow) as first-class animation
+    candidates, not just objects -- while keeping speech bubbles/text/panel borders static."""
+    from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT
+
+    lowered = ANALYSIS_PROMPT.lower()
+    assert "speed lines" in lowered or "speed_lines" in lowered
+    assert "impact" in lowered
+    assert "energy" in lowered
+    assert "smoke" in lowered
+    # Artwork preservation is explicit: text/bubbles/borders must stay static.
+    assert "speech bubbles" in lowered
+    assert "panel borders" in lowered
+    assert "must stay static" in lowered
+
+
+def test_analysis_prompt_forbids_animating_text_like_elements():
+    """Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled free-standing
+    dedication text as a SECONDARY object and the pipeline animated it with a rotate -- a
+    direct violation of goal 4 (never animate text). The prompt must forbid text-like
+    elements (speech bubbles, dialogue, sound-effect lettering, captions, dedication/pledge
+    text, logos) from being animated, and must not let text be relabeled as an object."""
+    from manga_animation.analysis.plan_builder import ANALYSIS_PROMPT
+
+    lowered = ANALYSIS_PROMPT.lower()
+    assert "must never be animated" in lowered
+    for phrase in ["speech bubbles", "sound-effect lettering", "captions", "dedication",
+                   "pledge", "logos", "narration"]:
+        assert phrase in lowered, phrase
+    # Text may be listed as static (recorded as a known non-target) but never animated.
+    assert "motion_type \"static\"" in lowered or "static" in lowered
+    assert "never" in lowered and "animated" in lowered
+
+
+def test_text_like_labels_are_never_animated_despite_vlm_motion():
+    """Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled dedication text
+    SECONDARY and the pipeline animated it with a rotate. Even if a VLM mislabels text with a
+    non-STATIC motion_type, the plan must never animate it -- a deterministic label-keyed
+    backstop forces text-like semantic_labels to STATIC and excludes them from PRIMARY
+    candidacy."""
+    from manga_animation.analysis.plan_builder import (
+        _is_text_label,
+        _RawObjectDecision,
+    )
+    from manga_animation.schemas.animation_plan import MotionType
+
+    text_labels = [
+        "dedication", "pledge", "caption", "speech_bubble", "dialogue_text",
+        "sound_effect_lettering", "narration_box", "logo_text", "text",
+    ]
+    for label in text_labels:
+        assert _is_text_label(label), label
+    non_text = ["character_hair", "cloth", "bicycle", "texture_pattern", "flag", "textbook"]
+    for label in non_text:
+        assert not _is_text_label(label), label
+
+    # A text label with a VLM-given motion description still yields a valid decision for
+    # listing purposes, but the ranking layer excludes it from animated candidacy.
+    decision = _RawObjectDecision(
+        semantic_label="dedication",
+        motion_type=MotionType.SECONDARY,
+        confidence=0.9,
+        reason="x",
+        motion_description="the dedication text swings with the sword",
+    )
+    assert _is_text_label(decision.semantic_label) is True
+
+
+def test_rank_candidates_excludes_text_labels():
+    """Phase 16: `_rank_candidates` must not rank a text label as an animated candidate even
+    when the VLM marked it SECONDARY -- otherwise a text-only page would silently animate
+    its lettering instead of failing closed."""
+    import pytest
+
+    from manga_animation.analysis.plan_builder import _rank_candidates, _RawObjectDecision
+    from manga_animation.pipeline.types import PipelineStageError
+    from manga_animation.schemas.animation_plan import MotionType
+
+    decisions = [
+        _RawObjectDecision(
+            semantic_label="dedication",
+            motion_type=MotionType.SECONDARY,
+            confidence=0.9,
+            reason="x",
+            motion_description="the text is prominent",
+        )
+    ]
+    with pytest.raises(PipelineStageError) as exc_info:
+        _rank_candidates(decisions, "ref")
+    assert exc_info.value.stage == "analysis"
+    assert "STATIC" in exc_info.value.detail
+
+
 # --- Phase 3.3: panel-aware analysis --------------------------------------------------------
 
 

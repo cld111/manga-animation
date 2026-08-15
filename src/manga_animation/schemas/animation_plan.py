@@ -42,7 +42,13 @@ class MotionType(StrEnum):
 
 
 class TransformKind(StrEnum):
-    """The mechanical transform a downstream CV stage should apply."""
+    """The mechanical transform a downstream CV stage should apply.
+
+    `RADIAL_EXPAND` is the drawn-effect motion model: a spatially-varying radial pulse
+    about the object's own center (impact bursts, energy fields, glow) — the center stays
+    fixed while the rim breathes outward/inward, unlike uniform `SCALE`. `amplitude`
+    means the peak rim displacement as a fraction of the object bbox's longest side.
+    """
 
     TRANSLATE = "translate"
     ROTATE = "rotate"
@@ -50,6 +56,7 @@ class TransformKind(StrEnum):
     SHEAR = "shear"
     MESH_WARP = "mesh_warp"
     OPACITY = "opacity"
+    RADIAL_EXPAND = "radial_expand"
 
 
 class Easing(StrEnum):

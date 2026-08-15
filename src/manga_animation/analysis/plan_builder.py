@@ -69,6 +69,28 @@ sway)
 - "motion_description": (only if motion_type is not "static") one short sentence describing \
 the physical motion in plain terms, e.g. "banner sways left and right in the wind"
 
+ALSO, and this is important: treat ALREADY-DRAWN visual effects as first-class animation \
+targets, exactly like objects. Speed lines, motion strokes, impact bursts, radiating focus \
+lines, energy fields, glow, sparks, smoke, water splashes, and similar drawn effect artwork \
+are legitimate candidates: list each one as its own JSON entry with a descriptive \
+semantic_label like "speed_lines", "impact_burst", "energy_field", "smoke_cloud", \
+"water_splash", "spark_shower", "glow_effect". For an effect, "motion_type" describes how \
+it should move: "primary" only if the effect itself is the page's main action; otherwise \
+"secondary"/"micro" (e.g. rain is usually "micro"). Give its "motion_description" in \
+effect-specific terms that name the motion model, e.g. "speed lines streak outward from the \
+impact point", "the energy field pulses and radiates", "smoke drifts upward", "water \
+splashes and flows". Do NOT invent an effect that is not actually drawn, and do NOT list \
+speech bubbles, dialogue text, or panel borders as effects -- those must stay static.
+
+CRITICAL: text-like elements must NEVER be animated. This includes speech bubbles, dialogue \
+text, sound-effect lettering (e.g. "BOOM", "척"), captions, narration boxes, page/logos \
+text, dedication/pledge text, and any other written lettering, whether inside a bubble or \
+free-standing on the page. A text element may still be listed as an entry with \
+motion_type "static" (so it is recorded as a known non-target), but it must NEVER be given \
+"primary"/"secondary"/"micro". Do not rename text to something that sounds like an object \
+(e.g. do not label dialogue as "dedication" and animate it) -- if the region is lettering, \
+it is text, it is static.
+
 A visually justified reason for motion can come from ANY of these, not only deformation \
 drawn on the object itself:
 1. Deformation/distortion drawn directly on the object (wavy linework, a bent/curved shape).
@@ -262,9 +284,91 @@ _DEFAULT_MOTION = MotionSpec(
     pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
 )
 
+# Phase 16: effect-class motion entries, keyed by SEMANTIC LABEL only (never the free-text
+# motion_description). Rationale (real Phase 16 GPU finding on `villainess_ending_scuffle`):
+# `_MOTION_HEURISTICS` matches on `semantic_label + motion_description`, and a VLM's
+# effect description routinely names the object it is attached to -- e.g. `impact_burst`
+# with "bursts outward from the weapon clash" matched the earlier `sword/blade/weapon`
+# entry and got a rigid ROTATE instead of the effect's natural RADIAL_EXPAND pulse. An
+# effect's own label ("impact_burst", "speed_lines", "smoke_cloud") is the trustworthy
+# signal; words inside its description must not override that. Evaluated BEFORE
+# `_MOTION_HEURISTICS` (so effect labels dominate object words in their own descriptions),
+# but only for the label itself.
+_EFFECT_LABEL_KEYWORDS: tuple[tuple[tuple[str, ...], MotionSpec], ...] = (
+    (
+        ("impact", "burst", "explosion", "shockwave", "energy", "glow", "pulse", "aura",
+         "radiat", "flash"),
+        MotionSpec(
+            transform_kind=TransformKind.RADIAL_EXPAND,
+            amplitude=0.08,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("smoke", "steam"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.1,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("water", "splash", "fluid", "liquid", "wave", "spray"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.1,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("rain",),
+        MotionSpec(
+            transform_kind=TransformKind.TRANSLATE,
+            direction=Vector2(x=0.0, y=1.0),
+            amplitude=0.03,
+            speed=2.0,
+            easing=Easing.EASE_IN_OUT,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("spark", "spark_shower", "debris", "particle", "shard"),
+        MotionSpec(
+            transform_kind=TransformKind.OPACITY,
+            amplitude=0.35,
+            speed=2.0,
+            easing=Easing.EASE_IN_OUT,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+    (
+        ("speed_line", "speed line", "motion_line", "motion line", "streak", "slash",
+         "flow line"),
+        MotionSpec(
+            transform_kind=TransformKind.MESH_WARP,
+            amplitude=0.12,
+            speed=1.0,
+            easing=Easing.SINE,
+            pivot=PivotSpec(x=0.5, y=0.5, reference="object_bbox"),
+        ),
+    ),
+)
+
 
 def _motion_spec_for(decision: _RawObjectDecision) -> MotionSpec:
-    haystack = f"{decision.semantic_label} {decision.motion_description or ''}".lower()
+    label = decision.semantic_label.lower()
+    # Effect labels dominate object words in their own description (see
+    # `_EFFECT_LABEL_KEYWORDS`'s rationale) -- but only the label decides effect class.
+    for keywords, template in _EFFECT_LABEL_KEYWORDS:
+        if any(kw in label for kw in keywords):
+            return template.model_copy(deep=True)
+    haystack = f"{label} {decision.motion_description or ''}".lower()
     for keywords, template in _MOTION_HEURISTICS:
         if any(kw in haystack for kw in keywords):
             return template.model_copy(deep=True)
@@ -307,7 +411,11 @@ def _rank_candidates(
     Is a Valid Result" in docs/architecture.md; this ranking does not loosen that case, only
     the case where non-STATIC signal existed but wasn't labeled "primary".
     """
-    candidates = [d for d in decisions if d.motion_type != MotionType.STATIC]
+    candidates = [
+        d
+        for d in decisions
+        if d.motion_type != MotionType.STATIC and not _is_text_label(d.semantic_label)
+    ]
     if not candidates and allow_all_static:
         return []
     if not candidates:
@@ -357,6 +465,43 @@ def _checksum(image_path: Path) -> str:
     return "sha256:" + hashlib.sha256(image_path.read_bytes()).hexdigest()
 
 
+# Phase 16 (real GPU finding on `sss_hunter_gladiator`): the VLM labeled free-standing
+# dedication text as a SECONDARY object and the pipeline animated it (rotate) -- a direct
+# goal-4 violation (never animate text). The analysis prompt forbids animating text, but a
+# VLM can still label text with a non-STATIC motion_type; this label-keyed guard forces any
+# text-like semantic_label to STATIC no matter what the VLM said, as a deterministic
+# backstop. It matches the LABEL only (not the free-text motion_description), mirroring the
+# effect-classification design. "texture" is deliberately NOT matched (a legitimately
+# animatable cloth-texture pattern is not lettering).
+_TEXT_LABEL_KEYWORDS: tuple[str, ...] = (
+    "dedication",
+    "pledge",
+    "caption",
+    "lettering",
+    "dialogue",
+    "speech",
+    "narration",
+    "sfx",
+    "sound_effect",
+    "sound_effect_text",
+    "logo",
+    "text_",
+    "_text",
+    "textblock",
+    "title",
+)
+
+
+def _is_text_label(semantic_label: str) -> bool:
+    label = semantic_label.lower()
+    if any(kw in label for kw in _TEXT_LABEL_KEYWORDS):
+        return True
+    # The bare label "text" (a real VLM label, e.g. marika) is lettering -- match it as a
+    # whole token only, never as a substring ("texture", "textbook", "context" must not be
+    # caught).
+    return label == "text" or label.endswith("_text") or label.startswith("text_")
+
+
 def _non_primary_object_plan(
     decision: _RawObjectDecision, index: int, panel_id: str, image_path: Path
 ) -> ObjectPlan:
@@ -377,7 +522,9 @@ def _non_primary_object_plan(
     invent a new policy for demoting an unchosen PRIMARY to SECONDARY; it only stops
     overriding an already-real SECONDARY/MICRO read.
     """
-    if decision.motion_type in (MotionType.SECONDARY, MotionType.MICRO):
+    if decision.motion_type in (MotionType.SECONDARY, MotionType.MICRO) and not _is_text_label(
+        decision.semantic_label
+    ):
         try:
             return ObjectPlan(
                 object_id=_slugify(decision.semantic_label, index),
@@ -555,7 +702,11 @@ def _rank_panel_candidates(
     `analyze_page_panels` deliberately does NOT retry at the page level (see its docstring):
     that would let VLM nondeterminism silently overrule a real panel-level finding.
     """
-    candidates = [(pid, d) for pid, d in decisions if d.motion_type != MotionType.STATIC]
+    candidates = [
+        (pid, d)
+        for pid, d in decisions
+        if d.motion_type != MotionType.STATIC and not _is_text_label(d.semantic_label)
+    ]
     if not candidates and allow_all_static:
         return []
     if not candidates:

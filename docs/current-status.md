@@ -130,9 +130,18 @@ conclusion. Candidates without implemented adapters remain research entries.
   grounding `RuntimeError` isolated to its panel (ERROR) while later panels still processed and
   all models were released; a 1xT4 smoke run (CUDA_VISIBLE_DEVICES=0) completed with Qwen
   fitting on a single T4 (~12.1 GiB, CPU-offloaded) and the same stage lifecycle. Phase 15 also
-  found and fixed two lifecycle teardown defects: a raising `client.unload()` could mask a
-  stage exception and skip the deterministic release, and a failed `client.load()` in
-  `__enter__` left the stage object permanently poisoned.
+   found and fixed two lifecycle teardown defects: a raising `client.unload()` could mask a
+   stage exception and skip the deterministic release, and a failed `client.load()` in
+   `__enter__` left the stage object permanently poisoned.
+- Phase 16 added the drawn-effect animation track (`RADIAL_EXPAND` motion model plus
+  effect-aware `_MOTION_HEURISTICS` entries and an analysis prompt that asks the VLM to list
+  already-drawn effects as animation targets). A short real-GPU run on `wind_breaker_sprint`
+  produced the first end-to-end drawn-effect render: a `speed_lines` PRIMARY (mesh_warp)
+  passed grounding, geometric and semantic target validation, and mask-semantics, and
+  rendered a PASS panel video with the seamless loop verified on the source frames; the
+  page's `impact_burst` SECONDARY was correctly fail-closed by geometric validation instead
+  of rendered. See `Known Limitations`/`Immediate Priorities` for what Phase 16 did and did
+  not yet exercise.
 
 ## Known Limitations and Technical Debt
 
@@ -141,10 +150,22 @@ conclusion. Candidates without implemented adapters remain research entries.
 - `marika_love_meter` remains `UNKNOWN`; panel mode safely rejects its independent candidate,
   but this is mitigation, not root-cause repair.
 - SAM 2.1 can produce semantically over-inclusive masks that pass all geometric checks. The
-  semantic gate has a known real false negative (`cloth_5`, visibly including a speech bubble
-  and hand), and its 13-sample development result is provisional: precision 0.75, recall 0.60,
-  FPR 0.12, FNR 0.40. The VLM confidence values clustered at round numbers, and ABSTAIN was
-  never observed in real calls, so its confidence band is not a calibrated safety valve.
+  semantic gate's 13-sample development result is provisional and has evolved: Phase 12's
+  original prompt measured precision 0.75, recall 0.60, FPR 0.12, FNR 0.40, with a known
+  real false negative (`cloth_5`, visibly including a speech bubble and hand). Phase 16
+  strengthened the prompt to direct the VLM at absorbed adjacent content (text/bubbles/
+  hands/faces); a real-VLM re-run measured precision 0.67, recall 0.80, FPR 0.25, FNR 0.20 --
+  `cloth_5` is now caught. The two new "false rejects" (raised_sword_12, character_eyes_2,
+  each flagged "includes a speech bubble with text") were forensically investigated with a
+  neutral VLM probe: the VLM consistently reads multi-object scenes in both (raised_sword_12:
+  "sword with a speech bubble '으악' and another character"; character_eyes_2: "a character
+  holding a glowing orb, wearing armor, speaking"), while correctly reading the cloth_5
+  control -- and raised_sword_12's tight bbox is 271x386 (aspect 0.7, 50% dark), not a thin
+  sword. The provisional conclusion is that those two GOOD labels are more likely wrong than
+  the prompt over-rejected (FPR 0.25 partly an artifact of stale labels); final adjudication
+  still requires human visual inspection of `outputs/debug/phase16_forensics/*_vlm_crop.png`.
+  The VLM confidence values clustered at round numbers, and ABSTAIN was never observed in
+  real calls, so its confidence band is not a calibrated safety valve.
 - Same-category instance identity is unresolved: the gate can accept the correct category on
   the wrong physical instance. No real defect of this exact type has yet been observed.
 - `MESH_WARP` has no calibrated upper bound relative to panel/page geometry.
@@ -169,6 +190,54 @@ conclusion. Candidates without implemented adapters remain research entries.
   peak 8.7 GiB on one T4) and manifest-based resumability reusing completed panels on a second
   invocation. See docs/phase14-results.md.
 
+- `RADIAL_EXPAND` (Phase 16) is the drawn-effect motion model for the radial class of manga
+  effects (impact bursts, energy fields, radiating focus lines, glow): a spatially-varying
+  radial pulse about the object's own center where the center stays effectively fixed while
+  the rim breathes outward/inward -- unlike uniform `SCALE`, which moves the whole footprint
+  as one rigid block. The analysis prompt now asks the VLM to list ALREADY-DRAWN effects
+  (speed lines, impact bursts, energy fields, smoke, water, glow, sparks) as first-class
+  animation targets, and `_MOTION_HEURISTICS` maps effect labels to effect-specific motion:
+  impact/burst/energy/glow -> `radial_expand`, smoke/steam/water/fluid -> `mesh_warp`, rain
+  -> translate-down, sparks/particles -> opacity flicker, speed lines -> `mesh_warp`. Before
+  Phase 16 every effect label (`rain`, `green_fluid`, `speed_lines`, `impact_effect`,
+  `energy_effect`, `smoke`) collapsed to the SAME rigid `_DEFAULT_MOTION` (uniform translate,
+  amplitude 0.02) -- exactly the "simple geometric displacement" the phase brief rejects.
+- Phase 16 GPU evidence (real worker, 2xT4): on `wind_breaker_sprint` the analysis stage
+  labeled `speed_lines` PRIMARY with `mesh_warp` (confidence 1.0) and `impact_burst`
+  SECONDARY with `radial_expand`; the speed-lines PRIMARY passed grounding, geometric
+  validation, semantic target validation, and mask-semantics (VLM confirmed "only speed
+  lines"), and rendered a real PASS panel video with the seamless loop verified on the
+  source frame sequence (wrap step <= 2x ordinary step) and 93.8% of pixels static across
+  sampled frames -- the first end-to-end drawn-effect animation through the production
+  pipeline. Ordinary objects (hair, cloth, bicycle) still map to their pre-Phase-16
+  transform kinds; effect heuristics are ordered after the object heuristics and do not
+  shadow them. The `impact_burst` SECONDARY on the same page was correctly fail-closed by
+  geometric validation (bbox 86.7% of its reference region, and edge-touching) rather than
+  rendered. On `eval_weapon_effects` the PRIMARY remained `weapon` (rotate) and was
+  REJECTED by the known oversized-rotate-bbox geometric failure (the Phase 3.3 defect class,
+  still correctly fail-closed), so that page did not exercise the effect track.
+- Phase 16 extended evidence: after an effect-mask-density diagnostic showed real effect
+  masks are sparse (6-17% of panel at density 0.28-0.50 while their grounding boxes reached
+  98%), `radial_expand`'s pre-segmentation profile was relaxed to 60% area / 0 edge margin
+  and a post-segmentation `max_mask_density` gate (0.70) was added. On `angels_of_war_fleet`
+  the `space_ship_impact_burst` then passed grounding, geometry, semantic and mask-semantics
+  ("only the space ship impact burst", confidence 1.0) and rendered -- the first end-to-end
+  RADIAL_EXPAND impact-burst render (loop verified: wrap 2.13 <= 2x ordinary, 78.9% pixels
+  static). A repeated sprint run and a `space_monster_creature` run ([PASS, PASS]) confirmed
+  no regression to ordinary objects or to the already-working speed-lines path. A
+  `wind_breaker_finish` run had one panel CUDA-OOM on the shared T4 (isolated as ERROR,
+  remaining panels processed, all six model stages released) -- a documented resource-pressure
+  class, not a lifecycle regression. The `impact_burst` -> `radial_expand` mapping was also
+  confirmed on a real VLM after the label-keyed effect-classification fix (was `rotate` when
+  the description mentioned a weapon).
+- Phase 16 text-animation guard (goal 4, real finding on `sss_hunter_gladiator`): the VLM
+  once labeled free-standing dedication text SECONDARY and the pipeline animated it (rotate)
+  -- both the semantic target check and mask-semantics ACCEPTed it because text was the
+  mask's only content. Fixed deterministically: `ANALYSIS_PROMPT` now forbids animating
+  text-like elements, `_is_text_label` forces text-like semantic_labels to STATIC, and
+  `_rank_candidates` excludes them from animated candidacy. Verified on a re-run: dedication
+  text no longer animated, motion confined to the drawn speed-lines/objects.
+
 ## Immediate Priorities
 
 These are future work, not implemented capabilities:
@@ -183,6 +252,21 @@ These are future work, not implemented capabilities:
    speculative geometry thresholds from one instance.
 5. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
+6. Visually review the Phase 16 RADIAL_EXPAND render (angels_of_war_fleet impact burst) and
+   the speed-lines render (wind_breaker_sprint) -- they passed numeric loop/static checks but
+   have not had human visual QA.
+7. Add more effect-heavy pages to the real evaluation set: smoke/water/sparks/glow render
+   paths remain unexercised end-to-end (only speed lines and impact burst confirmed).
+8. Confirm the relaxed RADIAL_EXPAND bounds on real renders: Phase 16 evidence showed drawn
+   effect masks are sparse (real speed_lines/impact_burst masks covered 6-17% of their panel
+   at density 0.28-0.50 while their grounding boxes reached 98%), so `transform_geometry.py`
+   now allows a 60% bbox area and a 0 edge margin for radial_expand and
+   `segmentation/segment.py` rejects dense masks (density > 0.70, the confirmed "select
+   everything" signature) post-segmentation. Neither threshold is statistically calibrated.
+9. Investigate the wind_breaker_finish panel-1 CUDA OOM on a shared T4 (578 MiB request with
+   406 MiB free while the sharded Qwen held 13.4 GiB): the panel is correctly isolated and
+   all models release, but a worker-level retry/fallback for OOM on large panels would make
+   dense pages more robust (same class as Phase 11's documented LaMa OOMs).
 
 ## Verification and Workflow
 

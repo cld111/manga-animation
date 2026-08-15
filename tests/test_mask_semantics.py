@@ -291,3 +291,27 @@ def test_geometric_signals_do_not_change_the_verdict():
     result = verify_mask_semantics(make_image(), make_object_plan(), mask, bbox, client)
 
     assert result.verdict == "reject"  # geometry looked fine; the VLM read is what mattered
+
+
+def test_mask_verification_prompt_directs_vlm_at_absorbed_extra_content():
+    """Phase 16 (real Phase 12 false negative `cloth_5`): the VLM prompt must explicitly
+    direct the model at the failure mode manga masks actually have -- silently absorbing
+    adjacent text/bubbles/hands/faces/background into the same bright region -- and must
+    state that "mostly the target with some extra stuff" is still a bad mask. Guards the
+    strengthened prompt against regression to the old permissive wording."""
+    from manga_animation.validation.mask_semantics import _VERIFICATION_PROMPT_TEMPLATE
+
+    prompt = _VERIFICATION_PROMPT_TEMPLATE
+    lowered = prompt.lower()
+    for phrase in [
+        "nothing else of note",
+        "absorbing adjacent",
+        "speech bubble",
+        "a hand or arm",
+        "a face or eyes",
+        "mostly the target",
+        "inner contrasting patch",
+    ]:
+        assert phrase in lowered, f"prompt missing '{phrase}'"
+    assert "mask must be limited to the target alone" in lowered
+    assert "answer false" in lowered

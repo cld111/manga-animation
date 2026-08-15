@@ -57,9 +57,26 @@ _MAX_COVERAGE_FRACTION = MAX_OBJECT_COVERAGE_FRACTION
 # or both top+bottom) is not flagged; the real, evidenced over-segmentation defect still is.
 _MAX_BBOX_EDGE_TOUCH_FRACTION = 0.3
 
+# Phase 16 (drawn-effect track): the maximum bbox density (mask area / tight-bbox area) a
+# RADIAL_EXPAND effect mask may have. A drawn effect's mask is SPARSE by nature -- radiating
+# lines, a burst, an energy field -- so animating it moves only those lines; the panel
+# background inside the bbox but outside the mask is untouched by the transform and by
+# compositing. Real evidence (scripts/run_phase16_effect_mask_diagnostic.py, real 2xT4
+# worker): proper effect masks measured density 0.28-0.50, while "select everything"
+# over-inclusive masks (the confirmed-defective wind_breaker_finish cloth_5 at 0.902 and
+# character_hair_7 at 0.843, from docs/phase11-results.md) sit at 0.84-0.90. 0.70 sits with
+# real margin inside that gap. This is the post-segmentation half of the radial_expand
+# safety pair -- the pre-segmentation half (transform_geometry.py) deliberately uses a
+# looser bbox-area bound because the bbox is a poor proxy for an effect's sparse mask.
+_MAX_EFFECT_MASK_DENSITY = 0.70
+
 
 def segment_object(
-    image: ImageArray, grounding: GroundingResult, client: SegmentationClient
+    image: ImageArray,
+    grounding: GroundingResult,
+    client: SegmentationClient,
+    *,
+    max_mask_density: float | None = None,
 ) -> SegmentationResult:
     candidates = client.segment(image, grounding.bbox)
     if not candidates:
@@ -81,6 +98,10 @@ def segment_object(
     _validate_mask(mask, expected_shape=image.shape[:2], object_id=grounding.object_id)
     bbox = _tight_bbox(mask)
     _validate_mask_shape(mask, bbox, object_id=grounding.object_id)
+    if max_mask_density is not None:
+        _validate_mask_density(
+            mask, bbox, max_density=max_mask_density, object_id=grounding.object_id
+        )
 
     return SegmentationResult(
         object_id=grounding.object_id,
@@ -88,6 +109,42 @@ def segment_object(
         bbox=bbox,
         model_id=client.model_id,
         iou_score=best.iou_score,
+    )
+
+
+def _validate_mask_density(
+    mask: ImageArray, bbox: BBoxPx, *, max_density: float, object_id: str
+) -> None:
+    """Reject an effect mask that is NOT sparse -- a dense "select everything" mask that would
+    move a large filled region (including panel background) when RADIAL_EXPAND's rim breathes,
+    instead of only the drawn effect's lines. See `_MAX_EFFECT_MASK_DENSITY` for the evidence
+    behind the bound.
+    """
+    area = float(np.count_nonzero(mask))
+    bbox_area = float(bbox.width * bbox.height)
+    density = area / bbox_area if bbox_area > 0 else 1.0
+    if density <= max_density:
+        return
+    raise PipelineStageError(
+        stage="segmentation",
+        input_ref=object_id,
+        detail=(
+            f"effect mask fills {density:.1%} of its own tight bbox -- above the "
+            f"{max_density:.0%} bound for a drawn effect; a sparse radiating-line/energy "
+            "effect mask should fill a small fraction of its box, while this density is "
+            "consistent with a 'select everything' mask that would drag panel background "
+            "along when the effect pulses"
+        ),
+        root_cause=(
+            "the segmentation model produced a dense, filled mask for a drawn-effect target "
+            "whose real artwork is sparse lines/rays"
+        ),
+        architectural=False,
+        proposed_fix=(
+            "verify the grounding box is scoped to the effect (not the whole panel); a "
+            "denser mask means the box captured the object the effect is attached to, not "
+            "the effect itself"
+        ),
     )
 
 
