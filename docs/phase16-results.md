@@ -221,6 +221,16 @@ correctly on real defects, none rendering a wrong animation:
 - `impact_burst` and `eye` secondary/micro candidates failed grounding;
 - no effect label was mis-mapped to an object transform (the effect-dominance fix held).
 
+### Run 11: effect-dominance fix confirmed on real VLM (`villainess_ending_scuffle` analysis)
+
+`run_phase16_analysis_signal.py --pages examples/realworld/villainess_ending_scuffle.png`
+(re-run with the `_EFFECT_LABEL_KEYWORDS` fix active).
+
+Pre-fix signal (Run 1) had `impact_burst` -> `rotate` (its description mentioned a weapon,
+and the object heuristic won). Post-fix: `impact_burst` -> **`radial_expand`** and
+`speed_lines` -> `mesh_warp`; ordinary objects (`character_hair`, `speech_bubble`, `weapon`)
+unchanged. Confirms the label-keyed effect classification holds against a real VLM output.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
