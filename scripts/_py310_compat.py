@@ -19,7 +19,7 @@ if not hasattr(_datetime, "UTC"):
 
 if not hasattr(_enum, "StrEnum"):
 
-    class _StrEnum(str, _enum.Enum):
+    class _StrEnum(str, _enum.Enum):  # noqa: UP042 -- intentional py3.10 StrEnum stand-in
         """Minimal python-3.10 stand-in for `enum.StrEnum` (explicit-value members)."""
 
         def __str__(self) -> str:  # noqa: D105 -- mirrors StrEnum's value-as-str
