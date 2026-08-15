@@ -269,6 +269,16 @@ Fix (deterministic, three layers):
 
 Tests: prompt rule, label guard, ranking exclusion (618 local tests pass).
 
+### Run 14: text-animation fix verified on `sss_hunter_gladiator` re-run
+
+Re-run with the text-guard fix active: `[PASS, PASS, REJECTED, REJECTED, REJECTED]`. The
+`dedication`/`pledge` text objects are no longer animated at all (absent from validation
+and mask-semantics). PASS panel_001 verified numerically: seamless loop (wrap 1.63 <= 2x
+ordinary 1.58), 93.5% of pixels static, motion confined to 6.5% of the panel -- the drawn
+speed-lines/objects, not the lettering. (VLM nondeterminism meant this run proposed
+speed_lines/impact_burst/raised_sword rather than the previous run's dedication/drinking,
+but the fix's invariant -- text never becomes an animated object -- holds regardless.)
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
