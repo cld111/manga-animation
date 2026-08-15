@@ -83,7 +83,10 @@ def main() -> None:
     # A Debian system python3.10 venv can be created WITHOUT pip (no ensurepip). Bootstrap pip
     # explicitly if `python -m pip` is missing, so the torch install below can proceed.
     if "No module named pip" in _shell(f"{env_python} -m pip --version"):
-        _run([env_python, "-m", "ensurepip", "--upgrade", "--default-pip"])
+        try:
+            _run([env_python, "-m", "ensurepip", "--upgrade", "--default-pip"])
+        except subprocess.CalledProcessError:
+            pass  # ensurepip is unavailable on this python -- fall through to get-pip.py
         if "No module named pip" in _shell(f"{env_python} -m pip --version"):
             _run([
                 env_python, "-c",
