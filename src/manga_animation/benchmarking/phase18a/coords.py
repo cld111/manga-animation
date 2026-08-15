@@ -5,20 +5,24 @@ coordinate space the VLM returns a bbox, what normalization is used, how the bbo
 back to source-page pixels, and whether a resize/preprocessing mismatch can be ruled out* --
 with unit tests for the conversion, never a silent coordinate mismatch.
 
-Contract:
+Measured contract (established empirically on a real GPU smoke run, not assumed):
 
-- `prompt.py` asks Qwen2.5-VL for the box in the model's native normalized convention:
-  integers in `[0, 1000]` per axis, relative to the full image it sees (`0` = left/top edge,
-  `1000` = right/bottom edge), top-left corner first, JSON
-  `{"found": bool, "bbox": [x1, y1, x2, y2]}`. This is how Qwen2.5-VL is trained to ground.
-- The page is resized for the VLM preserving aspect ratio (production-faithful; mirrors
-  `plan_builder._resized_for_vlm`). Because the requested normalization is *relative*,
-  conversion to source-pixel coordinates is exact regardless of the resize:
-  `x_px = round(c * W / 1000)`.
-- Every conversion RECORDS the raw model text, the raw 0..1000 values, and a
-  `convention_ok` flag (all four coords within `[0, 1000]`, box non-degenerate). A model that
-  instead emits raw pixels of the processed image, reverses corners, or emits garbage is
-  flagged as a conversion failure -- never silently scaled into a plausible-looking box.
+- `prompt.py` asks Qwen2.5-VL for the box in PIXEL coordinates of the full source page
+  (top-left origin), and states the exact image width/height in the prompt.
+- **Qwen2.5-VL reports coordinates in the pixel space of the ORIGINAL input image, NOT in a
+  normalized 0..1000 scale.** Evidence (3-sample smoke run): on 1654x1170 pages the model
+  returned coordinates with values > 1000 (e.g. x=1254, y=1174 ~= page height 1170), which is
+  only possible if the numbers are source-image pixels. The original prompt asked for 0..1000
+  and was ignored. A 0..1000-relative assumption would have silently shrunk every box; the
+  source-pixel contract matches what the model actually does.
+- The page is passed at SOURCE resolution (Qwen's processor bounds the vision tokens
+  internally via `max_pixels`, so no manual resize is needed and the coordinate reference
+  stays unambiguous).
+- Conversion is therefore IDENTITY up to a small edge-tolerance clamp: coordinates are already
+  source pixels; values up to 5% beyond the page edge (the model overshooting the page border
+  by a few pixels is a normal spatial-estimate artifact, e.g. y=1174 vs H=1170) are clamped
+  into `[0, dim]`; anything further out, non-integral, or degenerate is flagged as a
+  conversion failure -- never silently scaled or swapped.
 
 Everything here is pure/deterministic and independently unit-tested
 (`tests/test_phase18a_coords.py`).
@@ -31,11 +35,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Qwen2.5-VL's native box coordinate scale: integers in [0, 1000] per axis.
-COORD_SCALE = 1000
+#: Fraction of a page dimension the model may overshoot and still be treated as a real
+#: source-pixel box (clamped into bounds) rather than a coordinate-mismatch failure.
+EDGE_TOLERANCE_FRACTION = 0.05
 
-BBox1000 = tuple[int, int, int, int]
-BBoxPx = tuple[int, int, int, int]  # (x0, y0, x1, y1), half-open pixel box
+BBox = tuple[int, int, int, int]  # (x0, y0, x1, y1), half-open pixel box
 
 
 def extract_json_object(text: str) -> str:
@@ -93,13 +97,13 @@ def parse_direct_response(raw_text: str) -> dict[str, Any] | None:
         return None
 
 
-def bbox_from_response(parsed: dict[str, Any]) -> tuple[bool, BBox1000 | None, str | None]:
-    """Extract `(found, box_1000, error)` from a parsed response.
+def bbox_from_response(parsed: dict[str, Any]) -> tuple[bool, BBox | None, str | None]:
+    """Extract `(found, box, error)` from a parsed response.
 
     `error` is set only for responses that claim `found: true` but cannot provide a usable
     box -- a genuinely `found: false` response is a normal outcome with no error. Returned
-    coordinates are validated numerically but NOT yet checked against `[0, COORD_SCALE]` (that
-    is `coords_in_scale`, kept separate so each check is independently testable).
+    coordinates are validated numerically but NOT yet checked against the page dimensions
+    (that is `clamp_box`, kept separate so each check is independently testable).
     """
     if not isinstance(parsed.get("found"), bool):
         return False, None, "response has no boolean 'found' field"
@@ -124,34 +128,29 @@ def bbox_from_response(parsed: dict[str, Any]) -> tuple[bool, BBox1000 | None, s
     return True, (coords[0], coords[1], coords[2], coords[3]), None
 
 
-def coords_in_scale(box: BBox1000) -> bool:
-    """All four coordinates within `[0, COORD_SCALE]` and the box non-degenerate
-    (`x2 > x1`, `y2 > y1`) -- the convention the prompt requested. `False` on a coordinate-
-    mismatch (values look like raw pixels of a resized image, reversed corners, or a zero box)."""
+def _in_bounds_with_tolerance(box: BBox, width: int, height: int) -> bool:
+    """All four coords within `[0, dim * (1 + EDGE_TOLERANCE_FRACTION)]` -- i.e. they look
+    like source-image pixels (possibly overshooting the page edge by a few px)."""
     x0, y0, x1, y1 = box
-    return all(0 <= c <= COORD_SCALE for c in box) and x1 > x0 and y1 > y0
+    x_lo, x_hi = 0, round(width * (1 + EDGE_TOLERANCE_FRACTION))
+    y_lo, y_hi = 0, round(height * (1 + EDGE_TOLERANCE_FRACTION))
+    return x_lo <= x0 and x_lo <= x1 and x1 <= x_hi and y_lo <= y0 and y1 <= y_hi
 
 
-def scale_to_pixels(box: BBox1000, width: int, height: int) -> BBoxPx:
-    """Convert a `[0, 1000]` box to half-open pixel coordinates for a `width x height` page.
+def clamp_box(box: BBox, width: int, height: int) -> BBox:
+    """Clamp a source-pixel box into `[0, width] x [0, height]` and reject degeneracy.
 
-    Deterministic: `round(c * dim / COORD_SCALE)`, clamped to `[0, dim]`. Raises `ValueError`
-    if the resulting box is degenerate (sub-pixel or fully clamped) -- the caller records this
-    as a conversion failure rather than fabricating a box.
+    Raises `ValueError` if the box is non-degenerate only because of negative coordinates
+    (i.e. clamping would collapse it) or if clamping leaves an empty box -- those are
+    conversion failures, never silently fabricated.
     """
-    if width <= 0 or height <= 0:
-        raise ValueError(f"invalid page size {width}x{height}")
-
-    def axis(lo: int, hi: int, dim: int) -> tuple[int, int]:
-        p0 = max(0, min(dim, round(lo * dim / COORD_SCALE)))
-        p1 = max(0, min(dim, round(hi * dim / COORD_SCALE)))
-        return p0, p1
-
-    x0, x1 = axis(box[0], box[2], width)
-    y0, y1 = axis(box[1], box[3], height)
+    x0 = max(0, min(width, box[0]))
+    x1 = max(0, min(width, box[2]))
+    y0 = max(0, min(height, box[1]))
+    y1 = max(0, min(height, box[3]))
     if x1 <= x0 or y1 <= y0:
         raise ValueError(
-            f"bbox degenerates after pixel scaling ({x0},{y0})-({x1},{y1}) on {width}x{height}"
+            f"bbox degenerates after clamping ({box}) on {width}x{height} page"
         )
     return (x0, y0, x1, y1)
 
@@ -162,20 +161,21 @@ class QwenBboxPrediction:
 
     `found` reflects the model's own answer. `pixel_box` is set only when `found` AND the
     conversion succeeded; `error` (category 9) is set when the response was unparseable,
-    malformed, or outside the coordinate convention. `convention_ok` records whether the raw
-    0..1000 values satisfied `coords_in_scale` -- the explicit "no silent coordinate mismatch"
-    evidence the brief requires.
+    malformed, or outside the source-pixel convention. `convention_ok` records whether the raw
+    coordinates looked like source-image pixels (`_in_bounds_with_tolerance`) -- the explicit
+    "no silent coordinate mismatch" evidence the brief requires.
     """
 
     sample_id: str
     found: bool
-    box_1000: BBox1000 | None
-    pixel_box: BBoxPx | None
+    box_raw: BBox | None
+    pixel_box: BBox | None
     raw_text: str
     error: str | None
     convention_ok: bool
     width: int
     height: int
+    clamped: bool = False
 
     @property
     def usable(self) -> bool:
@@ -186,11 +186,12 @@ class QwenBboxPrediction:
         return {
             "sample_id": self.sample_id,
             "found": self.found,
-            "box_1000": list(self.box_1000) if self.box_1000 is not None else None,
+            "box_raw": list(self.box_raw) if self.box_raw is not None else None,
             "pixel_box": list(self.pixel_box) if self.pixel_box is not None else None,
             "raw_text": self.raw_text,
             "error": self.error,
             "convention_ok": self.convention_ok,
+            "clamped": self.clamped,
             "width": self.width,
             "height": self.height,
             "usable": self.usable,
@@ -200,13 +201,13 @@ class QwenBboxPrediction:
 def convert_prediction(
     sample_id: str, raw_text: str, width: int, height: int
 ) -> QwenBboxPrediction:
-    """Full parse -> validate -> scale pipeline for one raw VLM response. Never raises."""
+    """Full parse -> validate -> clamp pipeline for one raw VLM response. Never raises."""
     parsed = parse_direct_response(raw_text)
     if parsed is None:
         return QwenBboxPrediction(
             sample_id=sample_id,
             found=False,
-            box_1000=None,
+            box_raw=None,
             pixel_box=None,
             raw_text=raw_text,
             error="unparseable response",
@@ -215,16 +216,16 @@ def convert_prediction(
             height=height,
         )
 
-    found, box_1000, error = bbox_from_response(parsed)
+    found, box, error = bbox_from_response(parsed)
     if error is not None:
         return QwenBboxPrediction(
             sample_id=sample_id,
             found=found,
-            box_1000=box_1000,
+            box_raw=box,
             pixel_box=None,
             raw_text=raw_text,
             error=error,
-            convention_ok=box_1000 is not None and coords_in_scale(box_1000),
+            convention_ok=box is not None and _in_bounds_with_tolerance(box, width, height),
             width=width,
             height=height,
         )
@@ -232,7 +233,7 @@ def convert_prediction(
         return QwenBboxPrediction(
             sample_id=sample_id,
             found=False,
-            box_1000=None,
+            box_raw=None,
             pixel_box=None,
             raw_text=raw_text,
             error=None,
@@ -241,27 +242,34 @@ def convert_prediction(
             height=height,
         )
 
-    assert box_1000 is not None  # found=true path always carries a candidate box
-    if not coords_in_scale(box_1000):
+    assert box is not None  # found=true path always carries a candidate box
+    if not _in_bounds_with_tolerance(box, width, height):
         return QwenBboxPrediction(
             sample_id=sample_id,
             found=True,
-            box_1000=box_1000,
+            box_raw=box,
             pixel_box=None,
             raw_text=raw_text,
-            error=f"coordinates outside the 0..{COORD_SCALE} convention: {box_1000}",
+            error=(
+                f"coordinates outside the source-pixel convention on a "
+                f"{width}x{height} page: {box}"
+            ),
             convention_ok=False,
             width=width,
             height=height,
         )
 
+    clamped = any(
+        c < 0 or c > limit
+        for c, limit in ((box[0], width), (box[1], height), (box[2], width), (box[3], height))
+    )
     try:
-        pixel_box = scale_to_pixels(box_1000, width, height)
+        pixel_box = clamp_box(box, width, height)
     except ValueError as exc:
         return QwenBboxPrediction(
             sample_id=sample_id,
             found=True,
-            box_1000=box_1000,
+            box_raw=box,
             pixel_box=None,
             raw_text=raw_text,
             error=str(exc),
@@ -273,11 +281,12 @@ def convert_prediction(
     return QwenBboxPrediction(
         sample_id=sample_id,
         found=True,
-        box_1000=box_1000,
+        box_raw=box,
         pixel_box=pixel_box,
         raw_text=raw_text,
         error=None,
         convention_ok=True,
         width=width,
         height=height,
+        clamped=clamped,
     )

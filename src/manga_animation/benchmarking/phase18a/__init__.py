@@ -16,16 +16,14 @@ from manga_animation.benchmarking.phase18a.classify import (
     classify,
 )
 from manga_animation.benchmarking.phase18a.coords import (
-    COORD_SCALE,
-    BBox1000,
-    BBoxPx,
+    EDGE_TOLERANCE_FRACTION,
+    BBox,
     QwenBboxPrediction,
     bbox_from_response,
+    clamp_box,
     convert_prediction,
-    coords_in_scale,
     extract_json_object,
     parse_direct_response,
-    scale_to_pixels,
 )
 from manga_animation.benchmarking.phase18a.metrics import (
     PerTargetMetrics,
@@ -50,13 +48,12 @@ from manga_animation.benchmarking.phase18a.run import (
 from manga_animation.benchmarking.phase18a.visuals import build_visual_packages
 
 __all__ = [
-    "BBox1000",
-    "BBoxPx",
-    "COORD_SCALE",
+    "BBox",
     "Classification",
     "DINO_RALL_RECALL",
     "DINO_TOP1_RECALL",
     "DirectLocalizationRecord",
+    "EDGE_TOLERANCE_FRACTION",
     "ERROR_CATEGORY_NAMES",
     "PHASE17_GT_SAM_MEDIAN_IOU",
     "PerTargetMetrics",
@@ -69,13 +66,12 @@ __all__ = [
     "build_report",
     "build_visual_packages",
     "classify",
-    "coords_in_scale",
+    "clamp_box",
     "collect_direct_predictions",
     "collect_sam_masks",
     "compute_metrics",
     "convert_prediction",
     "extract_json_object",
     "parse_direct_response",
-    "scale_to_pixels",
     "write_report",
 ]

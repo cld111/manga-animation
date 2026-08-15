@@ -2,11 +2,12 @@
 
 Two model stages, following the project's stage-level lifecycle discipline (never co-reside):
 
-- **Stage 1 (VLM):** for each of the 64 targets, run Qwen2.5-VL on the FULL page (resized to
-  the config's VLM long edge, production-faithful -- mirrors `plan_builder._resized_for_vlm`)
-  with the production target description, parse/convert the returned bbox (`coords.py`), and
-  compare against GT bbox. Results are cached per sample (`predictions_by_sample.json`) so a
-  partial/failed run resumes without re-inferring.
+- **Stage 1 (VLM):** for each of the 64 targets, run Qwen2.5-VL on the FULL page (at source
+  resolution -- Qwen's processor bounds the vision tokens internally, and source resolution
+  keeps the pixel-coordinate reference unambiguous; see `coords.py` for the measured
+  coordinate contract) with the production target description, parse/convert the returned
+  bbox (`coords.py`), and compare against GT bbox. Results are cached per sample
+  (`predictions_by_sample.json`) so a partial/failed run resumes without re-inferring.
 - **Stage 2 (SAM):** for each target, run SAM 2.1 on the GT bbox (reference/upper bound) and,
   when the Qwen bbox is usable, on the Qwen bbox (the downstream experiment). Masks are saved
   as git-ignored npz artifacts and skipped when already present.
@@ -77,31 +78,16 @@ def _load_page(dataset_dir: Path, sample_id: str) -> np.ndarray:
     return np.asarray(Image.open(dataset_dir / f"{sample_id}.png").convert("RGB"))
 
 
-def _resize_for_vlm(image: Image.Image, max_long_edge: int) -> Image.Image:
-    """Downscale (never upscale) so the VLM sees `max_long_edge`'s long edge -- the same
-    production rule `plan_builder._resized_for_vlm` uses (aspect preserved, so the 0..1000
-    coordinate normalization survives the resize exactly)."""
-    w, h = image.size
-    long_edge = max(w, h)
-    if long_edge <= max_long_edge:
-        return image
-    scale = max_long_edge / long_edge
-    new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
-    return image.resize(new_size, Image.Resampling.LANCZOS)
-
-
 def _query_one(
     sample_id: str,
     sample_prompt: str,
     gt_bbox: BBox,
     image: np.ndarray,
     vlm_client: VLMClient,
-    max_long_edge: int,
 ) -> DirectLocalizationRecord:
-    image_pil = _resize_for_vlm(Image.fromarray(image), max_long_edge)
-    prompt = build_direct_prompt(sample_prompt)
-    raw_text = vlm_client.generate(image_pil, prompt)
     h, w = image.shape[:2]
+    prompt = build_direct_prompt(sample_prompt, w, h)
+    raw_text = vlm_client.generate(Image.fromarray(image), prompt)
     prediction = convert_prediction(sample_id, raw_text, w, h)
 
     iou = coverage = ratio = None
@@ -127,8 +113,6 @@ def collect_direct_predictions(
     dataset_dir: Path,
     out_dir: Path,
     vlm_client: VLMClient,
-    *,
-    max_long_edge: int,
 ) -> list[DirectLocalizationRecord]:
     """Run the VLM stage over every sample. Resumable via `predictions_by_sample.json`."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,9 +130,9 @@ def collect_direct_predictions(
                 prediction = QwenBboxPrediction(
                     sample_id=entry["prediction"]["sample_id"],
                     found=bool(entry["prediction"]["found"]),
-                    box_1000=(
-                        tuple(entry["prediction"]["box_1000"])
-                        if entry["prediction"].get("box_1000")
+                    box_raw=(
+                        tuple(entry["prediction"]["box_raw"])
+                        if entry["prediction"].get("box_raw")
                         else None
                     ),
                     pixel_box=(
@@ -161,6 +145,7 @@ def collect_direct_predictions(
                     convention_ok=bool(entry["prediction"].get("convention_ok", False)),
                     width=int(entry["prediction"]["width"]),
                     height=int(entry["prediction"]["height"]),
+                    clamped=bool(entry["prediction"].get("clamped", False)),
                 )
                 records.append(
                     DirectLocalizationRecord(
@@ -182,12 +167,7 @@ def collect_direct_predictions(
                 continue
             image = _load_page(dataset_dir, sample.sample_id)
             record = _query_one(
-                sample.sample_id,
-                sample.prompt,
-                sample.gt_bbox,
-                image,
-                vlm_client,
-                max_long_edge=max_long_edge,
+                sample.sample_id, sample.prompt, sample.gt_bbox, image, vlm_client
             )
             records.append(record)
             print(
@@ -195,9 +175,7 @@ def collect_direct_predictions(
                 f"iou={record.bbox_iou if record.bbox_iou is not None else 'n/a'}"
             )
             cached[sample.sample_id] = record.as_dict()
-            cache_path.write_text(
-                json.dumps(cached, indent=1), encoding="utf-8"
-            )
+            cache_path.write_text(json.dumps(cached, indent=1), encoding="utf-8")
     return records
 
 

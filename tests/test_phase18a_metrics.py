@@ -87,8 +87,9 @@ def test_metrics_mask_aggregation():
 
 
 def test_prompt_contains_target_description_and_convention():
-    prompt = build_direct_prompt("character body.")
+    prompt = build_direct_prompt("character body.", 1654, 1170)
     assert "character body." in prompt
-    assert "0..1000" in prompt
+    assert "1654" in prompt and "1170" in prompt  # the pixel reference is explicit
+    assert "PIXEL coordinates" in prompt
     assert "found" in prompt and "bbox" in prompt
     assert "x1, y1, x2, y2" in prompt

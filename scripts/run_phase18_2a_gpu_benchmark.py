@@ -161,15 +161,11 @@ def main() -> None:
 
     print(
         f"phase18.2a: {len(manifest.samples)} targets, device={device}, "
-        f"vlm_long_edge={config.resolution}, vlm_dtype={config.dtype}"
+        f"vlm_dtype={config.dtype}"
     )
 
     records = collect_direct_predictions(
-        manifest,
-        dataset_dir,
-        run_dir,
-        vlm_client,
-        max_long_edge=config.resolution,
+        manifest, dataset_dir, run_dir, vlm_client
     )
     sam_results = collect_sam_masks(manifest, dataset_dir, run_dir, segmentation_client, records)
     targets = build_per_target_metrics(manifest, records, sam_results)
@@ -191,7 +187,6 @@ def main() -> None:
                 "n_targets": len(manifest.samples),
                 "limit": args.limit,
                 "device": device,
-                "vlm_long_edge": config.resolution,
                 "vlm_dtype": config.dtype,
                 "max_new_tokens": args.max_new_tokens,
                 "created_at": datetime.now(UTC).isoformat(),

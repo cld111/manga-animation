@@ -1,23 +1,19 @@
 """Phase 18.2A script/runner tests: pure logic only (no GPU, no model load).
 
-Covers the CPU-side pieces the CLI and runner depend on: `_resize_for_vlm` (aspect-preserving,
-production-faithful), `build_per_target_metrics` (VLM records + SAM results + classification),
-and the `--report-only` rebuild path.
+Covers the CPU-side pieces the CLI and runner depend on: `build_per_target_metrics` (VLM
+records + SAM results + classification) and the `--report-only` rebuild path.
 """
 
 from __future__ import annotations
 
 import json
 
-import numpy as np
 import pytest
-from PIL import Image
 
 from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest
 from manga_animation.benchmarking.phase18a.coords import QwenBboxPrediction
 from manga_animation.benchmarking.phase18a.run import (
     DirectLocalizationRecord,
-    _resize_for_vlm,
     build_per_target_metrics,
 )
 
@@ -72,7 +68,7 @@ def _record(
     pred = QwenBboxPrediction(
         sample_id=sample_id,
         found=found,
-        box_1000=None,
+        box_raw=pixel_box,
         pixel_box=pixel_box,
         raw_text='{"found": true}' if found else '{"found": false}',
         error=error,
@@ -90,14 +86,6 @@ def _record(
         page_w=1000,
         page_h=1000,
     )
-
-
-def test_resize_for_vlm_preserves_aspect_and_bounds():
-    tall = Image.fromarray(np.zeros((2000, 1000, 3), dtype=np.uint8))
-    resized = _resize_for_vlm(tall, 1000)
-    assert resized.size == (500, 1000)  # long edge (h=2000) -> 1000, w scaled
-    small = Image.fromarray(np.zeros((200, 100, 3), dtype=np.uint8))
-    assert _resize_for_vlm(small, 1000) is small  # never upscale
 
 
 def test_build_per_target_metrics_classifies_each():

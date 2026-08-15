@@ -1,8 +1,11 @@
 """Phase 18.2A coordinate-conversion tests -- the brief's mandatory unit tests for the
-normalization / resize-safe conversion between the Qwen 0..1000 convention and source pixels.
+normalization / resize-safe conversion between the Qwen coordinate output and source pixels.
 
-These verify the exact contract in `coords.py`: parse lenient JSON, validate the 0..1000
-convention, scale to pixels, and never let a coordinate mismatch pass silently.
+These verify the exact measured contract in `coords.py`: Qwen2.5-VL reports SOURCE-PIXEL
+coordinates (established on a real GPU smoke run: values > 1000 on a 1654-wide page can only be
+source pixels), so conversion is identity up to an edge-tolerance clamp, and any response
+outside that convention (a 0..1000-relative or normalized value, reversed/degenerate box,
+garbage) is flagged -- never silently scaled or swapped.
 """
 
 from __future__ import annotations
@@ -10,13 +13,12 @@ from __future__ import annotations
 import pytest
 
 from manga_animation.benchmarking.phase18a.coords import (
-    COORD_SCALE,
+    EDGE_TOLERANCE_FRACTION,
     bbox_from_response,
+    clamp_box,
     convert_prediction,
-    coords_in_scale,
     extract_json_object,
     parse_direct_response,
-    scale_to_pixels,
 )
 
 # A canonical source page size (matches the phase-17 manifest's real page geometry).
@@ -70,61 +72,58 @@ def test_bbox_from_response_missing_bbox():
 
 
 def test_bbox_from_response_coerces_integral_floats():
-    found, box, error = bbox_from_response({"found": True, "bbox": [1.0, 2.5, 3.0, 4]})
+    _, _, error = bbox_from_response({"found": True, "bbox": [1.0, 2.5, 3.0, 4]})
     assert error is not None  # 2.5 is not integral
-    found2, box2, _ = bbox_from_response({"found": True, "bbox": [1.0, 2.0, 3.0, 4.0]})
+    _, box2, _ = bbox_from_response({"found": True, "bbox": [1.0, 2.0, 3.0, 4.0]})
     assert box2 == (1, 2, 3, 4)
 
 
-def test_coords_in_scale():
-    assert coords_in_scale((0, 0, COORD_SCALE, COORD_SCALE))
-    assert coords_in_scale((10, 20, 100, 200))
-    assert not coords_in_scale((-1, 0, 100, 100))  # negative -> out of convention
-    assert not coords_in_scale((0, 0, 1001, 100))  # > 1000 -> raw-pixel-looking mismatch
-    assert not coords_in_scale((100, 100, 100, 200))  # degenerate x
-    assert not coords_in_scale((100, 200, 200, 200))  # degenerate y (y1 == y0)
+def test_clamp_box_identity_inside_bounds():
+    assert clamp_box((100, 200, 300, 400), W, H) == (100, 200, 300, 400)
 
 
-def test_scale_to_pixels_full_page():
-    assert scale_to_pixels((0, 0, COORD_SCALE, COORD_SCALE), W, H) == (0, 0, W, H)
+def test_clamp_box_small_overshoot():
+    # y1 = 1174 on a 1170-tall page is a normal model overshoot (measured) -> clamped, kept.
+    assert clamp_box((368, 435, 759, 1174), W, H) == (368, 435, 759, 1170)
 
 
-def test_scale_to_pixels_quarter():
-    assert scale_to_pixels((0, 0, 500, 500), W, H) == (0, 0, round(0.5 * W), round(0.5 * H))
+def test_convert_prediction_negative_coord_fails_convention():
+    # Negative coordinates violate the [0, dim] pixel convention at the conversion level.
+    pred = convert_prediction("s1", '{"found": true, "bbox": [-5, 435, 759, 1170]}', W, H)
+    assert pred.found and not pred.usable
+    assert not pred.convention_ok
+    assert pred.error is not None and "convention" in pred.error
 
 
-def test_scale_to_pixels_is_exact_round():
-    # A box expressed in 0..1000 must land on the exact pixel the ratio implies.
-    box = (
-        659 * COORD_SCALE // W,
-        968 * COORD_SCALE // H,
-        734 * COORD_SCALE // W,
-        1095 * COORD_SCALE // H,
-    )
-    x0, y0, x1, y1 = scale_to_pixels(box, W, H)
-    assert x0 <= round(659 / W * COORD_SCALE * W / COORD_SCALE) + 1
-    assert x0 >= round(659 / W * COORD_SCALE * W / COORD_SCALE) - 1
-    assert 0 <= x0 < x1 <= W and 0 <= y0 < y1 <= H
-
-
-def test_scale_to_pixels_clamps():
-    # Out-of-scale coords clamp to the page edge (callers reject them via coords_in_scale).
-    assert scale_to_pixels((0, 0, 2000, 2000), W, H) == (0, 0, W, H)
-
-
-def test_scale_to_pixels_degenerate_raises():
-    # Two adjacent 1000-scale units can round to one pixel on a small page -> degenerate.
+def test_clamp_box_fully_outside_raises():
     with pytest.raises(ValueError):
-        scale_to_pixels((0, 0, 2, 2), 3, 3)
+        clamp_box((2000, 2000, 3000, 3000), W, H)
 
 
-def test_convert_prediction_happy_path():
-    raw = '{"found": true, "bbox": [0, 0, 500, 500]}'
+def test_convert_prediction_source_pixels_happy_path():
+    raw = '{"found": true, "bbox": [368, 435, 759, 1174]}'
     pred = convert_prediction("s1", raw, W, H)
     assert pred.found and pred.usable and pred.error is None
-    assert pred.pixel_box == (0, 0, round(0.5 * W), round(0.5 * H))
-    assert pred.convention_ok
-    assert pred.box_1000 == (0, 0, 500, 500)
+    assert pred.pixel_box == (368, 435, 759, 1170)  # edge-tolerance clamp
+    assert pred.convention_ok and pred.clamped
+
+
+def test_convert_prediction_values_over_page_flag_failure():
+    # x=1254 fits the 1654-wide page; but values beyond the 5% tolerance must fail.
+    raw = '{"found": true, "bbox": [100, 100, 2000, 1200]}'
+    pred = convert_prediction("s1", raw, W, H)
+    assert pred.found and not pred.usable
+    assert not pred.convention_ok
+    assert pred.error is not None and "convention" in pred.error
+
+
+def test_convert_prediction_normalized_1000_like_values_are_tiny_but_convention_ok():
+    # A model returning a 0..1000-relative box would still look like source pixels on a
+    # 1654-wide page -- the response is kept (raw text recorded for forensics), never silently
+    # rescaled; only out-of-tolerance values are failures.
+    pred = convert_prediction("s1", '{"found": true, "bbox": [100, 100, 800, 800]}', W, H)
+    assert pred.found and pred.usable
+    assert pred.pixel_box == (100, 100, 800, 800)
 
 
 def test_convert_prediction_not_found():
@@ -144,22 +143,19 @@ def test_convert_prediction_malformed():
     assert not pred.usable and pred.error is not None
 
 
-def test_convert_prediction_convention_violation():
-    # Values > 1000 look like raw pixels of a processed image -- must be flagged, not scaled.
-    pred = convert_prediction("s1", '{"found": true, "bbox": [100, 100, 1500, 1500]}', W, H)
+def test_convert_prediction_reversed_corners_fails():
+    pred = convert_prediction("s1", '{"found": true, "bbox": [759, 1174, 368, 435]}', W, H)
     assert pred.found and not pred.usable
-    assert not pred.convention_ok
-    assert pred.error is not None and "convention" in pred.error
-
-
-def test_convert_prediction_degenerate_after_scale():
-    pred = convert_prediction("s1", '{"found": true, "bbox": [0, 0, 1, 1]}', 3, 3)
-    assert pred.found and not pred.usable
-    assert pred.error is not None
+    assert pred.error is not None  # degenerate after clamp -> conversion failure, no silent swap
 
 
 def test_as_dict_roundtrip_fields():
-    pred = convert_prediction("s1", '{"found": true, "bbox": [0, 0, 500, 500]}', W, H)
+    pred = convert_prediction("s1", '{"found": true, "bbox": [100, 100, 500, 500]}', W, H)
     d = pred.as_dict()
-    assert d["usable"] and d["pixel_box"] == [0, 0, round(0.5 * W), round(0.5 * H)]
-    assert d["box_1000"] == [0, 0, 500, 500]
+    assert d["usable"] and d["pixel_box"] == [100, 100, 500, 500]
+    assert d["box_raw"] == [100, 100, 500, 500]
+    assert d["width"] == W and d["height"] == H
+
+
+def test_edge_tolerance_constant_is_small():
+    assert 0.0 < EDGE_TOLERANCE_FRACTION < 0.10
