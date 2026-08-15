@@ -155,8 +155,8 @@ Only answer true when the crop isolates exactly one such specific character and 
 claims the frame. Otherwise answer false -- a crop with several characters, a partial figure, \
 or a dominating bubble/text/frame is NOT a specific single-instance crop.
 
-Answer with ONLY one JSON object, no prose: {{"is_specific": true or false, "confidence": a \
-float 0-1, "reason": "one short sentence"}}"""
+Answer with ONLY one JSON object, no prose: {"is_specific": true or false, "confidence": a \
+float 0-1, "reason": "one short sentence"}"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,15 +184,21 @@ class _SpecificResponse(BaseModel):
 
 
 def _parse_specific_response(raw_text: str) -> _SpecificResponse | None:
-    """Parse the specific-prompt JSON; None (fail closed) on anything unparseable."""
+    """Parse the specific-prompt JSON; None (fail closed) on anything unparseable. Defensively
+    tolerates the VLM echoing the prompt's JSON placeholder as doubled braces (`{{...}}`)."""
     from manga_animation.validation.validate import _extract_json_object
 
-    try:
-        object_text = _extract_json_object(raw_text)
-        data = json.loads(object_text)
-        return _SpecificResponse.model_validate(data)
-    except (json.JSONDecodeError, ValueError, ValidationError):
-        return None
+    candidates = [raw_text]
+    if "{{" in raw_text and "}}" in raw_text:
+        candidates.append(raw_text.replace("{{", "{").replace("}}", "}"))
+    for text in candidates:
+        try:
+            object_text = _extract_json_object(text)
+            data = json.loads(object_text)
+            return _SpecificResponse.model_validate(data)
+        except (json.JSONDecodeError, ValueError, ValidationError):
+            continue
+    return None
 
 
 def specific_score_candidate(

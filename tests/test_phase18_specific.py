@@ -62,6 +62,15 @@ def test_specific_parse_fail_closed_on_unparseable():
     assert _parse_specific_response('{"is_specific": "yes"}') is None
 
 
+def test_specific_parse_tolerates_doubled_braces():
+    # Real VLM behavior (Phase 18.2.1): it can echo the prompt's JSON placeholder format.
+    raw = '{{\n    "is_specific": false,\n    "confidence": 0.8,\n    "reason": "partial figure"}}'
+    parsed = _parse_specific_response(raw)
+    assert parsed is not None
+    assert parsed.is_specific is False
+    assert parsed.confidence == pytest.approx(0.8)
+
+
 def test_rank_specific_no_dino_score():
     scores = [
         _spec((100, 100, 120, 120), True, 0.9),  # specific, high conf, wrong box
