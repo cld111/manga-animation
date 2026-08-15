@@ -232,9 +232,32 @@ def _extract_one(
             f"prompt={prompt!r}"
         )
 
-    # 3. SAM mask on the exact accepted bbox, full-crop shape.
-    seg = segment_object(crop, accepted, sam)
-    mask = seg.mask
+    # 3. SAM mask on the exact accepted bbox, full-crop shape. The production
+    #    segment_object gate may legitimately REJECT an effect mask (e.g. the Phase 8.3
+    #    edge-asymmetry check); the raw best-iou mask is still saved so the benchmark can
+    #    show what the model segmented, with the pipeline's rejection verdict recorded.
+    from manga_animation.pipeline.types import PipelineStageError as _PSE
+
+    try:
+        seg = segment_object(crop, accepted, sam)
+        mask = seg.mask
+        segment_info = {
+            "segment_accepted": True,
+            "segment_reject_reason": None,
+            "sam_iou_score": seg.iou_score,
+        }
+    except _PSE as exc:
+        candidates = sam.segment(crop, accepted.bbox)
+        if not candidates:
+            raise RuntimeError(f"SAM produced no mask for {target['semantic_label']}") from exc
+        best_cand = max(candidates, key=lambda c: c.iou_score)
+        mask = best_cand.mask
+        segment_info = {
+            "segment_accepted": False,
+            "segment_reject_reason": str(exc.detail),
+            "sam_iou_score": best_cand.iou_score,
+        }
+
     return mask, crop, {
         "panel": panel_id,
         "accepted_bbox": accepted.bbox.as_xyxy(),
@@ -242,8 +265,8 @@ def _extract_one(
         "grounding_prompt": prompt,
         "scene_crop_bbox": scene_bbox.as_xyxy(),
         "panel_bbox": cand.panel_bbox.as_xyxy(),
-        "sam_iou_score": seg.iou_score,
         "model_ids": {"grounding": dino.model_id, "segmentation": sam.model_id},
+        **segment_info,
     }
 
 
