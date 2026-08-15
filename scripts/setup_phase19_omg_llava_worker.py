@@ -161,9 +161,10 @@ def main() -> None:
               "timm", "openpyxl", "lagent", "gradio==4.37.2", "gradio-image-prompter"])
 
     # torch 2.1.2 and the 2024 mm stack were built against numpy 1.x (numpy 2 breaks the
-    # torch<->numpy bridge and opencv 5 needs numpy>=2), so pin both unconditionally.
+    # torch<->numpy bridge) and opencv>=4.11 needs numpy>=2, so pin numpy<2 + opencv<4.11
+    # together (an opencv 4.14 wheel silently re-pulls numpy 2).
     if "1.26" not in _shell(f"{env_python} -c 'import numpy; print(numpy.__version__)'"):
-        _run([env_python, "-m", "pip", "install", "-q", "numpy<2", "opencv-python<5"])
+        _run([env_python, "-m", "pip", "install", "-q", "numpy<2", "opencv-python<4.11"])
 
     # --- 2. official repo at the pinned commit --------------------------------------------
     if not (src_dir / "omg_llava").exists():
