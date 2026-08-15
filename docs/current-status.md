@@ -204,6 +204,20 @@ conclusion. Candidates without implemented adapters remain research entries.
   rendered. On `eval_weapon_effects` the PRIMARY remained `weapon` (rotate) and was
   REJECTED by the known oversized-rotate-bbox geometric failure (the Phase 3.3 defect class,
   still correctly fail-closed), so that page did not exercise the effect track.
+- Phase 16 extended evidence: after an effect-mask-density diagnostic showed real effect
+  masks are sparse (6-17% of panel at density 0.28-0.50 while their grounding boxes reached
+  98%), `radial_expand`'s pre-segmentation profile was relaxed to 60% area / 0 edge margin
+  and a post-segmentation `max_mask_density` gate (0.70) was added. On `angels_of_war_fleet`
+  the `space_ship_impact_burst` then passed grounding, geometry, semantic and mask-semantics
+  ("only the space ship impact burst", confidence 1.0) and rendered -- the first end-to-end
+  RADIAL_EXPAND impact-burst render (loop verified: wrap 2.13 <= 2x ordinary, 78.9% pixels
+  static). A repeated sprint run and a `space_monster_creature` run ([PASS, PASS]) confirmed
+  no regression to ordinary objects or to the already-working speed-lines path. A
+  `wind_breaker_finish` run had one panel CUDA-OOM on the shared T4 (isolated as ERROR,
+  remaining panels processed, all six model stages released) -- a documented resource-pressure
+  class, not a lifecycle regression. The `impact_burst` -> `radial_expand` mapping was also
+  confirmed on a real VLM after the label-keyed effect-classification fix (was `rotate` when
+  the description mentioned a weapon).
 
 ## Immediate Priorities
 
@@ -219,18 +233,21 @@ These are future work, not implemented capabilities:
    speculative geometry thresholds from one instance.
 5. Treat articulated part-level animation and scene transitions as design-only future concepts,
    not current pipeline features.
-6. Validate RADIAL_EXPAND visually on a real impact/energy panel whose effect mask passes
-   geometric validation (the single Phase 16 short-run evidence had `impact_burst` fail-closed
-   for geometric reasons, so the radial pulse has not yet been exercised end-to-end on a real
-   render), and consider effect-aware semantic labels for the mask-semantics gate.
-7. Add more effect-heavy pages to the real evaluation set (speed lines confirmed working;
-   impact/energy/glow/smoke/water render paths remain unexercised end-to-end).
+6. Visually review the Phase 16 RADIAL_EXPAND render (angels_of_war_fleet impact burst) and
+   the speed-lines render (wind_breaker_sprint) -- they passed numeric loop/static checks but
+   have not had human visual QA.
+7. Add more effect-heavy pages to the real evaluation set: smoke/water/sparks/glow render
+   paths remain unexercised end-to-end (only speed lines and impact burst confirmed).
 8. Confirm the relaxed RADIAL_EXPAND bounds on real renders: Phase 16 evidence showed drawn
    effect masks are sparse (real speed_lines/impact_burst masks covered 6-17% of their panel
    at density 0.28-0.50 while their grounding boxes reached 98%), so `transform_geometry.py`
    now allows a 60% bbox area and a 0 edge margin for radial_expand and
    `segmentation/segment.py` rejects dense masks (density > 0.70, the confirmed "select
    everything" signature) post-segmentation. Neither threshold is statistically calibrated.
+9. Investigate the wind_breaker_finish panel-1 CUDA OOM on a shared T4 (578 MiB request with
+   406 MiB free while the sharded Qwen held 13.4 GiB): the panel is correctly isolated and
+   all models release, but a worker-level retry/fallback for OOM on large panels would make
+   dense pages more robust (same class as Phase 11's documented LaMa OOMs).
 
 ## Verification and Workflow
 
