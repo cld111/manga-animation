@@ -136,7 +136,12 @@ def main() -> None:
     p_smoke.add_argument("--sample", default=None, help="sample_id to use (default first)")
     p_smoke.add_argument("--mode", choices=["controlled", "autonomous"], default="autonomous")
 
-    sub.add_parser("five", help="five-target smoke test")
+    p_five = sub.add_parser("five", help="five-target smoke test")
+    p_five.add_argument(
+        "--prompt", default=None,
+        help="override the condition-D prompt for all five targets (diagnostic prompts, "
+        "e.g. action/event questions)",
+    )
 
     p_full = sub.add_parser("full", help="full 64-target controlled benchmark")
     p_full.add_argument("--condition", choices=list(CONTROLLED_CONDITIONS), default="D")
@@ -218,7 +223,11 @@ def main() -> None:
         results = {}
         for sample in five:
             image = np.asarray(Image.open(dataset_dir / f"{sample.sample_id}.png").convert("RGB"))
-            prompt = controlled_prompt("D", semantic_label=sample.semantic_label).prompt
+            prompt = (
+                args.prompt
+                if args.prompt is not None
+                else controlled_prompt("D", semantic_label=sample.semantic_label).prompt
+            )
             results[sample.sample_id] = run_smoke(
                 image, prompt, adapter, run_dir, label=f"five_{sample.sample_id}"
             )
