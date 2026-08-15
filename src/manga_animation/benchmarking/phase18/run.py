@@ -22,15 +22,14 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from manga_animation.benchmarking.phase17.dataset import MangaSegSample
-from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest
+from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest, ManifestSample
 from manga_animation.benchmarking.phase18.candidates import TargetRecall, measure_target
 from manga_animation.grounding.client import GroundingClient
 from manga_animation.pipeline.lifecycle import ModelStage
 
 
-def _unique_pages(manifest: BenchmarkManifest) -> dict[str, list[MangaSegSample]]:
-    pages: dict[str, list[MangaSegSample]] = {}
+def _unique_pages(manifest: BenchmarkManifest) -> dict[str, list[ManifestSample]]:
+    pages: dict[str, list[ManifestSample]] = {}
     for sample in manifest.samples:
         pages.setdefault(f"{sample.book}_{sample.page_index:03d}", []).append(sample)
     return pages

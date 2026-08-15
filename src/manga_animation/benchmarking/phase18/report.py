@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from manga_animation.benchmarking.phase18.candidates import (
-    RECALL_K_VALUES,
     RECALL_THRESHOLDS,
     RecallCurve,
     TargetRecall,
@@ -82,7 +81,8 @@ def write_report(report: Phase18Report, out_dir: Path) -> tuple[Path, Path]:
     for t in sorted(report.curves):
         c = report.curves[t]
         r = c.recall_at_k
-        def cell(k):
+
+        def cell(k, r=r):
             return _fmt(r.get(k))
         lines.append(
             f"| {t:.2f} | {cell(1)} | {cell(3)} | {cell(5)} | {cell(10)} | {cell(20)} | "

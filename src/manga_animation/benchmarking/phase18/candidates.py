@@ -15,8 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
 from manga_animation.benchmarking.phase17.metrics import bbox_iou
 
 BBox = tuple[int, int, int, int]
@@ -48,7 +46,7 @@ class TargetRecall:
     top1_iou: float  # IoU of the top-1 (highest-score) detection with the GT bbox
     best_iou_overall: float  # max IoU over ALL detections
     # per-threshold: best (highest-ranked) correct candidate
-    per_threshold: dict[float, "ThresholdRecall"] = field(default_factory=dict)
+    per_threshold: dict[float, ThresholdRecall] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,7 +90,11 @@ def rank_candidates(detections) -> list[RankedCandidate]:
     ranks exactly as production candidate selection would consume them."""
     ordered = sorted(detections, key=lambda d: d.score, reverse=True)
     return [
-        RankedCandidate(rank=i + 1, score=d.score, box=tuple(int(v) for v in d.box))
+        RankedCandidate(
+            rank=i + 1,
+            score=d.score,
+            box=(int(d.box[0]), int(d.box[1]), int(d.box[2]), int(d.box[3])),
+        )
         for i, d in enumerate(ordered)
     ]
 
@@ -181,7 +183,7 @@ def recall_curves(
 ) -> dict[float, RecallCurve]:
     """Aggregate per-target measurements into Recall@K curves per IoU threshold."""
     curves: dict[float, RecallCurve] = {}
-    for t in sorted({rec.threshold for rec in targets}):
+    for t in sorted({t for rec in targets for t in rec.per_threshold}):
         subset = [rec for rec in targets if t in rec.per_threshold]
         n = len(subset)
         recall_at_k: dict[int | None, float] = {}
@@ -189,13 +191,14 @@ def recall_curves(
             if n == 0:
                 recall_at_k[k] = 0.0
                 continue
-            hit = sum(
-                1
-                for rec in subset
-                if rec.per_threshold[t].correct_exists
-                and (k is None or rec.per_threshold[t].best_rank <= k)
-            )
-            recall_at_k[k] = hit / n
+            hits = 0
+            for rec in subset:
+                tr = rec.per_threshold[t]
+                if not tr.correct_exists:
+                    continue
+                if k is None or (tr.best_rank is not None and tr.best_rank <= k):
+                    hits += 1
+            recall_at_k[k] = hits / n
         category_counts = {
             cat: sum(1 for rec in subset if rec.per_threshold[t].category == cat)
             for cat in ("A", "B", "C")
