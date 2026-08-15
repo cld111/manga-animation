@@ -134,6 +134,45 @@ Panel status: `[STATIC]` -- a valid, informative result: the VLM proposed no ani
 object/effect on this page, so no video was produced and every model stage still released
 correctly. No effect track was exercised.
 
+### Run 6: RADIAL_EXPAND end-to-end on `angels_of_war_fleet` (after bound relaxation)
+
+Real finding that blocked RADIAL_EXPAND: an effect's grounding bbox is a poor proxy for its
+moved-pixel footprint. The effect-mask diagnostic (below) measured real speed_lines/impact_burst
+boxes up to 98% of their panel producing SPARSE masks covering only 6-17% of it (density
+0.28-0.50), because a burst is radiating lines, not a filled region. Based on that evidence:
+
+- `transform_geometry.py`: radial_expand area bound 35% -> 60%, edge margin 2% -> 0 (an
+  effect covering its panel legitimately has an edge-touching bbox while its sparse mask sits
+  at the center).
+- `segmentation/segment.py`: new opt-in `max_mask_density` (bound 0.70, documented from real
+  defective masks at 0.84-0.90) rejects dense "select everything" masks post-segmentation;
+  the orchestrator passes it for RADIAL_EXPAND objects only.
+
+Re-run of `angels_of_war_fleet`: panel status `[PASS]`.
+
+- `obj_space_ship_impact_burst_6` (chosen animated object, radial_expand): semantic ACCEPT
+  -> geometry **ACCEPT** -> mask accepted -> mask-semantics **ACCEPT** ("The bright region
+  shows only the space ship impact burst", confidence 1.0) -> rendered. **First end-to-end
+  RADIAL_EXPAND render of a drawn impact burst.**
+- `obj_space_ship_speed_lines_5` (secondary, mesh_warp): geometry REJECT (bbox 39.7% > 35%
+  mesh_warp bound); dropped, PRIMARY unaffected.
+
+Numerical verification of the rendered PASS video: seamless loop verified (wrap step 2.13 <=
+2x ordinary step 2.00); 78.9% of pixels static across sampled frames (the other 21% is the
+burst itself pulsing); motion present across the effect region.
+
+### Effect-mask density diagnostic (evidence behind the bound relaxation)
+
+`scripts/run_phase16_effect_mask_diagnostic.py` on `wind_breaker_sprint`,
+`angels_of_war_fleet`, `omniscient_reader_blade` (real 2xT4 worker): for each effect label
+(speed_lines, impact_burst, energy_effect, glow_effect), grounding + SAM measured bbox area
+fraction, mask density, and mask area fraction per candidate. Key result: the TOP-ranked
+candidates were sparse -- e.g. speed_lines on wind_breaker_sprint panel_01 cand0: bbox 17.4%
+of panel, mask density 0.316, mask area 5.9%; impact_burst panel_03 cand0: density 0.661,
+mask area 17.5%. Meanwhile dense "select everything" candidates (density 0.85-0.96, mask area
+29-79%) were also returned by grounding and must be rejected -- which is exactly what the
+post-segmentation `max_mask_density` check does.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
@@ -144,26 +183,17 @@ analysis signal run above is the informative evidence for it.
 
 ## Classification and next steps
 
-Classified **GOOD** for the drawn-effect and artwork-preservation paths, based on five real
-short runs:
+Classified **GOOD** for the drawn-effect track, based on seven real short runs:
 
 - speed-lines PRIMARY rendered end-to-end (`wind_breaker_sprint`, seamless loop verified);
+- **impact-burst PRIMARY rendered end-to-end with RADIAL_EXPAND** (`angels_of_war_fleet`
+  after the evidence-based bound relaxation, seamless loop verified);
 - a secondary speed-lines candidate whose grounding pointed at dialogue text was correctly
   fail-closed rather than animating the text (`omniscient_reader_blade`);
 - ordinary objects still map to their pre-Phase-16 transform kinds on every page tried;
-- real impact/energy bursts (`impact_burst`, `space_ship_impact_burst`) were fail-closed by
-  geometric validation on both pages where the VLM proposed them (bursts covering 41%,
-  86.7%, and 98.3% of their reference region) -- the pipeline never animated a
-  nearly-whole-panel effect.
-
-The RADIAL_EXPAND path was not yet exercised end-to-end on a real render: on both pages
-where the VLM proposed a radial effect, the burst's own mask was geometrically too large /
-edge-touching for the 35% bound, so it fail-closed (correctly, but without exercising the
-transform). A separate Phase 16 finding -- an effect's `motion_description` often names the
-object it is attached to ("bursts outward from the weapon clash"), which let the object
-heuristics steal the effect -- was fixed by keying effect classification on the
-`semantic_label` alone (`_EFFECT_LABEL_KEYWORDS`, before `_MOTION_HEURISTICS`), with a
-regression test.
+- real effect masks are sparse (diagnostic evidence), and the 35% bbox-area + 2% edge-margin
+  bounds that fail-closed every effect were replaced, on evidence, with a 60% area + 0 margin
+  pre-segmentation profile plus a post-segmentation mask-density gate (0.70).
 
 Next steps (see `docs/current-status.md` Immediate Priorities):
 1. Exercise RADIAL_EXPAND on a real impact/energy panel whose effect mask passes geometric
