@@ -63,6 +63,9 @@ def main() -> None:
         for label, mask_path, page_path, tag in SAMPLES:
             mask = np.load(mask_path)
             img = cv2.imread(page_path)
+            if img is None:
+                print(f"=== {label} ({tag}) === FAILED to load page {page_path}")
+                continue
             if img.shape[:2] != mask.shape:
                 print(f"=== {label} ({tag}) === SHAPE MISMATCH mask={mask.shape} page={img.shape}")
                 continue
