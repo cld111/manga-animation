@@ -42,6 +42,7 @@ import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -51,6 +52,7 @@ from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
 from manga_animation.grounding.ground import ground_object_candidates
+from manga_animation.pipeline.types import BBoxPx, GroundingResult
 from manga_animation.schemas.animation_plan import (
     MotionSpec,
     MotionType,
@@ -62,22 +64,68 @@ from manga_animation.segmentation.segment import segment_object
 
 _OUT_DIR = Path("outputs/debug/phase16_effects")
 
-# The two exact targets from the Phase 16 successful renders. `object_id` mirrors the
-# Phase 16 slugging convention; `label` is the exact VLM semantic_label recorded in the
-# Phase 16 logs; `transform_kind` is the Phase 16 motion mapping for that label.
+# Targets. `panel` is the panel whose scene crop the effect is grounded on; "auto" picks
+# the panel whose rank-0 grounding detection has the highest score (used where the Phase 16
+# logs do not pin the effect to one panel). The first two are the exact masks from the
+# Phase 16 successful renders (Run 2 speed_lines, Run 6 impact_burst) and were verified
+# against those renders. The remaining five are additional real drawn-effect masks.
+#
+# Panel attributions come from the Phase 16 GPU logs/manifests:
+#   wind_breaker_sprint panel_001 speed_lines     : phase16_gpu_sprint.log (PASS panel_001)
+#   angels_of_war_fleet panel_001 impact_burst    : phase16_gpu_fleet3.log (PASS panel_001)
+#   omniscient_reader_blade panel_001 speed_lines : single panel (fallback_full_page)
+#   sss_hunter_gladiator panel_001 speed_lines    : phase16_shg2_manifest.json PASS panel_001
+#   sss_hunter_gladiator panel_004 impact_burst   : phase16_shg2_manifest.json panel_004 failure
+#   marika_love_meter panel_001 speed_lines       : phase16_gpu_marika.log panel_001 analysis
+#   marika_love_meter radiating_focus_lines auto  : only in analysis signal, panel not pinned
 TARGETS = [
     {
         "page": "examples/realworld/wind_breaker_sprint.png",
-        "panel_id": "panel_001",
+        "panel": "panel_001",
         "semantic_label": "speed_lines",
         "object_id": "obj_speed_lines_3",
         "transform_kind": "mesh_warp",
     },
     {
         "page": "examples/realworld/angels_of_war_fleet.png",
-        "panel_id": "panel_001",
+        "panel": "panel_001",
         "semantic_label": "space_ship_impact_burst",
         "object_id": "obj_space_ship_impact_burst_6",
+        "transform_kind": "radial_expand",
+    },
+    {
+        "page": "examples/realworld/omniscient_reader_blade.png",
+        "panel": "panel_001",
+        "semantic_label": "speed_lines",
+        "object_id": "obj_speed_lines_0",
+        "transform_kind": "mesh_warp",
+    },
+    {
+        "page": "examples/realworld/sss_hunter_gladiator.png",
+        "panel": "panel_001",
+        "semantic_label": "speed_lines",
+        "object_id": "obj_speed_lines_0",
+        "transform_kind": "mesh_warp",
+    },
+    {
+        "page": "examples/realworld/sss_hunter_gladiator.png",
+        "panel": "panel_004",
+        "semantic_label": "impact_burst",
+        "object_id": "obj_impact_burst_0",
+        "transform_kind": "radial_expand",
+    },
+    {
+        "page": "examples/realworld/marika_love_meter.png",
+        "panel": "panel_001",
+        "semantic_label": "speed_lines",
+        "object_id": "obj_speed_lines_0",
+        "transform_kind": "mesh_warp",
+    },
+    {
+        "page": "examples/realworld/marika_love_meter.png",
+        "panel": "auto",
+        "semantic_label": "radiating_focus_lines",
+        "object_id": "obj_radiating_focus_lines_0",
         "transform_kind": "radial_expand",
     },
 ]
@@ -104,37 +152,28 @@ def _overlay(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
     ))
 
 
-def _extract_one(
-    target: dict[str, str],
-    page_img: np.ndarray,
-    page_shape: tuple[int, int],
-    dino: GroundingDinoClient,
-    sam: Sam21Client,
-) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    from manga_animation.grounding.ground import _prompt_from_label
-
-    # 1. Deterministic panel geometry exactly as run_page_panels computes it.
+def _panels_geometry(
+    page_img: np.ndarray, page_shape: tuple[int, int]
+) -> list[tuple[int, Any, BBoxPx]]:
     candidates = detect_panels(page_img)
     if not candidates:
-        raise RuntimeError(f"no panels detected for {target['page']}")
-    if len(candidates) < 2:
-        index = 0  # single-panel page (angels_of_war_fleet)
-    else:
-        index = int(target["panel_id"].split("_")[1]) - 1
-    cand = candidates[index]
-    if cand.panel_bbox.as_xyxy() == (0, 0, 0, 0):
-        raise RuntimeError(f"degenerate panel for {target['page']}")
-    scene_bbox = derive_scene_crop_bbox(
-        cand.panel_bbox,
-        page_shape,
-        neighboring_panel_bboxes=tuple(c.panel_bbox for c in candidates),
-    )
-    crop = page_img[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]
+        raise RuntimeError("no panels detected")
+    bboxes = tuple(c.panel_bbox for c in candidates)
+    out = []
+    for i, cand in enumerate(candidates):
+        scene_bbox = derive_scene_crop_bbox(
+            cand.panel_bbox, page_shape, neighboring_panel_bboxes=bboxes
+        )
+        out.append((i, cand, scene_bbox))
+    return out
 
-    # 2. ObjectPlan carrying the recorded label; only semantic_label drives grounding.
+
+def _ground_rank0(crop: np.ndarray, target: dict[str, str], dino: GroundingDinoClient):
+    from manga_animation.grounding.ground import _prompt_from_label
+
     obj = ObjectPlan(
         object_id=target["object_id"],
-        panel_id=target["panel_id"],
+        panel_id="panel_001",
         semantic_label=target["semantic_label"],
         confidence=1.0,
         motion_type=MotionType.PRIMARY,
@@ -146,20 +185,61 @@ def _extract_one(
     # panel_bbox_px=None == the object's full-crop panel bbox in the panel pipeline
     # (the per-panel plan's single panel is normalized (0,0,1,1) on the crop).
     grounded = ground_object_candidates(crop, obj, dino, panel_bbox_px=None)
-    accepted = grounded[0]  # rank-0 (top score) == the Phase 16 accepted candidate
-    print(
-        f"[{target['page']} {target['panel_id']}] rank-0 candidate "
-        f"bbox={accepted.bbox.as_xyxy()} score={accepted.bbox.score:.4f} "
-        f"prompt={_prompt_from_label(target['semantic_label'])!r}"
-    )
+    return grounded[0], _prompt_from_label(target["semantic_label"])
+
+
+def _extract_one(
+    target: dict[str, str],
+    page_img: np.ndarray,
+    page_shape: tuple[int, int],
+    dino: GroundingDinoClient,
+    sam: Sam21Client,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    # 1. Deterministic panel geometry exactly as run_page_panels computes it.
+    geometry = _panels_geometry(page_img, page_shape)
+    if target["panel"] == "auto":
+        # Pick the panel whose rank-0 grounding detection scores highest (used only
+        # where the Phase 16 logs do not pin the effect to one panel).
+        best: tuple[float, int, BBoxPx, GroundingResult] | None = None
+        for index, _cand, scene_bbox in geometry:
+            crop = page_img[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]
+            accepted, prompt = _ground_rank0(crop, target, dino)
+            cand_entry = (float(accepted.bbox.score), index, scene_bbox, accepted)
+            if best is None or cand_entry[0] > best[0]:
+                best = cand_entry
+        assert best is not None
+        from manga_animation.grounding.ground import _prompt_from_label
+
+        score, index, scene_bbox, accepted = best
+        cand = geometry[index][1]
+        prompt = _prompt_from_label(target["semantic_label"])
+        panel_id = f"panel_{index + 1:03d}"
+        print(
+            f"[{target['page']} auto] best panel={panel_id} scene={scene_bbox.as_xyxy()} "
+            f"rank-0 bbox={accepted.bbox.as_xyxy()} score={score:.4f} prompt={prompt!r}"
+        )
+    else:
+        index = int(target["panel"].split("_")[1]) - 1
+        if not (0 <= index < len(geometry)):
+            raise RuntimeError(f"panel {target['panel']} out of range for {target['page']}")
+        cand, scene_bbox = geometry[index][1], geometry[index][2]
+        panel_id = f"panel_{index + 1:03d}"
+        crop = page_img[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]
+        accepted, prompt = _ground_rank0(crop, target, dino)
+        print(
+            f"[{target['page']} {panel_id}] rank-0 candidate "
+            f"bbox={accepted.bbox.as_xyxy()} score={accepted.bbox.score:.4f} "
+            f"prompt={prompt!r}"
+        )
 
     # 3. SAM mask on the exact accepted bbox, full-crop shape.
     seg = segment_object(crop, accepted, sam)
     mask = seg.mask
     return mask, crop, {
+        "panel": panel_id,
         "accepted_bbox": accepted.bbox.as_xyxy(),
         "grounding_score": accepted.bbox.score,
-        "grounding_prompt": _prompt_from_label(target["semantic_label"]),
+        "grounding_prompt": prompt,
         "scene_crop_bbox": scene_bbox.as_xyxy(),
         "panel_bbox": cand.panel_bbox.as_xyxy(),
         "sam_iou_score": seg.iou_score,
@@ -226,7 +306,7 @@ def main() -> None:
                 }
             )
             print(
-                f"[{target['page']} {target['panel_id']}] mask shape={mask.shape} "
+                f"[{target['page']} {result['panel']}] mask shape={mask.shape} "
                 f"pixels={stats['pixel_count']} density={stats['density']:.3f} "
                 f"tight_bbox={stats['bbox']} saved={mask_path}"
             )
@@ -251,11 +331,13 @@ def main() -> None:
             "derive_scene_crop_bbox) -> Grounding DINO rank-0 candidate -> SAM 2.1 "
             "best-iou mask; no VLM, no validation, no animation, no rendering"
         ),
-        "matches_phase16_render": (
-            "same production grounding/segmentation functions, same models/config, same "
-            "scene-crop geometry, and the Phase 16 logs record both objects accepted at "
-            "candidate_rank=0 -- see docs/phase16-results.md Run 2 (speed_lines mesh_warp) "
-            "and Run 6 (impact_burst radial_expand)"
+        "notes": (
+            "The first two samples reproduce the exact masks used by the Phase 16 successful "
+            "renders (Run 2 speed_lines mesh_warp, Run 6 impact_burst radial_expand) and are "
+            "verified against those renders. The remaining samples are additional real "
+            "drawn-effect masks extracted with the identical deterministic pipeline path "
+            "on the panels named in the Phase 16 logs/manifests (see each sample's panel "
+            "field); 'auto' panel means the panel whose rank-0 grounding score was highest."
         ),
         "samples": entries,
     }
