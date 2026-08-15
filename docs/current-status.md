@@ -166,6 +166,21 @@ conclusion. Candidates without implemented adapters remain research entries.
   Case A (candidate exists, ranking is the problem): next step is candidate selection /
   reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
   grounding-scale floor, not fixable by a selector.
+- Phase 18.2A (diagnostic only, docs/phase18.2a-qwen-bbox-results.md) measured whether
+  Qwen2.5-VL can directly localize the specific target instance (64 same targets, full page,
+  production description `"character body."`). **No: Recall@IoU>=0.5 = 4.7% (3/64), median
+  bbox IoU 0.000 — statistically indistinguishable from DINO's 6.2% top-1 and far below
+  DINO's R@All 89.1%.** Qwen returned a source-pixel bbox in 55/64 (86%) with ZERO
+  coordinate-conversion failures after an empirical contract fix (Qwen ignores the 0..1000
+  convention and reports SOURCE pixels; the prompt now states the page size, conversion is
+  identity with a 5% edge-tolerance clamp — unit-tested). The 55 found boxes split 27
+  too-large (median area ratio 2.9x), 23 wrong-instance, 9 not-found, 2 too-small, 2 imprecise,
+  1 good; on multi-target pages Qwen systematically returns the same dominant character
+  regardless of which is the target. Qwen bbox -> SAM median mask IoU 0.000 (vs GT->SAM 0.884,
+  reproduced exactly). Recommendation: Option C (keep DINO candidates + improved selector); do
+  not use Qwen's bbox directly or as a DINO hint; enrich production target descriptions (the
+  measured bottleneck is instance-resolving description information, not localization
+  mechanics).
 
 ## Known Limitations and Technical Debt
 
@@ -297,12 +312,15 @@ These are future work, not implemented capabilities:
     panel mode), (b) evaluate prompt phrasing / a second grounding model (OWLv2 is an existing
     manifest candidate), or (c) accept instance-level ambiguity and redesign candidate
     selection. Do not change production grounding on a 64-sample full-page result alone.
-11. **Phase 18.1 follow-up (docs/phase18.1-results.md):** the correct candidate exists among
-    DINO detections in 89% of targets but is top-1 in only 6% -- so Phase 18.2 should build a
-    candidate selector/reranker over top-K using an independent signal (the production
-    `validate_target` VLM check is the existing candidate signal), measure reranked Recall@K
-    and end-to-end DINO->SAM->gates IoU on the same 64 targets, and keep the 7 category-C
-    targets (no candidate at all) out of the selector's success claim.
+11. **Phase 18.1/18.2A follow-ups (docs/phase18.1-results.md, docs/phase18.2a-qwen-bbox-results.md):**
+    DINO's candidate *availability* is 89% but top-1 is only 6%, and Qwen's DIRECT
+    localization is no better (4.7% recall@0.5) with its bbox unusable as a DINO hint. So
+    Phase 18.2 should build a candidate selector/reranker over DINO top-K using an independent
+    signal (the production `validate_target` VLM check is the existing candidate signal),
+    measure reranked Recall@K and end-to-end DINO->SAM->gates IoU on the same 64 targets, keep
+    the 7 category-C targets (no candidate at all) out of the selector's success claim, and
+    separately investigate enriching production target descriptions (the measured
+    instance-resolution information gap).
 
 ## Verification and Workflow
 
@@ -330,4 +348,5 @@ changes move between local and remote only through git.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
   Phase 17 (object-segmentation diagnostic benchmark) lives in
   [`phase17-results.md`](phase17-results.md); Phase 18.1 (DINO candidate recall) in
-  [`phase18.1-results.md`](phase18.1-results.md).
+  [`phase18.1-results.md`](phase18.1-results.md); Phase 18.2A (Qwen direct-bbox localization)
+  in [`phase18.2a-qwen-bbox-results.md`](phase18.2a-qwen-bbox-results.md).
