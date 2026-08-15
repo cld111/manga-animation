@@ -288,6 +288,14 @@ PRIMARY -> `rotate`, `character_clothing` -> `mesh_warp`, `character_hair` -> `t
 `eye` -> `opacity`. Confirms the text guard is additive, not a regression to the effect
 track.
 
+### Run 16: `marika_love_meter` analysis with text-guard active
+
+`run_phase16_analysis_signal.py` on `marika_love_meter` (the page with a known UNKNOWN
+defect history): `speed_lines` PRIMARY -> `mesh_warp`, `impact_burst` and a new effect label
+`radiating_focus_lines` -> `radial_expand`, `flag_banner` -> `mesh_warp`, ordinary objects
+unchanged, `speech_bubble` static. Confirms the text guard does not interfere with effect
+classification on a page that previously produced a mid-cycle visual defect.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
