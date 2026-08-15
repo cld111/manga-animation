@@ -279,6 +279,15 @@ speed-lines/objects, not the lettering. (VLM nondeterminism meant this run propo
 speed_lines/impact_burst/raised_sword rather than the previous run's dedication/drinking,
 but the fix's invariant -- text never becomes an animated object -- holds regardless.)
 
+### Run 15: text-guard does not regress effect classification (`villainess_ending_scuffle` analysis)
+
+`run_phase16_analysis_signal.py` re-run after the text fix: the VLM now labels `text` and
+`speech_bubble` as STATIC directly (prompt fix working on a real VLM), while effect and
+object classification is unchanged -- `impact_burst` -> `radial_expand`, `raised_sword`
+PRIMARY -> `rotate`, `character_clothing` -> `mesh_warp`, `character_hair` -> `translate`,
+`eye` -> `opacity`. Confirms the text guard is additive, not a regression to the effect
+track.
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
