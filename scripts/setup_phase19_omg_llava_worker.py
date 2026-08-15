@@ -156,7 +156,12 @@ def main() -> None:
         _run([env_python, "-m", "pip", "install",
               "mmdet==3.1.0", "mmsegmentation==1.1.1", "mmpretrain==1.0.1",
               "mmengine", "transformers==4.36.0", "triton==2.1.0",
-              "bitsandbytes", "peft", "accelerate", "sentencepiece", "einops",
+              # era-correct pins for the June-2024 OMG-LLaVA stack: the latest peft/accelerate/
+              # bitsandbytes/deepspeed require newer transformers APIs than 4.36 provides
+              # (e.g. peft>=0.8 imports EncoderDecoderCache), so pin the 2024-era releases.
+              "peft==0.7.1", "accelerate==0.27.2", "bitsandbytes==0.43.1",
+              "deepspeed==0.14.4",
+              "sentencepiece", "einops",
               "scikit-image", "scipy", "pycocotools", "datasets", "kornia", "ftfy",
               "timm", "openpyxl", "lagent", "gradio==4.37.2", "gradio-image-prompter"])
 
