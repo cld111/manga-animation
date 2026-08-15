@@ -1,0 +1,1348 @@
+version: 1
+seed: 17
+main_category: body
+samples:
+- sample_id: UltraEleven_110_695540
+  book: UltraEleven
+  page_index: 110
+  instance_id: 695540
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 659
+  - 968
+  - 734
+  - 1095
+  gt_area: 6919
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.004922022757572939
+    aspect_ratio: 0.5905511811023622
+    silhouette_density: 0.7264041994750656
+    page_area: 1935180.0
+- sample_id: AkkeraKanjinchou_084_17245
+  book: AkkeraKanjinchou
+  page_index: 84
+  instance_id: 17245
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1471
+  - 723
+  - 1602
+  - 988
+  gt_area: 14681
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.017938899740592606
+    aspect_ratio: 0.49433962264150944
+    silhouette_density: 0.42290076335877863
+    page_area: 1935180.0
+- sample_id: YumeiroCooking_086_748655
+  book: YumeiroCooking
+  page_index: 86
+  instance_id: 748655
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 969
+  - 345
+  - 1253
+  - 648
+  gt_area: 55603
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.04446718134747155
+    aspect_ratio: 0.9372937293729373
+    silhouette_density: 0.6461558127643751
+    page_area: 1935180.0
+- sample_id: OL_Lunch_061_458642
+  book: OL_Lunch
+  page_index: 61
+  instance_id: 458642
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 458
+  - 949
+  - 539
+  - 1066
+  gt_area: 8382
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.004897218863361548
+    aspect_ratio: 0.6923076923076923
+    silhouette_density: 0.8844571066793289
+    page_area: 1935180.0
+- sample_id: YamatoNoHane_108_713695
+  book: YamatoNoHane
+  page_index: 108
+  instance_id: 713695
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 270
+  - 655
+  - 367
+  - 1020
+  gt_area: 23332
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.018295455719881355
+    aspect_ratio: 0.26575342465753427
+    silhouette_density: 0.6590029656828131
+    page_area: 1935180.0
+- sample_id: DualJustice_089_116139
+  book: DualJustice
+  page_index: 89
+  instance_id: 116139
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1350
+  - 978
+  - 1594
+  - 1169
+  gt_area: 22625
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.024082514288076562
+    aspect_ratio: 1.2774869109947644
+    silhouette_density: 0.4854733499270449
+    page_area: 1935180.0
+- sample_id: LoveHina_vol01_086_321532
+  book: LoveHina_vol01
+  page_index: 86
+  instance_id: 321532
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 103
+  - 464
+  - 144
+  - 547
+  gt_area: 2849
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.001758492750028421
+    aspect_ratio: 0.4939759036144578
+    silhouette_density: 0.8372024684102263
+    page_area: 1935180.0
+- sample_id: Joouari_091_265116
+  book: Joouari
+  page_index: 91
+  instance_id: 265116
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1438
+  - 715
+  - 1577
+  - 879
+  gt_area: 17984
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.011779782759226531
+    aspect_ratio: 0.8475609756097561
+    silhouette_density: 0.788910335146517
+    page_area: 1935180.0
+- sample_id: MAD_STONE_088_334990
+  book: MAD_STONE
+  page_index: 88
+  instance_id: 334990
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 913
+  - 761
+  - 1235
+  - 1084
+  gt_area: 77624
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.053744871278123996
+    aspect_ratio: 0.9969040247678018
+    silhouette_density: 0.7463415572178528
+    page_area: 1935180.0
+- sample_id: MutekiBoukenSyakuma_088_430261
+  book: MutekiBoukenSyakuma
+  page_index: 88
+  instance_id: 430261
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1045
+  - 977
+  - 1182
+  - 1068
+  gt_area: 8764
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0064422947736127905
+    aspect_ratio: 1.5054945054945055
+    silhouette_density: 0.7029758562605278
+    page_area: 1935180.0
+- sample_id: UltraEleven_110_695541
+  book: UltraEleven
+  page_index: 110
+  instance_id: 695541
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1475
+  - 811
+  - 1569
+  - 1091
+  gt_area: 17477
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.013600801992579502
+    aspect_ratio: 0.3357142857142857
+    silhouette_density: 0.6640197568389058
+    page_area: 1935180.0
+- sample_id: NichijouSoup_091_445927
+  book: NichijouSoup
+  page_index: 91
+  instance_id: 445927
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 894
+  - 312
+  - 1131
+  - 580
+  gt_area: 49331
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.03282175301522339
+    aspect_ratio: 0.8843283582089553
+    silhouette_density: 0.7766704452421437
+    page_area: 1935180.0
+- sample_id: NichijouSoup_100_446321
+  book: NichijouSoup
+  page_index: 100
+  instance_id: 446321
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1346
+  - 972
+  - 1406
+  - 1094
+  gt_area: 5738
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.003782593867237156
+    aspect_ratio: 0.4918032786885246
+    silhouette_density: 0.783879781420765
+    page_area: 1935180.0
+- sample_id: HeiseiJimen_103_210893
+  book: HeiseiJimen
+  page_index: 103
+  instance_id: 210893
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 559
+  - 791
+  - 660
+  - 1001
+  gt_area: 11240
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010960220754658481
+    aspect_ratio: 0.48095238095238096
+    silhouette_density: 0.52993870815653
+    page_area: 1935180.0
+- sample_id: RisingGirl_111_537944
+  book: RisingGirl
+  page_index: 111
+  instance_id: 537944
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 320
+  - 666
+  - 437
+  - 1131
+  gt_area: 34150
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0281136638452237
+    aspect_ratio: 0.25161290322580643
+    silhouette_density: 0.6276996599577245
+    page_area: 1935180.0
+- sample_id: LoveHina_vol01_090_321983
+  book: LoveHina_vol01
+  page_index: 90
+  instance_id: 321983
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 504
+  - 905
+  - 537
+  - 982
+  gt_area: 2131
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.001313056149815521
+    aspect_ratio: 0.42857142857142855
+    silhouette_density: 0.8386462022825659
+    page_area: 1935180.0
+- sample_id: HisokaReturns_085_241493
+  book: HisokaReturns
+  page_index: 85
+  instance_id: 241493
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1376
+  - 998
+  - 1595
+  - 1166
+  gt_area: 29253
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.019012184913031346
+    aspect_ratio: 1.3035714285714286
+    silhouette_density: 0.7950913242009132
+    page_area: 1935180.0
+- sample_id: HisokaReturns_088_241686
+  book: HisokaReturns
+  page_index: 88
+  instance_id: 241686
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 2
+  - 841
+  - 205
+  - 1126
+  gt_area: 43055
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.02989644374166744
+    aspect_ratio: 0.712280701754386
+    silhouette_density: 0.744188056347766
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_097_415070
+  book: MoeruOnisan_vol19
+  page_index: 97
+  instance_id: 415070
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 321
+  - 424
+  - 372
+  - 511
+  gt_area: 3832
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.002292809971165473
+    aspect_ratio: 0.5862068965517241
+    silhouette_density: 0.8636466080685148
+    page_area: 1935180.0
+- sample_id: BakuretsuKungFuGirl_088_60107
+  book: BakuretsuKungFuGirl
+  page_index: 88
+  instance_id: 60107
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 41
+  - 359
+  - 140
+  - 595
+  gt_area: 18105
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.01207329550739466
+    aspect_ratio: 0.4194915254237288
+    silhouette_density: 0.7749101181304571
+    page_area: 1935180.0
+- sample_id: MutekiBoukenSyakuma_086_430168
+  book: MutekiBoukenSyakuma
+  page_index: 86
+  instance_id: 430168
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 40
+  - 677
+  - 780
+  - 1077
+  gt_area: 182087
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.15295734763691232
+    aspect_ratio: 1.85
+    silhouette_density: 0.6151587837837837
+    page_area: 1935180.0
+- sample_id: LoveHina_vol01_086_321521
+  book: LoveHina_vol01
+  page_index: 86
+  instance_id: 321521
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 592
+  - 450
+  - 626
+  - 549
+  gt_area: 2883
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0017393730815738072
+    aspect_ratio: 0.3434343434343434
+    silhouette_density: 0.85650623885918
+    page_area: 1935180.0
+- sample_id: BEMADER_P_103_51737
+  book: BEMADER_P
+  page_index: 103
+  instance_id: 51737
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 513
+  - 674
+  - 672
+  - 791
+  gt_area: 11473
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.009613059250302298
+    aspect_ratio: 1.358974358974359
+    silhouette_density: 0.616728484653013
+    page_area: 1935180.0
+- sample_id: KimiHaBokuNoTaiyouDa_106_284380
+  book: KimiHaBokuNoTaiyouDa
+  page_index: 106
+  instance_id: 284380
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 178
+  - 90
+  - 432
+  - 589
+  gt_area: 62821
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.06549571616077057
+    aspect_ratio: 0.5090180360721442
+    silhouette_density: 0.4956448329730327
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_095_414734
+  book: MoeruOnisan_vol19
+  page_index: 95
+  instance_id: 414734
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 280
+  - 667
+  - 365
+  - 821
+  gt_area: 9333
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.006764228650564806
+    aspect_ratio: 0.551948051948052
+    silhouette_density: 0.712987012987013
+    page_area: 1935180.0
+- sample_id: Arisa_087_43395
+  book: Arisa
+  page_index: 87
+  instance_id: 43395
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 27
+  - 41
+  - 141
+  - 315
+  gt_area: 22330
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.016141134158062814
+    aspect_ratio: 0.41605839416058393
+    silhouette_density: 0.714880266359329
+    page_area: 1935180.0
+- sample_id: TaiyouNiSmash_085_603288
+  book: TaiyouNiSmash
+  page_index: 85
+  instance_id: 603288
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 395
+  - 70
+  - 588
+  - 328
+  gt_area: 31046
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.025730939757541933
+    aspect_ratio: 0.748062015503876
+    silhouette_density: 0.6234887737478411
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_093_414445
+  book: MoeruOnisan_vol19
+  page_index: 93
+  instance_id: 414445
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 196
+  - 199
+  - 288
+  - 304
+  gt_area: 8498
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.004991783710042477
+    aspect_ratio: 0.8761904761904762
+    silhouette_density: 0.8797101449275362
+    page_area: 1935180.0
+- sample_id: Arisa_095_43908
+  book: Arisa
+  page_index: 95
+  instance_id: 43908
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1348
+  - 128
+  - 1455
+  - 309
+  gt_area: 14131
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010007854566500274
+    aspect_ratio: 0.5911602209944752
+    silhouette_density: 0.7296432075179429
+    page_area: 1935180.0
+- sample_id: Arisa_088_43463
+  book: Arisa
+  page_index: 88
+  instance_id: 43463
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 917
+  - 839
+  - 1143
+  - 1054
+  gt_area: 33949
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.025108775411072874
+    aspect_ratio: 1.0511627906976744
+    silhouette_density: 0.6986828565548466
+    page_area: 1935180.0
+- sample_id: OL_Lunch_062_458793
+  book: OL_Lunch
+  page_index: 62
+  instance_id: 458793
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1186
+  - 928
+  - 1233
+  - 1085
+  gt_area: 6364
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0038130819872053247
+    aspect_ratio: 0.29936305732484075
+    silhouette_density: 0.862447486109229
+    page_area: 1935180.0
+- sample_id: HeiseiJimen_101_210720
+  book: HeiseiJimen
+  page_index: 101
+  instance_id: 210720
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1153
+  - 368
+  - 1237
+  - 581
+  gt_area: 16711
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.009245651567296065
+    aspect_ratio: 0.39436619718309857
+    silhouette_density: 0.9339928459646769
+    page_area: 1935180.0
+- sample_id: KimiHaBokuNoTaiyouDa_103_284200
+  book: KimiHaBokuNoTaiyouDa
+  page_index: 103
+  instance_id: 284200
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 461
+  - 124
+  - 702
+  - 613
+  gt_area: 64487
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.060898211019130004
+    aspect_ratio: 0.49284253578732107
+    silhouette_density: 0.5472002308038252
+    page_area: 1935180.0
+- sample_id: UltraEleven_103_695044
+  book: UltraEleven
+  page_index: 103
+  instance_id: 695044
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 139
+  - 494
+  - 316
+  - 577
+  gt_area: 8960
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.007591541872073916
+    aspect_ratio: 2.1325301204819276
+    silhouette_density: 0.6098972159825744
+    page_area: 1935180.0
+- sample_id: HisokaReturns_084_241377
+  book: HisokaReturns
+  page_index: 84
+  instance_id: 241377
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1535
+  - 524
+  - 1649
+  - 710
+  gt_area: 10019
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010957120267882058
+    aspect_ratio: 0.6129032258064516
+    silhouette_density: 0.47250518770043387
+    page_area: 1935180.0
+- sample_id: MutekiBoukenSyakuma_086_430161
+  book: MutekiBoukenSyakuma
+  page_index: 86
+  instance_id: 430161
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1081
+  - 91
+  - 1365
+  - 475
+  gt_area: 84496
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.05635444764828078
+    aspect_ratio: 0.7395833333333334
+    silhouette_density: 0.7747946009389671
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_097_415050
+  book: MoeruOnisan_vol19
+  page_index: 97
+  instance_id: 415050
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 375
+  - 335
+  - 442
+  - 484
+  gt_area: 7262
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.005158693248173297
+    aspect_ratio: 0.44966442953020136
+    silhouette_density: 0.7274366422918962
+    page_area: 1935180.0
+- sample_id: OL_Lunch_062_458785
+  book: OL_Lunch
+  page_index: 62
+  instance_id: 458785
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 227
+  - 161
+  - 321
+  - 324
+  gt_area: 12727
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.007917609731394496
+    aspect_ratio: 0.5766871165644172
+    silhouette_density: 0.8306356872470957
+    page_area: 1935180.0
+- sample_id: HeiseiJimen_109_211357
+  book: HeiseiJimen
+  page_index: 109
+  instance_id: 211357
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 108
+  - 667
+  - 284
+  - 987
+  gt_area: 36734
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.029103235874698995
+    aspect_ratio: 0.55
+    silhouette_density: 0.6522372159090909
+    page_area: 1935180.0
+- sample_id: UltraEleven_110_695523
+  book: UltraEleven
+  page_index: 110
+  instance_id: 695523
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1341
+  - 909
+  - 1401
+  - 1026
+  gt_area: 5393
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0036275695284159614
+    aspect_ratio: 0.5128205128205128
+    silhouette_density: 0.7682336182336182
+    page_area: 1935180.0
+- sample_id: HeiseiJimen_107_211260
+  book: HeiseiJimen
+  page_index: 107
+  instance_id: 211260
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 123
+  - 707
+  - 280
+  - 840
+  gt_area: 12344
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010790210729751238
+    aspect_ratio: 1.1804511278195489
+    silhouette_density: 0.5911594272304966
+    page_area: 1935180.0
+- sample_id: Arisa_091_43610
+  book: Arisa
+  page_index: 91
+  instance_id: 43610
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1390
+  - 869
+  - 1650
+  - 1167
+  gt_area: 42897
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.04003761923955394
+    aspect_ratio: 0.87248322147651
+    silhouette_density: 0.553652555498193
+    page_area: 1935180.0
+- sample_id: Arisa_090_43558
+  book: Arisa
+  page_index: 90
+  instance_id: 43558
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1354
+  - 863
+  - 1373
+  - 936
+  gt_area: 901
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0007167291931499913
+    aspect_ratio: 0.2602739726027397
+    silhouette_density: 0.6496034607065609
+    page_area: 1935180.0
+- sample_id: GarakutayaManta_093_160056
+  book: GarakutayaManta
+  page_index: 93
+  instance_id: 160056
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 254
+  - 880
+  - 367
+  - 1109
+  gt_area: 18575
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.013371882718920204
+    aspect_ratio: 0.49344978165938863
+    silhouette_density: 0.7178189125478224
+    page_area: 1935180.0
+- sample_id: UltraEleven_111_695642
+  book: UltraEleven
+  page_index: 111
+  instance_id: 695642
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 373
+  - 267
+  - 627
+  - 768
+  gt_area: 90378
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.06575822404117447
+    aspect_ratio: 0.5069860279441117
+    silhouette_density: 0.7102173605544816
+    page_area: 1935180.0
+- sample_id: HisokaReturns_084_241387
+  book: HisokaReturns
+  page_index: 84
+  instance_id: 241387
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1272
+  - 593
+  - 1377
+  - 705
+  gt_area: 8052
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.006076954081790841
+    aspect_ratio: 0.9375
+    silhouette_density: 0.6846938775510204
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_092_414292
+  book: MoeruOnisan_vol19
+  page_index: 92
+  instance_id: 414292
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1279
+  - 518
+  - 1405
+  - 644
+  gt_area: 13864
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.008203888010417635
+    aspect_ratio: 1.0
+    silhouette_density: 0.873267825648778
+    page_area: 1935180.0
+- sample_id: GarakutayaManta_095_160155
+  book: GarakutayaManta
+  page_index: 95
+  instance_id: 160155
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 967
+  - 0
+  - 1206
+  - 308
+  gt_area: 56028
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.03803883876435267
+    aspect_ratio: 0.775974025974026
+    silhouette_density: 0.7611259033853176
+    page_area: 1935180.0
+- sample_id: HeiseiJimen_102_210813
+  book: HeiseiJimen
+  page_index: 102
+  instance_id: 210813
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1077
+  - 910
+  - 1134
+  - 1089
+  gt_area: 6511
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.00527237776330884
+    aspect_ratio: 0.31843575418994413
+    silhouette_density: 0.6381456434382045
+    page_area: 1935180.0
+- sample_id: OL_Lunch_059_458472
+  book: OL_Lunch
+  page_index: 59
+  instance_id: 458472
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1252
+  - 660
+  - 1363
+  - 842
+  gt_area: 15591
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010439338976219266
+    aspect_ratio: 0.6098901098901099
+    silhouette_density: 0.7717552717552718
+    page_area: 1935180.0
+- sample_id: ARMS_072_3763
+  book: ARMS
+  page_index: 72
+  instance_id: 3763
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 400
+  - 97
+  - 606
+  - 427
+  gt_area: 43977
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.03512851517688277
+    aspect_ratio: 0.6242424242424243
+    silhouette_density: 0.6469108561341571
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_097_415069
+  book: MoeruOnisan_vol19
+  page_index: 97
+  instance_id: 415069
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 487
+  - 334
+  - 547
+  - 408
+  gt_area: 3353
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0022943602145536848
+    aspect_ratio: 0.8108108108108109
+    silhouette_density: 0.7551801801801802
+    page_area: 1935180.0
+- sample_id: MAD_STONE_089_335039
+  book: MAD_STONE
+  page_index: 89
+  instance_id: 335039
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1070
+  - 603
+  - 1202
+  - 753
+  gt_area: 13380
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.010231606362198865
+    aspect_ratio: 0.88
+    silhouette_density: 0.6757575757575758
+    page_area: 1935180.0
+- sample_id: MutekiBoukenSyakuma_086_430162
+  book: MutekiBoukenSyakuma
+  page_index: 86
+  instance_id: 430162
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 45
+  - 77
+  - 783
+  - 680
+  gt_area: 208425
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.22996000372058414
+    aspect_ratio: 1.2238805970149254
+    silhouette_density: 0.46835605171972117
+    page_area: 1935180.0
+- sample_id: AkkeraKanjinchou_090_17643
+  book: AkkeraKanjinchou
+  page_index: 90
+  instance_id: 17643
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 45
+  - 64
+  - 141
+  - 199
+  gt_area: 10302
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.006697051437075621
+    aspect_ratio: 0.7111111111111111
+    silhouette_density: 0.7949074074074074
+    page_area: 1935180.0
+- sample_id: KimiHaBokuNoTaiyouDa_104_284255
+  book: KimiHaBokuNoTaiyouDa
+  page_index: 104
+  instance_id: 284255
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 438
+  - 648
+  - 568
+  - 784
+  gt_area: 11262
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.009136101034529089
+    aspect_ratio: 0.9558823529411765
+    silhouette_density: 0.6369909502262443
+    page_area: 1935180.0
+- sample_id: UltraEleven_104_695113
+  book: UltraEleven
+  page_index: 104
+  instance_id: 695113
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1351
+  - 583
+  - 1622
+  - 791
+  gt_area: 38963
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.029128039768910385
+    aspect_ratio: 1.3028846153846154
+    silhouette_density: 0.691225518024411
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_088_413704
+  book: MoeruOnisan_vol19
+  page_index: 88
+  instance_id: 413704
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1022
+  - 713
+  - 1076
+  - 781
+  gt_area: 2756
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0018974979071714258
+    aspect_ratio: 0.7941176470588235
+    silhouette_density: 0.7505446623093682
+    page_area: 1935180.0
+- sample_id: OL_Lunch_059_458457
+  book: OL_Lunch
+  page_index: 59
+  instance_id: 458457
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 922
+  - 105
+  - 999
+  - 332
+  gt_area: 13688
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.009032234727518887
+    aspect_ratio: 0.3392070484581498
+    silhouette_density: 0.7831111619657876
+    page_area: 1935180.0
+- sample_id: MutekiBoukenSyakuma_087_430205
+  book: MutekiBoukenSyakuma
+  page_index: 87
+  instance_id: 430205
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 103
+  - 89
+  - 530
+  - 366
+  gt_area: 85930
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.06112041257144038
+    aspect_ratio: 1.5415162454873645
+    silhouette_density: 0.7265025913306673
+    page_area: 1935180.0
+- sample_id: MoeruOnisan_vol19_097_415048
+  book: MoeruOnisan_vol19
+  page_index: 97
+  instance_id: 415048
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1312
+  - 418
+  - 1405
+  - 556
+  gt_area: 9724
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.006631941214770719
+    aspect_ratio: 0.6739130434782609
+    silhouette_density: 0.7576749259778712
+    page_area: 1935180.0
+- sample_id: OL_Lunch_063_458939
+  book: OL_Lunch
+  page_index: 63
+  instance_id: 458939
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1091
+  - 685
+  - 1200
+  - 841
+  gt_area: 13522
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.008786779524385328
+    aspect_ratio: 0.6987179487179487
+    silhouette_density: 0.7952246530228182
+    page_area: 1935180.0
+- sample_id: MeteoSanStrikeDesu_107_371490
+  book: MeteoSanStrikeDesu
+  page_index: 107
+  instance_id: 371490
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 81
+  - 768
+  - 538
+  - 992
+  gt_area: 84127
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.052898438388160274
+    aspect_ratio: 2.0401785714285716
+    silhouette_density: 0.8218095498593311
+    page_area: 1935180.0
+- sample_id: OL_Lunch_061_458649
+  book: OL_Lunch
+  page_index: 61
+  instance_id: 458649
+  category: body
+  semantic_label: character_body
+  prompt: character body.
+  gt_bbox:
+  - 1250
+  - 999
+  - 1330
+  - 1081
+  gt_area: 5631
+  page_size:
+  - 1170
+  - 1654
+  features:
+    area_fraction: 0.0033898655422234625
+    aspect_ratio: 0.975609756097561
+    silhouette_density: 0.8583841463414634
+    page_area: 1935180.0
