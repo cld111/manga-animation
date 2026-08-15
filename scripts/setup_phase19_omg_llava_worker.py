@@ -179,6 +179,26 @@ def main() -> None:
     _run(["git", "-C", str(src_dir), "fetch", "--all"], timeout=1800)
     _run(["git", "-C", str(src_dir), "checkout", args.omg_seg_commit])
     _run([env_python, "-m", "pip", "install", "-e", str(src_dir / "omg_llava")])
+    # --- venv compatibility patches (2024-era stack vs 2025+ wheels) -----------------------
+    # 1) sentencepiece 0.2.x fails on internlm2's tokenizer.model ("piece must not include
+    #    null character") -- pin 0.1.99.
+    _run([env_python, "-m", "pip", "install", "-q", "sentencepiece==0.1.99"])
+    # 2) mmdet 3.3.0 / mmseg 1.1.1 / mmpretrain 1.0.1 hard-gate mmcv < 2.2.0, but the only
+    #    torch-2.1 prebuilt wheel is mmcv 2.2.0. The gates are conservative era bounds; bump
+    #    the maximum in the installed packages (worker-side patch, documented in the phase
+    #    report; the APIs used by omg_llava are unchanged between mmcv 2.0/2.2).
+    for pkg, pat in [
+        ("mmdet", "mmcv_maximum_version = '2.2.0'"),
+        ("mmpretrain", "mmcv_maximum_version = '2.2.0'"),
+        ("mmseg", "MMCV_MAX = '2.1.0'"),
+    ]:
+        init = f"{env_python}/../lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/{pkg}/__init__.py"
+        init = str(Path(init).resolve())
+        text = Path(init).read_text(encoding="utf-8")
+        if pat in text:
+            new = pat.replace("'2.1.0'", "'2.3.0'").replace("'2.2.0'", "'2.3.0'")
+            Path(init).write_text(text.replace(pat, new), encoding="utf-8")
+            print(f"patched {pkg} mmcv gate: {pat} -> {new}")
     # The phase-19 benchmark CLI imports the manga-animation package (manifest/config/metrics,
     # light, no torch at import time). On python 3.11+ it pip-installs cleanly (requires >=3.11);
     # on python 3.10 the run commands set PYTHONPATH=/kaggle/working/manga-animation/src instead.
