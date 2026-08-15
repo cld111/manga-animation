@@ -118,6 +118,7 @@ class OMGLLavaAdapter:
         device: str = "cuda",
         llm_bits: str | None = None,
         shard_two_gpus: bool = False,
+        resolution: int = 1024,
         max_new_tokens: int = 512,
         temperature: float = 0.1,
         top_p: float = 0.75,
@@ -130,6 +131,7 @@ class OMGLLavaAdapter:
         self.device = device
         self.llm_bits = llm_bits  # None=official config, "4", "8", or "fp16"
         self.shard_two_gpus = shard_two_gpus
+        self.resolution = resolution
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -155,6 +157,13 @@ class OMGLLavaAdapter:
         # The official chat tool nulls the config's pretrain checkpoint before building --
         # the finetune pth passed on the CLI is loaded separately via load_state_dict.
         cfg.model.pretrained_pth = None
+        if self.resolution != 1024:
+            # Non-official resolution: patch the CLIP processor. The official config is 1024;
+            # on 2xT4-16GB the official 1024x1024 forward OOMs (measured), so the benchmark
+            # documents the highest resolution that fits (phase brief section 14).
+            for key in ("size", "crop_size"):
+                if key in cfg.image_processor:
+                    cfg.image_processor[key] = self.resolution
         self._apply_llm_strategy(cfg)
         model = BUILDER.build(cfg.model)
 

@@ -92,6 +92,7 @@ def _build_adapter(args, device: str) -> OMGLLavaAdapter:
         device=device,
         llm_bits=args.precision,
         shard_two_gpus=args.shard_two_gpus,
+        resolution=args.resolution,
         max_new_tokens=args.max_new_tokens,
         temperature=0.1,
         offload_folder=args.offload_folder,
