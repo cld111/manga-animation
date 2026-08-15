@@ -199,15 +199,24 @@ def _extract_one(
     geometry = _panels_geometry(page_img, page_shape)
     if target["panel"] == "auto":
         # Pick the panel whose rank-0 grounding detection scores highest (used only
-        # where the Phase 16 logs do not pin the effect to one panel).
+        # where the Phase 16 logs do not pin the effect to one panel). Panels where
+        # grounding finds nothing are skipped (that panel has no detection to offer).
+        from manga_animation.pipeline.types import PipelineStageError as _PSE
+
         best: tuple[float, int, BBoxPx, GroundingResult] | None = None
         for index, _cand, scene_bbox in geometry:
             crop = page_img[scene_bbox.y0 : scene_bbox.y1, scene_bbox.x0 : scene_bbox.x1]
-            accepted, prompt = _ground_rank0(crop, target, dino)
+            try:
+                accepted, _prompt = _ground_rank0(crop, target, dino)
+            except _PSE:
+                continue  # no detection on this panel
             cand_entry = (float(accepted.bbox.score), index, scene_bbox, accepted)
             if best is None or cand_entry[0] > best[0]:
                 best = cand_entry
-        assert best is not None
+        if best is None:
+            raise RuntimeError(
+                f"no panel detected '{target['semantic_label']}' for {target['page']}"
+            )
         from manga_animation.grounding.ground import _prompt_from_label
 
         score, index, scene_bbox, accepted = best
