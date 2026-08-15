@@ -143,7 +143,7 @@ def main() -> None:
         "limit": args.limit,
         "device": device,
         "created_at": datetime.now(UTC).isoformat(),
-        "environment": environment_metadata(),
+        "environment": environment_metadata(device),
     }
     (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
     print(f"run metadata: {run_dir / 'run_meta.json'}")
