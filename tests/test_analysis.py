@@ -456,11 +456,11 @@ def test_text_like_labels_are_never_animated_despite_vlm_motion():
 
     text_labels = [
         "dedication", "pledge", "caption", "speech_bubble", "dialogue_text",
-        "sound_effect_lettering", "narration_box", "logo_text",
+        "sound_effect_lettering", "narration_box", "logo_text", "text",
     ]
     for label in text_labels:
         assert _is_text_label(label), label
-    non_text = ["character_hair", "cloth", "bicycle", "texture_pattern", "flag"]
+    non_text = ["character_hair", "cloth", "bicycle", "texture_pattern", "flag", "textbook"]
     for label in non_text:
         assert not _is_text_label(label), label
 

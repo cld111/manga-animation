@@ -495,7 +495,12 @@ _TEXT_LABEL_KEYWORDS: tuple[str, ...] = (
 
 def _is_text_label(semantic_label: str) -> bool:
     label = semantic_label.lower()
-    return any(kw in label for kw in _TEXT_LABEL_KEYWORDS)
+    if any(kw in label for kw in _TEXT_LABEL_KEYWORDS):
+        return True
+    # The bare label "text" (a real VLM label, e.g. marika) is lettering -- match it as a
+    # whole token only, never as a substring ("texture", "textbook", "context" must not be
+    # caught).
+    return label == "text" or label.endswith("_text") or label.startswith("text_")
 
 
 def _non_primary_object_plan(
