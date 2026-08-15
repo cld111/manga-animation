@@ -43,8 +43,7 @@ from pathlib import Path
 # is identical; patch it before any manga_animation import so `from datetime import UTC`
 # resolves. This is benchmark-harness-only, not a production change.
 if not hasattr(_datetime, "UTC"):
-    # noqa: UP017 -- the alias is py3.11+; this shim intentionally provides it for py3.10.
-    _datetime.UTC = _datetime.timezone.utc  # type: ignore[attr-defined]
+    _datetime.UTC = _datetime.timezone.utc  # type: ignore[attr-defined]  # noqa: UP017
 
 from datetime import UTC, datetime as _dt
 
