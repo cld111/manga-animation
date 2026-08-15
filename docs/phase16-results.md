@@ -330,6 +330,16 @@ confirmed-defect false-negative rate is the higher-value change; the two new fal
 are exactly the "might be right" cases a visual QA pass should adjudicate. The 13-sample
 set remains development data, not a held-out calibration (docs/phase12-results.md).
 
+### Run 19: regression check -- new mask prompt on `wind_breaker_sprint`
+
+`run_phase16_gpu_effects.py` re-run with the strengthened mask-semantics prompt active:
+`[PASS, PASS, REJECTED, REJECTED]`. The PASS panels rendered ordinary objects
+(`character_bicycle`, `character_rider`, both mask-semantics ACCEPT with the new wording
+"limited to X alone"), confirming the stricter prompt does not false-reject clean real masks
+in production; the drawn-effect path remains functional. (VLM nondeterminism selected
+bicycle/rider as PRIMARY this run rather than the previous runs' speed_lines, so statuses
+differ across runs -- not a pipeline regression.)
+
 ### Run 0 (superseded observation): `eval_weapon_effects` full pipeline
 
 `[REJECTED]`. The PRIMARY remained `weapon` (rotate), and its validated grounding
