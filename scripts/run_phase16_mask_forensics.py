@@ -58,7 +58,7 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_logging(debug=False)
-    vlm = Qwen25VLClient(source=args.qwen, dtype="float32")
+    vlm = Qwen25VLClient(source=args.qwen, dtype="float16")
     try:
         for label, mask_path, page_path, tag in SAMPLES:
             mask = np.load(mask_path)
