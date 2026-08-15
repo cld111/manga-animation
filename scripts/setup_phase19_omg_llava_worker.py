@@ -86,8 +86,8 @@ def main() -> None:
         _shell(f"{args.python_bin} -m venv {venv}")
         env_python = str(venv / "bin" / "python")
     elif shutil.which("conda"):
-        _shell("conda create -n {} python=3.10 -y".format(env_name))
-        env_python = "/opt/conda/envs/{}/bin/python".format(env_name)
+        _shell(f"conda create -n {env_name} python=3.10 -y")
+        env_python = f"/opt/conda/envs/{env_name}/bin/python"
         if not Path(env_python).exists():
             env_python = None
     if env_python is None:
@@ -148,7 +148,9 @@ def main() -> None:
     # The phase-19 benchmark CLI imports the manga-animation package (manifest/config/metrics,
     # light, no torch at import time). On python 3.11+ it pip-installs cleanly (requires >=3.11);
     # on python 3.10 the run commands set PYTHONPATH=/kaggle/working/manga-animation/src instead.
-    pyver = _shell(f"{env_python} -c 'import sys; print(f\"{{sys.version_info.major}}.{{sys.version_info.minor}}\")'")
+    pyver = _shell(
+        f"{env_python} -c 'import sys; print(f\"{{sys.version_info.major}}.{{sys.version_info.minor}}\")'"
+    )
     if tuple(int(p) for p in pyver.split(".")) >= (3, 11):
         _run([env_python, "-m", "pip", "install", "-q", "-e", "/kaggle/working/manga-animation"])
 
