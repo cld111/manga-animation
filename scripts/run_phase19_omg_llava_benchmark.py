@@ -41,9 +41,6 @@ import _py310_compat  # noqa: F401 -- applies the py3.10 datetime.UTC shim befor
 import numpy as np
 from PIL import Image
 
-UTC = _datetime.UTC
-_dt = _datetime.datetime
-
 from manga_animation.benchmarking.phase17.manifest import BenchmarkManifest, load_manifest
 from manga_animation.benchmarking.phase19.adapter import OMGLLavaAdapter
 from manga_animation.benchmarking.phase19.autonomous import (
@@ -71,6 +68,9 @@ from manga_animation.benchmarking.phase19.run import (
     select_five_targets,
 )
 from manga_animation.evaluation.harness import environment_metadata
+
+UTC = _datetime.UTC
+_dt = _datetime.datetime
 
 DEFAULT_MANIFEST = "configs/phase17_benchmark.yaml"
 DEFAULT_OUT = "outputs/experiments/phase19_omg_llava"
