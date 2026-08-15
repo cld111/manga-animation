@@ -166,6 +166,14 @@ conclusion. Candidates without implemented adapters remain research entries.
   Case A (candidate exists, ranking is the problem): next step is candidate selection /
   reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
   grounding-scale floor, not fixable by a selector.
+- Phase 18.2 (docs/phase18.2-results.md) tested whether the production VLM (`validate_target`
+  prompt/crop/parser, Qwen 2.5-VL-7B, float16 2xT4) can rerank DINO candidates better than
+  top-1. **Current run is a 5-page / 5-target diagnostic subset** (explicit scoping): VLM
+  semantic rerank raised sel@1 from 0/5 (DINO top-1) to 1/5; adding DINO score back in (1:1
+  blend) cancels the gain (0/5); dominant failure is semantic confusion (the production prompt
+  is a *presence* check, satisfied by every character). Cost measured: ~4.6s per candidate
+  (~90 min for the full 64-target benchmark). The full run and a specific-instance prompt are
+  the remaining steps; no production integration.
 
 ## Known Limitations and Technical Debt
 
@@ -303,6 +311,11 @@ These are future work, not implemented capabilities:
     `validate_target` VLM check is the existing candidate signal), measure reranked Recall@K
     and end-to-end DINO->SAM->gates IoU on the same 64 targets, and keep the 7 category-C
     targets (no candidate at all) out of the selector's success claim.
+12. **Phase 18.2 follow-up (docs/phase18.2-results.md):** the 5-target diagnostic suggests VLM
+    reranking helps a little but the production presence-prompt cannot discriminate specific
+    instances (semantic confusion dominates) and blending DINO score back in cancels the gain.
+    Next: (a) run the full 64-target VLM reranking benchmark, and (b) test a specific-instance
+    / contrastive verification prompt (benchmark-only) before any integration decision.
 
 ## Verification and Workflow
 
