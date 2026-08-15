@@ -145,7 +145,7 @@ background or overlaps in "neighbor_conflicts".
 
 Answer with ONLY ONE JSON object, no prose, no markdown fences, in exactly this shape:
 {{"bbox_assessment": "pass" | "ambiguous" | "partial" | "reject" | "not_animatable", \
-"object_identity": "short snake_case name of the object actually inside the box, or null", \
+"object_identity": "short snake_case name of the object actually inside the box", \
 "matches_semantic_label": true or false, "animatable": true or false, "movable_parts": \
 ["short labels"], "static_parts": ["short labels"], "motion_kind": null or one of \
 "sway"|"flow"|"drift"|"rotate"|"pulse"|"breathe"|"flicker", "direction": null or one of \
@@ -155,13 +155,18 @@ Answer with ONLY ONE JSON object, no prose, no markdown fences, in exactly this 
 ["problems with neighbors/background/occlusion"], "confidence": a float 0-1, "reason": "one \
 short sentence grounded in what you actually see"}}
 
-Rules: "motion_kind" is required iff "animatable" is true; "direction" is required iff \
-"motion_kind" is "drift" (the direction of the steady movement); otherwise both are null. \
-"confidence" must reflect genuine uncertainty -- be conservative with low confidence and \
-write the doubts into "neighbor_conflicts" or "reason". Text, speech bubbles, lettering, \
-rigid background and panel borders must never be animated: if the box is such content, \
-assess "not_animatable". If the box contains several objects or the target is ambiguous, \
-"bbox_assessment" must be "ambiguous", never "pass". """
+Rules: "bbox_assessment" must be EXACTLY one of the five values "pass", "ambiguous", \
+"partial", "reject", "not_animatable" -- never anything else. "motion_kind" is required iff \
+"animatable" is true; "direction" is required iff "motion_kind" is "drift" (the direction of \
+the steady movement); otherwise both are null. "amplitude_band", "speed_band" and \
+"pivot_hint" always carry one of their listed values -- never null, even when "animatable" \
+is false. "object_identity", "movable_parts", "static_parts", "constraints", \
+"neighbor_conflicts" are never null: use empty lists where nothing applies, and always name \
+the object you actually see inside the box. "confidence" must reflect genuine uncertainty -- \
+be conservative with low confidence and write the doubts into "neighbor_conflicts" or \
+"reason". Text, speech bubbles, lettering, rigid background and panel borders must never be \
+animated: if the box is such content, assess "not_animatable". If the box contains several \
+objects or the target is ambiguous, "bbox_assessment" must be "ambiguous", never "pass". """
 
 # Unique marker the test fake clients use to dispatch this stage's prompt (same convention as
 # `_VALIDATION_PROMPT_MARKER`/`_MASK_SEMANTICS_PROMPT_MARKER` in tests/test_pipeline.py).

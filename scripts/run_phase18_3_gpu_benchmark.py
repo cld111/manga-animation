@@ -94,20 +94,39 @@ def _draw_character(
     size: int,
     color: tuple[int, int, int],
 ) -> None:
-    """A crude but visually distinct 'character': head circle + body rectangle + hair cap."""
+    """A crude but recognizable manga-style character: skin-tone head with eyes and hair,
+    colored torso, two arms -- reads as ONE person, not a blob (the Phase 18.3 curated
+    scenarios require the VLM to recognize a character)."""
     cx, cy = center
-    body_w, body_h = size, int(size * 1.4)
+    skin = (238, 200, 170)
+    hair = (50, 40, 35)
+    head_r = max(4, size // 4)
+    body_w, body_h = size, int(size * 1.5)
+    # torso
     _fill(page, (cx - body_w // 2, cy, cx + body_w // 2, cy + body_h), color)
-    head_r = size // 3
-    yy, xx = np.mgrid[max(0, cy - head_r) : cy + head_r, max(0, cx - head_r) : cx + head_r]
-    if yy.size == 0 or xx.size == 0:
-        return
-    mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= head_r**2
-    sub = page[max(0, cy - head_r) : cy + head_r, max(0, cx - head_r) : cx + head_r]
-    sub[mask] = color
-    # hair cap (top third of the head)
+    # arms (slightly darker shade of the torso color)
+    arm = tuple(max(0, int(c * 0.8)) for c in color)
+    _fill(page, (cx - body_w // 2 - 6, cy + 4, cx - body_w // 2 + 4, cy + 4 + body_h // 2), arm)
+    _fill(page, (cx + body_w // 2 - 4, cy + 4, cx + body_w // 2 + 6, cy + 4 + body_h // 2), arm)
+    # head
+    yy, xx = np.mgrid[
+        max(0, cy - head_r) : cy + head_r, max(0, cx - head_r) : cx + head_r
+    ]
+    if yy.size and xx.size:
+        mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= head_r**2
+        sub = page[max(0, cy - head_r) : cy + head_r, max(0, cx - head_r) : cx + head_r]
+        sub[mask] = skin
+    # eyes
+    eye_r = max(1, head_r // 6)
+    for ex in (cx - head_r // 2, cx + head_r // 2):
+        ey = cy
+        yy, xx = np.mgrid[ey - eye_r : ey + eye_r, ex - eye_r : ex + eye_r]
+        if yy.size and xx.size:
+            sub = page[ey - eye_r : ey + eye_r, ex - eye_r : ex + eye_r]
+            sub[(xx - ex) ** 2 + (yy - ey) ** 2 <= eye_r**2] = (20, 20, 25)
+    # hair cap
     hair_h = max(1, head_r // 2)
-    _fill(page, (cx - head_r, cy - head_r, cx + head_r, cy - head_r + hair_h), (60, 40, 30))
+    _fill(page, (cx - head_r, cy - head_r, cx + head_r, cy - head_r + hair_h), hair)
 
 
 def _build_scenario_pages() -> list[CuratedCase]:
@@ -252,31 +271,38 @@ def _visualize(page: np.ndarray, bbox: BBoxPx, path: Path) -> None:
 
 
 def run_part_a(qwen_source: str, out_dir: Path) -> list[dict[str, Any]]:
-    """Coordinate contract: our prepare_image_and_bbox vs the REAL processor's smart_resize."""
+    """Coordinate contract: the image `prepare_image_and_bbox` hands the client must come
+    out of the REAL Qwen2.5-VL processor unchanged (same dims), so the bbox coordinates we
+    state in the prompt -- in `prepared.image`'s pixel space -- are the pixel space the
+    model actually sees."""
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(qwen_source)
-    sizes = [(1024, 1536), (720, 5062), (600, 400), (1536, 1536), (218, 1536), (200, 220)]
+    sizes = [(1024, 1536), (720, 5062), (600, 400), (1536, 1536), (200, 220)]
     records: list[dict[str, Any]] = []
     for w, h in sizes:
         img = Image.new("RGB", (w, h), (240, 240, 245))
-        inputs = processor(text=[""], images=[img], return_tensors="pt")
-        grid = inputs["image_grid_thw"][0].tolist()  # (t, grid_h, grid_w)
-        processor_dims = (grid[1] * 14, grid[2] * 14)
         prepared = prepare_image_and_bbox(
-            img, BBoxPx(10, 10, w // 2, h // 2), max_long_edge=1536
+            img, BBoxPx(10, 10, max(1, w // 2), max(1, h // 2)), max_long_edge=1536
         )
-        ours = prepared.image.size
-        match = tuple(ours) == processor_dims
+        # Feed OUR prepared image through the real processor: image_grid_thw is
+        # (temporal, grid_h, grid_w) in patches, i.e. (h, w) each = patches * patch_size.
+        inputs = processor(text=[""], images=[prepared.image], return_tensors="pt")
+        grid = inputs["image_grid_thw"][0].tolist()
+        processor_dims = (grid[2] * 14, grid[1] * 14)  # (w, h), same order as PIL size
+        match = tuple(prepared.image.size) == processor_dims
         records.append(
             {
                 "input_size": (w, h),
-                "processor_grid_dims": processor_dims,
-                "ours_dims": ours,
+                "prepared_size": tuple(prepared.image.size),
+                "processor_output_dims": processor_dims,
                 "match": match,
             }
         )
-        print(f"  part A: {w}x{h} processor={processor_dims} ours={ours} match={match}")
+        print(
+            f"  part A: input={w}x{h} prepared={tuple(prepared.image.size)} "
+            f"processor={processor_dims} match={match}"
+        )
     (out_dir / "part_a_processor_contract.json").write_text(
         json.dumps(records, indent=1), encoding="utf-8"
     )

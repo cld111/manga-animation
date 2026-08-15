@@ -133,18 +133,18 @@ class ObjectDescriptionResponse(BaseModel):
     """
 
     bbox_assessment: BBoxAssessment
-    object_identity: str = Field(min_length=1)
+    object_identity: str | None = None
     matches_semantic_label: bool
     animatable: bool
-    movable_parts: list[str] = Field(default_factory=list)
-    static_parts: list[str] = Field(default_factory=list)
+    movable_parts: list[str] | None = None
+    static_parts: list[str] | None = None
     motion_kind: MotionKind | None = None
     direction: DirectionWord | None = None
-    amplitude_band: AmplitudeBand = AmplitudeBand.MODERATE
-    speed_band: SpeedBand = SpeedBand.NORMAL
-    pivot_hint: PivotHint = PivotHint.CENTER
-    constraints: list[str] = Field(default_factory=list)
-    neighbor_conflicts: list[str] = Field(default_factory=list)
+    amplitude_band: AmplitudeBand | None = None
+    speed_band: SpeedBand | None = None
+    pivot_hint: PivotHint | None = None
+    constraints: list[str] | None = None
+    neighbor_conflicts: list[str] | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=1)
 

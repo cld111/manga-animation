@@ -314,6 +314,32 @@ class TestResponseSchema:
                 json.loads(_valid_response(motion_kind="sway", direction="right"))
             )
 
+    def test_null_optional_bands_are_tolerated(self):
+        # Real Qwen output on a non-animatable object sets amplitude_band/speed_band/
+        # pivot_hint/constraints to null -- the schema tolerates that (documented defaults)
+        # while keeping the semantic fields strict.
+        parsed = ObjectDescriptionResponse.model_validate(
+            json.loads(
+                _valid_response(
+                    animatable=False,
+                    motion_kind=None,
+                    amplitude_band=None,
+                    speed_band=None,
+                    pivot_hint=None,
+                    constraints=None,
+                    neighbor_conflicts=None,
+                )
+            )
+        )
+        assert parsed.animatable is False
+        assert parsed.motion_kind is None
+
+    def test_unknown_assessment_value_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ObjectDescriptionResponse.model_validate(
+                json.loads(_valid_response(bbox_assessment="static"))
+            )
+
 
 # --- deterministic mapping ------------------------------------------------------------------
 

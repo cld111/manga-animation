@@ -38,8 +38,11 @@ from manga_animation.object_description.prompt import (
     prepare_image_and_bbox,
 )
 from manga_animation.object_description.schema import (
+    AmplitudeBand,
     BBoxAssessment,
     ObjectDescriptionResponse,
+    PivotHint,
+    SpeedBand,
 )
 from manga_animation.pipeline.types import (
     BBoxPx,
@@ -155,9 +158,9 @@ def describe_object(
             motion_spec = motion_spec_from_description(
                 motion_kind=parsed.motion_kind,
                 direction=parsed.direction,
-                amplitude_band=parsed.amplitude_band,
-                speed_band=parsed.speed_band.value,
-                pivot_hint=parsed.pivot_hint,
+                amplitude_band=parsed.amplitude_band or AmplitudeBand.MODERATE,
+                speed_band=(parsed.speed_band or SpeedBand.NORMAL).value,
+                pivot_hint=parsed.pivot_hint or PivotHint.CENTER,
             )
         except ValueError as exc:
             accepted = False
@@ -189,10 +192,10 @@ def describe_object(
         animatable=parsed.animatable,
         object_identity=parsed.object_identity,
         motion_spec=motion_spec,
-        movable_parts=tuple(parsed.movable_parts),
-        static_parts=tuple(parsed.static_parts),
-        constraints=tuple(parsed.constraints),
-        neighbor_conflicts=tuple(parsed.neighbor_conflicts),
+        movable_parts=tuple(parsed.movable_parts or ()),
+        static_parts=tuple(parsed.static_parts or ()),
+        constraints=tuple(parsed.constraints or ()),
+        neighbor_conflicts=tuple(parsed.neighbor_conflicts or ()),
         confidence=parsed.confidence,
         reason=parsed.reason,
         rejection_reason=rejection_reason,
