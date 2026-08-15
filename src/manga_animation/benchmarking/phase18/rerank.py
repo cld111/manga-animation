@@ -162,11 +162,14 @@ def rank_scores(
         raise ValueError(f"unknown ranking strategy {strategy!r}")
     if strategy == "C":
         if image_shape is None:
-            raise ValueError("strategy C requires image_shape for the bbox-plausibility gate")
+            # No page geometry -> the geometry gate cannot run -> no candidate survives it.
+            return []
         filtered = [
             s
             for s in scores
-            if _bbox_plausibility(BBoxPx(x0=s.box[0], y0=s.box[1], x1=s.box[2], y1=s.box[3]), image_shape)[0]
+            if _bbox_plausibility(
+                BBoxPx(x0=s.box[0], y0=s.box[1], x1=s.box[2], y1=s.box[3]), image_shape
+            )[0]
         ]
     else:
         filtered = list(scores)
@@ -174,7 +177,9 @@ def rank_scores(
     return sorted(filtered, key=key, reverse=True)
 
 
-def selected_is_correct(gt_bbox: BBox, ranked: list[VlmCandidateScore], threshold: float = 0.5) -> bool:
+def selected_is_correct(
+    gt_bbox: BBox, ranked: list[VlmCandidateScore], threshold: float = 0.5
+) -> bool:
     """Whether the top-ranked candidate after reranking matches the GT (evaluation only)."""
     return bool(ranked) and bbox_iou(gt_bbox, ranked[0].box) >= threshold
 

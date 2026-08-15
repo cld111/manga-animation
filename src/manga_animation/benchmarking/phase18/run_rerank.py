@@ -54,6 +54,10 @@ def collect_vlm_scores(
         print(f"resuming from cached VLM scores: {len(cached)} pages")
 
     object_plan = production_object_plan()
+    sample_by_page: dict[str, Any] = {}
+    for sample in manifest.samples:
+        sample_by_page.setdefault(f"{sample.book}_{sample.page_index:03d}", sample)
+
     scores_by_page: dict[str, dict[str, VlmCandidateScore]] = {}
     perf: dict[str, Any] = {
         "vlm_calls": 0,
@@ -82,11 +86,16 @@ def collect_vlm_scores(
                     perf["cached_calls"] += 1
                     continue
                 if image is None:
-                    sample = next(s for s in manifest.samples if s.sample_id.startswith(page_key.split("_", 1)[0]) or f"{s.book}_{s.page_index:03d}" == page_key)
+                    sample = sample_by_page[page_key]
                     image = np.asarray(
                         Image.open(dataset_dir / f"{sample.sample_id}.png").convert("RGB")
                     )
-                raw = vlm_score_candidate(vlm_client, image, object_plan, tuple(box))
+                raw = vlm_score_candidate(
+                    vlm_client,
+                    image,
+                    object_plan,
+                    (box[0], box[1], box[2], box[3]),
+                )
                 scored = VlmCandidateScore(
                     box=raw.box,
                     dino_score=float(det["score"]),
