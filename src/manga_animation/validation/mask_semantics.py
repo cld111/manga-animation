@@ -87,14 +87,25 @@ specific image before answering -- do not assume a defect is present.
 Target object: "{semantic_label}"
 
 Does the bright region show ONLY "{semantic_label}", with nothing else of note included? \
+A correct mask for "{semantic_label}" covers that object and NOTHING else. Manga masks often \
+fail by silently absorbing ADJACENT unrelated content into the same bright region: dialogue \
+or sound-effect text and its speech bubble, a hand or arm, a face or eyes, another \
+character's clothing or body part, or a patch of plain background. Even when the target \
+object genuinely IS present, if the bright region ALSO visibly contains any of these, that \
+is still a bad mask -- the mask must be limited to the target alone, not "mostly the target \
+with some extra stuff". Beware a bright region that looks at first like one solid object but \
+contains an inner contrasting patch (a light bubble outline, dense text lines, a face) -- \
+that inner patch is typically the absorbed extra content.
+
 Answer with ONLY one JSON object, no prose, no markdown fences, in exactly this shape:
 {{"mask_matches_object": true or false, "confidence": a float 0-1, "unexpected_content": \
 ["short label", ...] (empty list if none), "reason": "one short sentence describing what you \
 actually see in the bright region"}}
 
-Only answer false if the bright region visibly, concretely includes something beyond the \
-target object itself -- name exactly what you see in unexpected_content, based on this \
-specific image, not a generic guess."""
+Only answer true if the bright region is limited to "{semantic_label}" alone. If it includes \
+anything else -- text, a bubble, a hand/limb, a face, another object, or background -- answer \
+false and name exactly what in unexpected_content, based on this specific image, not a \
+generic guess."""
 
 
 class _MaskVerificationResponse(BaseModel):
