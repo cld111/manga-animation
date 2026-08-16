@@ -785,8 +785,11 @@ def _run_panel_pipeline(
                 )
     finally:
         q_ground.put(None)
+    # The join timeout is a deadlock guard, not a performance budget: a single VLM
+    # instance describing a 4-panel page takes ~16 min on a T4 (Phase 22: Qwen3-VL-4B
+    # ~4 min/panel), so 10 minutes was hit by a legitimately slow-but-working pipeline.
     for worker in workers:
-        worker.join(timeout=600)
+        worker.join(timeout=7200)
     if any(worker.is_alive() for worker in workers):
         raise RuntimeError("panel pipeline workers failed to terminate")
     if errors:
