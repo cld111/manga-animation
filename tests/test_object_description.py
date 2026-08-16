@@ -86,7 +86,8 @@ def _valid_response(**overrides) -> str:
 
 def _valid_batch_response(n_boxes: int = 1, **overrides) -> str:
     """A batch answer (JSON array, one entry per box_index) for the describe_object(s) path."""
-    return json.dumps([json.loads(_valid_response(box_index=i, **overrides)) for i in range(n_boxes)])
+    entries = [json.loads(_valid_response(box_index=i, **overrides)) for i in range(n_boxes)]
+    return json.dumps(entries)
 
 
 class RecordingVLMClient:

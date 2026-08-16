@@ -411,8 +411,6 @@ def test_run_page_panels_object_description_rejection_keeps_panels_rejected(
     candidate, each panel must stay REJECTED -- never rendered into a PASS by a later
     stage. This is the fail-closed policy of the Phase 18.3 flow.
     """
-    vlm = StageLevelVLMClient()
-
     class RejectingVLM(StageLevelVLMClient):
         def generate(self, image, prompt: str) -> str:
             n_boxes = sum(1 for line in prompt.splitlines() if line.startswith("["))

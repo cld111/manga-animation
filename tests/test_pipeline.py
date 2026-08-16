@@ -24,7 +24,6 @@ from manga_animation.pipeline.orchestrator import (
     DEFAULT_ANIMATION_LABELS,
     PipelineRunResult,
     _candidate_source,
-    build_default_clients,
     run_pipeline,
 )
 from manga_animation.pipeline.panels import run_page_panels
@@ -319,8 +318,6 @@ def config() -> PipelineConfig:
 @pytest.fixture
 def two_panel_page_path(tmp_path: Path) -> Path:
     """A real, detectably-two-panel page (construction style from tests/test_panels.py)."""
-    rng = np.random.default_rng(3)
-
     def noise_block(h: int, w: int, seed: int) -> np.ndarray:
         r = np.random.default_rng(seed)
         return r.integers(0, 255, size=(h, w, 3), dtype=np.uint8)
