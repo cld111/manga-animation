@@ -54,8 +54,15 @@ can be split between them.
   deterministic except for the model's inherent non-determinism.
 - Pre-quantization must happen once per worker/deploy (documented in the run script); the
   fp16 sharded client remains for comparisons and single-GPU fallback.
-- GPU budget: 9.5 GiB (Qwen) + DINO + SAM + LaMa + KV cache on card 0 is tight but fits
-  (verified sizes); a third model family or a larger batch window may need re-tuning.
+- GPU memory split: the VLM instances are run-level resident (ADR 0021), but DINO/SAM/LaMa
+  are STAGE-OWNED instead of co-resident (ADR 0021's original "all models" reading now
+  excludes them): each small model loads when its pipeline worker starts and unloads when
+  the worker finishes. A full int8 Qwen per GPU needs the card's headroom for its KV cache
+  and prefill -- with DINO+SAM+LaMa (2.6 GiB) permanently co-resident on card 0, the real
+  run OOM'd (CUDA out of memory, 356 MiB alloc) on every Qwen call. Stage ownership frees
+  card 0 before Qwen decode: DINO (grounding) finishes and unloads before the first Qwen
+  panel; SAM and LaMa run on panels already described, overlapping Qwen's decode of LATER
+  panels, but they are small and their activation peaks are short.
 
 ## Evidence
 

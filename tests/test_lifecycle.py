@@ -544,10 +544,11 @@ def test_run_pages_co_residency_loads_all_models_up_front_and_unloads_at_the_end
     config: PipelineConfig,
     tmp_path: Path,
 ):
-    """Phase 20 run-level co-residency (ADR 0021): every model with pending work is loaded
-    TOGETHER before the first stage call, stays resident across ALL stages, and is released
-    exactly once, only after the last stage -- never a stage-by-stage load/unload cycle
-    (ADR 0020's sequential scheme)."""
+    """Phase 20/22 residency split (ADR 0021 + 0023): the VLM instance is run-level
+    co-resident -- loaded before the first stage call, released once at the end. DINO/SAM/
+    LaMa are stage-owned instead: each loads when its stage's worker starts and unloads
+    when the stage finishes, so a full int8 Qwen keeps the card's headroom for KV cache
+    and prefill (the real OOM this split fixes)."""
     events: list[str] = []
 
     class LoggedGrounding(CountingGroundingClient):
@@ -620,22 +621,22 @@ def test_run_pages_co_residency_loads_all_models_up_front_and_unloads_at_the_end
     assert segmentation.load_calls == 1 and segmentation.unload_calls == 1
     assert reconstruction.load_calls == 1 and reconstruction.unload_calls == 1
 
-    # Co-residency ordering: all loads happen BEFORE the first stage call, and all unloads
-    # happen AFTER the last stage call -- no mid-run load/unload cycles between stages.
-    first_detect = events.index("detect")
-    for load_event in ("load:dino", "load:sam", "load:lama"):
-        assert events.index(load_event) < first_detect
-    last_stage_call = max(
-        events.index("generate:4"), events.index("inpaint"), events.index("segment")
-    )
-    for unload_event in ("unload:dino", "unload:sam", "unload:lama"):
-        assert events.index(unload_event) > last_stage_call
-    # Unloads unwind in LIFO order (ExitStack: last entered, first exited), and nothing
-    # loads again after the run.
-    assert events.index("unload:lama") == len(events) - 3
-    assert events.index("unload:sam") == len(events) - 2
-    assert events.index("unload:dino") == len(events) - 1
-    assert "load:" not in events[len(events) - 3 :]
+    # VLM run-level residency: the real client's load() happens in the run-level
+    # ModelStage BEFORE the pipeline starts (the fake lazy-loads in generate()).
+    assert events.index("generate:1") > events.index("detect")
+
+    # DINO: stage-owned -- loads before its first detect, unloads after its last detect.
+    assert events.index("load:dino") < events.index("detect")
+    last_detect = max(i for i, e in enumerate(events) if e == "detect")
+    assert events.index("unload:dino") > last_detect
+    # SAM and LaMa are stage-owned too: each loads before its first call and unloads
+    # after its last call, not before it ever started.
+    assert events.index("load:sam") < events.index("segment")
+    assert events.index("load:lama") < events.index("inpaint")
+    last_segment = max(i for i, e in enumerate(events) if e == "segment")
+    last_inpaint = max(i for i, e in enumerate(events) if e == "inpaint")
+    assert events.index("unload:sam") > last_segment
+    assert events.index("unload:lama") > last_inpaint
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")

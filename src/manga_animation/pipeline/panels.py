@@ -585,6 +585,8 @@ def _pipeline_worker(
     *,
     end_expected: int = 1,
     end_sent: int = 1,
+    owned_client: object | None = None,
+    owned_name: str | None = None,
 ) -> None:
     """One pipeline stage's worker: pull tokens from `in_q`, process the ones that still
     need this stage, forward the survivors to `out_q`. `None` is the shutdown sentinel.
@@ -596,9 +598,15 @@ def _pipeline_worker(
     many sentinels it emits on shutdown (N when N consumers wait on `out_q`). The upstream
     stage emits one sentinel PER downstream consumer. Any worker failure is recorded and
     still emits its sentinels, so no worker can deadlock waiting on a queue whose producer
-    died."""
-    ended = 0
-    try:
+    died.
+
+    `owned_client` gives the worker stage-level residency for the NON-Qwen models (Phase 22
+    memory split): DINO/SAM/LaMa load when their worker starts and unload when it finishes,
+    so the GPU0 Qwen instance is NOT permanently joined by 2.6 GiB of small models -- a full
+    int8 Qwen + KV cache + prefill does not fit with them co-resident (real OOM on the
+    worker). The VLM instances stay run-level resident (ADR 0021)."""
+    def run_loop() -> None:
+        ended = 0
         while ended < end_expected:
             token = in_q.get()
             if token is None:
@@ -609,6 +617,13 @@ def _pipeline_worker(
                     continue  # panel failed at this stage -- it leaves the pipeline
             if out_q is not None:
                 out_q.put(token)
+
+    try:
+        if owned_client is not None:
+            with ModelStage(owned_client, name=owned_name or f"stage-{stage}"):
+                run_loop()
+        else:
+            run_loop()
     except BaseException as exc:  # noqa: BLE001 -- worker-level failure (not panel-level)
         errors.append(exc)
     finally:
@@ -626,6 +641,9 @@ def _run_panel_pipeline(
     vlm_client: VLMClient | Sequence[VLMClient],
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient,
+    need_dino: bool,
+    need_qwen: bool,
+    need_sam: bool,
 ) -> None:
     """Run the five-stage concurrent panel pipeline over every eligible panel.
 
@@ -637,6 +655,11 @@ def _run_panel_pipeline(
     queue, so panels are split between the GPUs. Per-panel results are identical to the
     sequential scheme regardless of which worker processed a panel: each worker computes
     the same per-panel stage function, and checkpoints are written per panel.
+
+    Memory split (Phase 22): the VLM instances are run-level resident (ADR 0021); the
+    smaller models (DINO/SAM/LaMa) are stage-owned -- loaded when their worker starts,
+    unloaded when it finishes -- so a full int8 Qwen + KV cache + prefill is not joined by
+    2.6 GiB of permanently resident small models on the same card (a real OOM otherwise).
     """
     vlm_clients = list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
     n_desc = len(vlm_clients)
@@ -662,7 +685,11 @@ def _run_panel_pipeline(
                 ),
                 errors,
             ),
-            kwargs={"end_sent": n_desc},  # one sentinel per description worker
+            kwargs={
+                "end_sent": n_desc,  # one sentinel per description worker
+                "owned_client": grounding_client if need_dino else None,
+                "owned_name": "grounding",
+            },
             name="pipeline-grounding",
             daemon=True,
         ),
@@ -702,7 +729,11 @@ def _run_panel_pipeline(
                     ),
                     errors,
                 ),
-                kwargs={"end_expected": n_desc},  # every description worker terminates us
+                kwargs={
+                    "end_expected": n_desc,  # every description worker terminates us
+                    "owned_client": segmentation_client if need_sam else None,
+                    "owned_name": "segmentation",
+                },
                 name="pipeline-segmentation",
                 daemon=True,
             ),
@@ -719,6 +750,10 @@ def _run_panel_pipeline(
                     ),
                     errors,
                 ),
+                kwargs={
+                    "owned_client": reconstruction_client,
+                    "owned_name": "reconstruction",
+                },
                 name="pipeline-plan-animate-reconstruct",
                 daemon=True,
             ),
@@ -836,15 +871,15 @@ def run_pages(
     need_sam = any(start <= 2 for start in starts)
 
     # -------------------------------------------------------------------------------------
-    # Phase 20 run-level co-residency: every model with pending work loads ONCE, up front,
-    # and stays resident until the entire run ends (ADR 0021). ExitStack exits unwind on
-    # completion AND on exception, so a failed run still deterministically releases every
-    # loaded model. LaMa always has work: even fully checkpointed pages still re-render
-    # (the CV animation/reconstruction stages re-run on every invocation).
+    # Phase 20/22 residency: the VLM instances are run-level co-resident (ADR 0021) --
+    # loaded together, resident for the whole run, released together at the end. DINO/SAM/
+    # LaMa are stage-owned instead (loaded in their worker, unloaded when its stage
+    # finishes): a full int8 Qwen per GPU needs the card's headroom for its KV cache and
+    # prefill, and 2.6 GiB of permanently resident small models OOM'd the card (real OOM
+    # on the worker). ExitStack exits unwind on completion AND on exception, so a failed
+    # run still deterministically releases the VLM instances.
     # -------------------------------------------------------------------------------------
     with ExitStack() as residency:
-        if need_dino:
-            residency.enter_context(ModelStage(grounding_client, name="grounding"))
         if need_qwen:
             vlm_clients = (
                 list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
@@ -853,14 +888,12 @@ def run_pages(
                 residency.enter_context(
                     ModelStage(vlm, name=f"object_description_{index}")
                 )
-        if need_sam:
-            residency.enter_context(ModelStage(segmentation_client, name="segmentation"))
-        residency.enter_context(ModelStage(reconstruction_client, name="reconstruction"))
 
         # ---------------------------------------------------------------------------------
-        # The concurrent panel pipeline: five stages, one worker thread each, bounded
-        # queues between them (Phase 21, ADR 0022). No stage barrier: each panel moves
-        # forward as soon as the previous stage produced its result.
+        # The concurrent panel pipeline: five stages, bounded queues between them (Phase
+        # 21, ADR 0022). No stage barrier: each panel moves forward as soon as the
+        # previous stage produced its result. The description stage is a worker pool of
+        # one int8 Qwen per GPU (Phase 22, ADR 0023).
         # ---------------------------------------------------------------------------------
         _run_panel_pipeline(
             states,
@@ -870,6 +903,9 @@ def run_pages(
             vlm_client=vlm_client,
             segmentation_client=segmentation_client,
             reconstruction_client=reconstruction_client,
+            need_dino=need_dino,
+            need_qwen=need_qwen,
+            need_sam=need_sam,
         )
 
     _write_all_manifests(states)
