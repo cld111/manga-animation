@@ -26,7 +26,7 @@ from manga_animation.core.config import PipelineConfig
 from manga_animation.grounding.client import Detection
 from manga_animation.pipeline.lifecycle import ModelStage
 from manga_animation.pipeline.orchestrator import DEFAULT_ANIMATION_LABELS
-from manga_animation.pipeline.panels import run_page_panels
+from manga_animation.pipeline.panels import run_page_panels, run_pages
 from manga_animation.segmentation.client import MaskCandidate
 
 pytestmark = pytest.mark.filterwarnings("ignore")
@@ -482,3 +482,214 @@ def test_run_page_panels_unexpected_stage_exception_isolates_to_that_panel(
     assert grounding.detect_calls == 1 + len(DEFAULT_ANIMATION_LABELS)
     assert grounding.load_calls == 1
     assert grounding.unload_calls == 1
+
+
+@pytest.fixture
+def two_panel_page_path_2(tmp_path: Path) -> Path:
+    page = np.full((900, 300, 3), 255, dtype=np.uint8)
+    page[0:300, 0:300] = _noise_block(300, 300, seed=31)
+    page[500:900, 0:300] = _noise_block(400, 300, seed=32)
+    path = tmp_path / "two_panel_page_2.png"
+    Image.fromarray(page).save(path)
+    return path
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_batch_loads_each_model_once_for_all_pages(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 18.4 batch residency: `run_pages` processes MANY pages with one model
+    residency across ALL of them -- grounding, then object description, then segmentation,
+    then reconstruction each load exactly ONCE, never once per page."""
+    grounding = CountingGroundingClient()
+    segmentation = CountingSegmentationClient()
+    reconstruction = CountingReconstructionClient()
+    vlm = StageLevelVLMClient()
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=grounding,
+        segmentation_client=segmentation,
+        reconstruction_client=reconstruction,
+        out_dir=tmp_path / "videos",
+    )
+
+    assert len(results) == 2
+    for result in results:
+        assert all(panel.status == "PASS" for panel in result.panels)
+        assert result.manifest_path.exists()
+    # One load/unload per model for the WHOLE batch (stage-level residency across pages),
+    # not per page.
+    assert grounding.load_calls == 1
+    assert grounding.unload_calls == 1
+    assert segmentation.load_calls == 1
+    assert segmentation.unload_calls == 1
+    assert reconstruction.load_calls == 1
+    assert reconstruction.unload_calls == 1
+    # The VLM's one stage stays one residency too.
+    assert vlm.unload_calls == 1
+    # Every panel of every page was grounded (4 panels, 2 pages x 2).
+    assert grounding.detect_calls == 4 * len(DEFAULT_ANIMATION_LABELS)
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """A page that detects nothing at grounding must fail only its own panels (REJECTED);
+    the other page still renders, and each model still loaded exactly once."""
+    n_labels = len(DEFAULT_ANIMATION_LABELS)
+    grounding = CountingGroundingClient(fail_first_n=2 * n_labels)
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=StageLevelVLMClient(),
+        grounding_client=grounding,
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert [panel.status for panel in results[0].panels] == ["REJECTED", "REJECTED"]
+    assert [panel.status for panel in results[1].panels] == ["PASS", "PASS"]
+    assert results[0].panels[0].failure_stage == "object_description"
+    assert grounding.load_calls == 1
+    assert grounding.unload_calls == 1
+
+
+# --- Phase 18.4 per-stage disk persistence -----------------------------------------------
+
+
+class NeverLoadedSegmentationClient(CountingSegmentationClient):
+    """Fails the test if SAM is ever loaded -- used to prove stage resume skips the model."""
+
+    def load(self) -> None:
+        raise AssertionError("SAM must not load when the segmentation stage is resumed")
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_resumes_from_disk_checkpoints_without_loading_completed_models(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 18.4 disk persistence: after a full `run_pages` pass, a second invocation on the
+    same pages loads grounding.json / descriptions.json / segmentation.json and does NOT load
+    DINO, Qwen or SAM again -- only the CV/LaMa/render work is re-done."""
+    out_dir = tmp_path / "videos"
+    grounding = CountingGroundingClient()
+    segmentation = CountingSegmentationClient()
+    reconstruction = CountingReconstructionClient()
+    vlm = StageLevelVLMClient()
+
+    first = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=grounding,
+        segmentation_client=segmentation,
+        reconstruction_client=reconstruction,
+        out_dir=out_dir,
+    )
+    assert all(p.status == "PASS" for result in first for p in result.panels)
+
+    # Checkpoints exist on disk for every page.
+    for result in first:
+        page_dir = result.manifest_path.parent
+        assert (page_dir / "grounding.json").exists()
+        assert (page_dir / "descriptions.json").exists()
+        assert (page_dir / "segmentation.json").exists()
+        assert any((page_dir / "segmentation").glob("*.npz"))
+
+    # Second run on the same pages + same out_dir: every model-backed stage is restored
+    # from disk; the clients must never load.
+    class AssertiveGrounding(CountingGroundingClient):
+        def load(self) -> None:
+            raise AssertionError("DINO must not load when grounding is resumed")
+
+    class AssertiveVLM(StageLevelVLMClient):
+        def unload(self) -> None:
+            pass  # allow teardown
+
+        def generate(self, image, prompt: str) -> str:
+            raise AssertionError("Qwen must not generate when descriptions are resumed")
+
+    second = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=AssertiveVLM(),
+        grounding_client=AssertiveGrounding(),
+        segmentation_client=NeverLoadedSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=out_dir,
+    )
+    assert all(p.status == "PASS" for result in second for p in result.panels)
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_partial_checkpoint_resumes_after_grounding_only(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """A killed run leaves only the grounding checkpoint: the next invocation must skip DINO
+    (grounding restored from disk) but still run Qwen/SAM -- proving per-stage resume, not
+    just full-run checkpointing."""
+    out_dir = tmp_path / "videos"
+    page_dir = out_dir / two_panel_page_path.stem
+
+    # Simulate a run that completed ONLY the grounding stage: copy the checkpoint files a
+    # first (fake) full run produced, then delete the later checkpoints.
+    grounding = CountingGroundingClient()
+    first = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=StageLevelVLMClient(),
+        grounding_client=grounding,
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=out_dir,
+    )
+    for result in first:
+        page_dir = result.manifest_path.parent
+        (page_dir / "descriptions.json").unlink()
+        for f in (page_dir / "segmentation").glob("*.npz"):
+            f.unlink()
+        (page_dir / "segmentation.json").unlink()
+
+    class AssertiveGrounding(CountingGroundingClient):
+        def load(self) -> None:
+            raise AssertionError("DINO must not load: grounding is already checkpointed")
+
+    class CountedVLM(StageLevelVLMClient):
+        def __init__(self):
+            super().__init__()
+            self.generate_calls = 0
+
+        def generate(self, image, prompt: str) -> str:
+            self.generate_calls += 1
+            return super().generate(image, prompt)
+
+    vlm = CountedVLM()
+    second = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=AssertiveGrounding(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=out_dir,
+    )
+    assert all(p.status == "PASS" for result in second for p in result.panels)
+    # Qwen ran once per panel (4 panels) -- grounding was skipped but description was not.
+    assert vlm.generate_calls == 4
