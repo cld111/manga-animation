@@ -538,6 +538,222 @@ def test_run_pages_batch_loads_each_model_once_for_all_pages(
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_co_residency_loads_all_models_up_front_and_unloads_at_the_end(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 20/22 residency split (ADR 0021 + 0023): the VLM instance is run-level
+    co-resident -- loaded before the first stage call, released once at the end. DINO/SAM/
+    LaMa are stage-owned instead: each loads when its stage's worker starts and unloads
+    when the stage finishes, so a full int8 Qwen keeps the card's headroom for KV cache
+    and prefill (the real OOM this split fixes)."""
+    events: list[str] = []
+
+    class LoggedGrounding(CountingGroundingClient):
+        def load(self) -> None:
+            events.append("load:dino")
+            super().load()
+
+        def detect(self, image, text_prompt: str) -> list[Detection]:
+            events.append("detect")
+            return super().detect(image, text_prompt)
+
+        def unload(self) -> None:
+            events.append("unload:dino")
+            super().unload()
+
+    class LoggedSegmentation(CountingSegmentationClient):
+        def load(self) -> None:
+            events.append("load:sam")
+            super().load()
+
+        def segment(self, image, box) -> list[MaskCandidate]:
+            events.append("segment")
+            return super().segment(image, box)
+
+        def unload(self) -> None:
+            events.append("unload:sam")
+            super().unload()
+
+    class LoggedReconstruction(CountingReconstructionClient):
+        def load(self) -> None:
+            events.append("load:lama")
+            super().load()
+
+        def inpaint(self, image, hole_mask):
+            events.append("inpaint")
+            return super().inpaint(image, hole_mask)
+
+        def unload(self) -> None:
+            events.append("unload:lama")
+            super().unload()
+
+    class LoggedVLM(StageLevelVLMClient):
+        def __init__(self):
+            super().__init__()
+            self._n = 0
+
+        def generate(self, image, prompt: str) -> str:
+            self._n += 1
+            events.append(f"generate:{self._n}")
+            return super().generate(image, prompt)
+
+    grounding = LoggedGrounding()
+    segmentation = LoggedSegmentation()
+    reconstruction = LoggedReconstruction()
+    vlm = LoggedVLM()
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=grounding,
+        segmentation_client=segmentation,
+        reconstruction_client=reconstruction,
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+
+    # Every model loaded once for the whole run, released exactly once.
+    assert grounding.load_calls == 1 and grounding.unload_calls == 1
+    assert segmentation.load_calls == 1 and segmentation.unload_calls == 1
+    assert reconstruction.load_calls == 1 and reconstruction.unload_calls == 1
+
+    # VLM run-level residency: the real client's load() happens in the run-level
+    # ModelStage BEFORE the pipeline starts (the fake lazy-loads in generate()).
+    assert events.index("generate:1") > events.index("detect")
+
+    # DINO: stage-owned -- loads before its first detect, unloads after its last detect.
+    assert events.index("load:dino") < events.index("detect")
+    last_detect = max(i for i, e in enumerate(events) if e == "detect")
+    assert events.index("unload:dino") > last_detect
+    # SAM and LaMa are stage-owned too: each loads before its first call and unloads
+    # after its last call, not before it ever started.
+    assert events.index("load:sam") < events.index("segment")
+    assert events.index("load:lama") < events.index("inpaint")
+    last_segment = max(i for i, e in enumerate(events) if e == "segment")
+    last_inpaint = max(i for i, e in enumerate(events) if e == "inpaint")
+    assert events.index("unload:sam") > last_segment
+    assert events.index("unload:lama") > last_inpaint
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_pipelines_panels_without_stage_barriers(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 21 panel pipeline: a panel moves to the next model as soon as the previous
+    stage produced ITS result -- there is no stage barrier. DINO must still be working on
+    panel 2 while Qwen is already describing panel 1: the pipeline gates DINO's second
+    panel behind an event that only Qwen's first generate() sets."""
+    import threading
+
+    qwen_started = threading.Event()
+    n_labels = len(DEFAULT_ANIMATION_LABELS)
+
+    class GatedGrounding(CountingGroundingClient):
+        def detect(self, image, text_prompt: str) -> list[Detection]:
+            if self.detect_calls >= n_labels and not qwen_started.is_set():
+                # Panel 2 is being grounded while Qwen has not yet started panel 1 -- a
+                # stage barrier would let DINO finish everything first. Wait for Qwen.
+                if not qwen_started.wait(timeout=30):
+                    raise AssertionError(
+                        "Qwen never started before DINO finished panel 1: stage barrier"
+                    )
+            return super().detect(image, text_prompt)
+
+    class SignalingVLM(StageLevelVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            qwen_started.set()  # Qwen began describing panel 1
+            return super().generate(image, prompt)
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=SignalingVLM(),
+        grounding_client=GatedGrounding(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+    assert qwen_started.is_set()
+    # The pipeline completed despite DINO's gate, proving overlap happened (and the gated
+    # client would have deadlocked under the old sequential scheme).
+    assert sum(r.manifest_path.exists() for r in results) == 2
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_vlm_worker_pool_splits_panels_across_instances(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 22 (ADR 0023): the object-description stage accepts a POOL of VLM clients (one
+    int8 Qwen per GPU). Every panel must still be described exactly once -- the 4 panels are
+    split between the 2 instances, each instance answers only the panels it actually got."""
+    class PooledVLM(StageLevelVLMClient):
+        def __init__(self, name: str):
+            super().__init__()
+            self.name = name
+            self.generate_calls = 0
+
+        def generate(self, image, prompt: str) -> str:
+            self.generate_calls += 1
+            return super().generate(image, prompt)
+
+    vlm_a, vlm_b = PooledVLM("a"), PooledVLM("b")
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=[vlm_a, vlm_b],
+        grounding_client=CountingGroundingClient(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+    # Every panel was described exactly once, split between the two instances.
+    assert vlm_a.generate_calls + vlm_b.generate_calls == 4
+    assert vlm_a.generate_calls >= 1 and vlm_b.generate_calls >= 1
+    # Both instances were torn down by the run-level ModelStages.
+    assert vlm_a.unload_calls == 1 and vlm_b.unload_calls == 1
+
+
+def test_build_default_clients_qwen3_vl_4b_returns_one_instance_per_device(
+    tmp_path: Path,
+):
+    """Phase 22 A/B: the fp16 `qwen3-vl-4b` candidate is built as ONE `Qwen3VLClient` per
+    CUDA device (device_map={"": "cuda:N"}), not a single device_map="auto" sharded model --
+    mirroring the int8 per-GPU scheme (ADR 0023). On a CPU-only machine this resolves to a
+    single instance pinned to "cpu"."""
+    from manga_animation.analysis import Qwen3VLClient
+    from manga_animation.core.config import load_config
+    from manga_animation.pipeline.orchestrator import build_default_clients
+
+    config = load_config(
+        "local",
+        config_dir=Path(__file__).resolve().parents[1] / "configs",
+        overrides={
+            "model_variants": {"vlm": "qwen3-vl-4b"},
+            "device": "cpu",
+        },
+    )
+    vlm, _, _, _ = build_default_clients(config)
+    clients = list(vlm)
+    assert clients, "qwen3-vl-4b must produce at least one VLM instance"
+    assert all(isinstance(c, Qwen3VLClient) for c in clients)
+    if config.resolve_device() == "cpu":
+        assert len(clients) == 1
+        assert clients[0].device == "cpu"
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
 def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
     two_panel_page_path: Path,
     two_panel_page_path_2: Path,
@@ -644,7 +860,9 @@ def test_run_pages_partial_checkpoint_resumes_after_grounding_only(
 ):
     """A killed run leaves only the grounding checkpoint: the next invocation must skip DINO
     (grounding restored from disk) but still run Qwen/SAM -- proving per-stage resume, not
-    just full-run checkpointing."""
+    just full-run checkpointing. The manifest is removed together with the later
+    checkpoints: a PASS manifest entry means the panel is fully done (Phase 21 reuse), so
+    the test must not rely on it to fake a partial state."""
     out_dir = tmp_path / "videos"
     page_dir = out_dir / two_panel_page_path.stem
 
@@ -666,6 +884,7 @@ def test_run_pages_partial_checkpoint_resumes_after_grounding_only(
         for f in (page_dir / "segmentation").glob("*.npz"):
             f.unlink()
         (page_dir / "segmentation.json").unlink()
+        (page_dir / "page_manifest.json").unlink()
 
     class AssertiveGrounding(CountingGroundingClient):
         def load(self) -> None:

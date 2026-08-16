@@ -28,12 +28,15 @@ page -> deterministic panel detection -> bounded scene crops
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
   its own scene crop, independent stages, output video or explicit status, and a page manifest.
   It is the single-page wrapper over the Phase 18.4 batch entry point `run_pages`, which
-  processes MANY pages with one model residency per stage ACROSS pages: each model loads ONCE,
-  processes every eligible panel of every page (saving results per page), then releases --
-  never a per-page load/unload cycle. Each model stage persists its outputs to disk before
-  release (`grounding.json`, `descriptions.json`, `segmentation.json` + mask `.npz` per page),
-  and a later invocation loads completed stages from disk without re-loading their models
-  (a killed session resumes from the last completed stage).
+  processes MANY pages in one call. Phase 20 gives `run_pages` run-level model co-residency
+  (ADR 0021): every model with pending work (DINO, Qwen3-VL, SAM 2.1, LaMa) loads TOGETHER
+  at the start and stays resident until the run ends -- no stage-by-stage load/unload cycle.
+  Phase 21 executes the stages as a concurrent panel pipeline (ADR 0022): five workers pass
+  panels through bounded queues, so a panel moves to the next model as soon as the previous
+  stage produced its result (no stage barrier). Each model stage persists its outputs to disk
+  per panel (`grounding.json`, `descriptions.json`, `segmentation.json` + mask `.npz` per
+  page), and a later invocation loads completed stages from disk without loading their models
+  at all (a killed session resumes from the last completed stage, per panel).
 - `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
   is bounded by page edges and nearby panel geometry.
 - Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result
@@ -43,8 +46,10 @@ page -> deterministic panel detection -> bounded scene crops
   before segmentation.
 - `segmentation` produces a full-source-image `uint8` mask and applies coverage and asymmetric
   edge-touch safety checks.
-- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen2.5-VL sees the FULL
-  image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
+- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. A per-panel Qwen call
+  (one call per panel with all its grounded candidates' bboxes in crop-local coordinates) is
+  the production path: Qwen3-VL-4B fp16 (Phase 22 A/B, see `phase22-ab-test.md`) sees the FULL
+  panel plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
   crop, never the mask), reads the ACTION happening in the scene, judges each candidate
   (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
   description whose deterministically-mapped `MotionSpec` drives the animation stage (with the
@@ -72,7 +77,7 @@ The baseline in `configs/default.yaml` is:
 | Setting | Current value |
 |---|---|
 | Analysis mode default | `run_pipeline(..., analysis_mode="panel")` |
-| VLM | `qwen2.5-vl-7b-instruct` |
+| VLM | `qwen3-vl-4b` fp16, one instance per GPU (worker pool, ADR 0023) |
 | Grounding | `grounding-dino-swin-l` |
 | Segmentation | `sam2.1-hiera-base` |
 | Inpainting | `lama-large` |
@@ -103,12 +108,17 @@ conclusion. Candidates without implemented adapters remain research entries.
   inherited automatically; each animated object needs its own motion spec.
 - Model-backed stages release their clients after the stage, including grounding, the VLM
   object-description stage, segmentation, and reconstruction.
-- GPU model lifecycle is stage-level (Phase 14, ADR 0020): each model-backed stage loads its
-  client once, processes every eligible panel, then deterministically releases it before the
-  next stage loads its own model. Models never co-reside, and a failed panel can no longer
-  leave a model resident to poison later panels. The VLM's `device_map="auto"` client is
-  released with `gc.collect()` before the caching-allocator flush -- the phase-14 root cause
-  of cross-panel CUDA OOM.
+- GPU model lifecycle is run-level (Phase 20, ADR 0021, superseding Phase 14/ADR 0020's
+  stage-level scheme): every model with pending work loads once, together, at the start of
+  `run_pages` and stays resident until the run ends; all models are deterministically
+  released together via `ModelStage`/`ExitStack` on success and on exception. A failed panel
+  can no longer leave a model resident to poison later panels. The VLM's `device_map="auto"`
+  client is released with `gc.collect()` before the caching-allocator flush -- the phase-14
+  root cause of cross-panel CUDA OOM. Resume skips loading any fully checkpointed model.
+- Stage execution is a concurrent panel pipeline (Phase 21, ADR 0022): five single-threaded
+  workers (DINO -> Qwen -> SAM -> plan/LaMa -> render) connected by bounded queues; each
+  worker calls only its own client, a panel advances as soon as the previous stage produced
+  its result, and per-panel results are identical to the sequential scheme (FIFO order).
 - `PipelineConfig.resolution` changes VLM analysis resizing only; downstream CV uses source
   geometry. `dtype` describes the VLM; verified grounding/segmentation clients use `float32`.
 - Crossfade frames remain zero, and `h264` is the only supported output codec.
@@ -189,6 +199,17 @@ conclusion. Candidates without implemented adapters remain research entries.
   Case A (candidate exists, ranking is the problem): next step is candidate selection /
   reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
   grounding-scale floor, not fixable by a selector.
+- Phase 20-22 VLM migration and the Phase 22 A/B test (docs/phase22-ab-test.md):
+  Qwen3-VL-8B fp16 sharded (Phase 20/21, ADR 0021/0022) and per-GPU int8 (Phase 22,
+  ADR 0023) both ran on `wind_breaker_sprint` (1222s and 1818s respectively). The A/B test on
+  Qwen3-VL-4B fp16 measured panel-mode (A) at 1015.7s with 3/4 PASS panels vs. full-page
+  single-call mode (B) at 1581.8s with 4/4 REJECTED (the model's single JSON covered only 10
+  of 52 boxes -> unparseable -> fail-closed). Conclusion: per-panel VLM calls remain the
+  production default; full-page single-call description is not viable at 52 candidates on a T4.
+  The runtime default is now `qwen3-vl-4b` fp16 (one instance per CUDA device, worker pool,
+  ADR 0023): a 2xT4 panel-mode run on `wind_breaker_sprint` finished in 601.6s with 3/4 PASS
+  panels -- ~1.7x faster than the single-instance A-mode and faster than 8B fp16 (1222s) or
+  int8 (1818s).
 
 ## Known Limitations and Technical Debt
 
@@ -357,4 +378,5 @@ changes move between local and remote only through git.
   description) evidence in [`phase18.3-results.md`](phase18.3-results.md) and the full work
   report in [`phase18.3-report.md`](phase18.3-report.md). Phase 18.4 (batch ordering
   DINO -> Qwen -> SAM, per-stage disk persistence, GPU/CPU profiling) in
-  [`phase18.4-results.md`](phase18.4-results.md).
+  [`phase18.4-results.md`](phase18.4-results.md). Phase 22 A/B (panel vs. full-page VLM
+  description) in [`phase22-ab-test.md`](phase22-ab-test.md).

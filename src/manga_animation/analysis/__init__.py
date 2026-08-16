@@ -7,7 +7,12 @@ client's methods (see `client.py`'s docstring) -- `plan_builder` is fully unit-t
 fake client.
 """
 
-from manga_animation.analysis.client import Qwen25VLClient, VLMClient
+from manga_animation.analysis.client import (
+    Qwen3VLClient,
+    Qwen3VLInt8Client,
+    Qwen25VLClient,
+    VLMClient,
+)
 from manga_animation.analysis.panels import derive_scene_crop_bbox, detect_panels
 from manga_animation.analysis.plan_builder import (
     ANALYSIS_PROMPT,
@@ -19,6 +24,8 @@ from manga_animation.analysis.plan_builder import (
 __all__ = [
     "ANALYSIS_PROMPT",
     "Qwen25VLClient",
+    "Qwen3VLClient",
+    "Qwen3VLInt8Client",
     "VLMClient",
     "analyze_page",
     "analyze_page_panels",

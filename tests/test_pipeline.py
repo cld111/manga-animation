@@ -681,7 +681,7 @@ def test_run_page_panels_processes_each_panel_with_one_vlm_residency(
 
 
 def test_candidate_source_resolves_from_manifest():
-    config = PipelineConfig(model_variants={"vlm": "qwen2.5-vl-7b-instruct"})
+    config = PipelineConfig(model_variants={"vlm": "qwen3-vl-8b"})
     assert "qwen" in _candidate_source("vlm", config).lower()
 
 

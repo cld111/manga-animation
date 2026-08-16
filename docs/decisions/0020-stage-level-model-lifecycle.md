@@ -1,6 +1,8 @@
 # ADR 0020: Stage-Level Model Lifecycle
 
-Status: Accepted
+Status: Superseded by [ADR 0021](0021-run-level-model-co-residency.md) for run residency
+scope; the `ModelStage` deterministic release mechanism this ADR introduced remains the
+production release path.
 
 ## Context
 

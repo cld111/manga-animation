@@ -7,18 +7,41 @@
 # runtime baseline; candidates without a production adapter must not be selected silently.
 
 vlm:
+  - id: qwen3-vl-8b-int8
+    source: "Qwen/Qwen3-VL-8B-Instruct" # Hugging Face repo id (fp16); int8 pre-quantized at deploy
+    license: qwen-license
+    params: 8B (int8, ~9.5 GiB/card)
+    notes: >
+      Phase 22 runtime VLM. One bitsandbytes int8 instance per GPU (ADR 0023): each card
+      runs its own copy, panels are split between them by a parallel description worker
+      pool -- no device_map="auto" sharding, no cross-GPU token traffic. The weights are
+      pre-quantized once to the bnb int8 layout before the run (fp16 materialization
+      OOMs a single T4); loading the pre-quantized safetensors takes ~3 s.
+  - id: qwen3-vl-8b
+    source: "Qwen/Qwen3-VL-8B-Instruct" # Hugging Face repo id
+    license: qwen-license
+    params: 8B
+    notes: >
+      Phase 20 runtime VLM: fp16 sharded across 2xT4 via device_map="auto" (one model,
+      two cards). Kept as the comparison baseline for the Phase 22 per-GPU int8 scheme.
+  - id: qwen3-vl-4b
+    source: "Qwen/Qwen3-VL-4B-Instruct" # Hugging Face repo id
+    license: qwen-license
+    params: 4B
+    notes: >
+      Phase 22 runtime VLM (default). fp16 (~8.5 GiB) fits a single T4, so it runs as ONE
+      instance per GPU (device_map={"": "cuda:N"}, ADR 0023 per-GPU scheme): panels split
+      between the cards by the description worker pool, no device_map="auto" sharding.
+      Measured on wind_breaker_sprint: 601.6s panel mode (2xT4 pool), 3/4 PASS -- faster than
+      Qwen3-VL-8B fp16 (1222s) and int8 (1818s). See docs/phase22-ab-test.md.
   - id: qwen2.5-vl-7b-instruct
     source: "Qwen/Qwen2.5-VL-7B-Instruct" # Hugging Face repo id
     license: qwen-license
     params: 7B
     notes: >
       Strong OCR (OCRBench ~888) — manga pages are text-dense. Fits comfortably on a
-      T4/L4 at this size.
-  - id: qwen3-vl-small
-    source: "Qwen/Qwen3-VL" # exact small-variant repo id to confirm at integration time
-    license: qwen-license
-    params: sub-10B (variant TBD)
-    notes: Newer generation than 2.5-VL; benchmark head-to-head rather than assuming it wins.
+      T4/L4 at this size. Phase 20 replaces it as the runtime default, kept as a
+      historical/benchmark candidate.
   - id: internvl3-8b
     source: "OpenGVLab/InternVL3-8B"
     license: MIT

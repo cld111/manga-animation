@@ -5,7 +5,7 @@ per-candidate object-description stage, which now runs BEFORE segmentation. Ther
 analysis stage (no Qwen-driven AnimationPlan up front), no crop-based VLM validation, and
 no mask-semantics VLM gate:
 
-    grounding (DINO, labels from the caller) -> object_description (Qwen2.5-VL: FULL image
+    grounding (DINO, labels from the caller) -> object_description (Qwen3-VL: FULL image
     + bbox pixel coordinates -> structured description; fail-closed) -> segmentation (SAM2,
     ONLY for accepted bboxes, masks kept for animation) -> animation planning
     (deterministic ranking and MotionSpec mapping + transform-geometry gate) -> animation
@@ -13,9 +13,10 @@ no mask-semantics VLM gate:
     loop metrics)
 
 Candidate labels are supplied by the caller (or the documented default list): the pipeline
-no longer invents them with a VLM. Every model family is loaded once per stage
-(`ModelStage`, ADR 0020); Qwen is resident during ONE stage (object_description) and
-processes every candidate of every panel there -- never again.
+no longer invents them with a VLM. Every model family is loaded once for the WHOLE run and
+stays co-resident until it finishes (`ModelStage` run-level scope, ADR 0021); Qwen is
+resident from the start and processes every candidate of every panel at its one stage --
+never again.
 
 A candidate that fails a deterministic or model gate is dropped (logged); if NO candidate is
 accepted, the run fails with stage="object_description" (fail closed, never an unvalidated
@@ -37,7 +38,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from manga_animation.analysis import Qwen25VLClient, VLMClient
+from manga_animation.analysis import Qwen3VLClient, Qwen3VLInt8Client, VLMClient
 from manga_animation.animation import generate_transformed_layer
 from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame_stack
@@ -270,7 +271,7 @@ def _candidate_source(stage: str, config: PipelineConfig) -> str:
 
 _RUNTIME_CANDIDATES: dict[str, set[str]] = {
     # Manifest entries without a production client remain benchmark candidates.
-    "vlm": {"qwen2.5-vl-7b-instruct"},
+    "vlm": {"qwen3-vl-8b-int8", "qwen3-vl-8b", "qwen3-vl-4b", "qwen2.5-vl-7b-instruct"},
     "grounding": {"grounding-dino-swin-l"},
     "segmentation": {"sam2.1-hiera-base"},
     "inpainting": {"lama-large"},
@@ -301,18 +302,84 @@ def _runtime_candidate(stage: str, config: PipelineConfig) -> tuple[str, str]:
 
 def build_default_clients(
     config: PipelineConfig,
-) -> tuple[VLMClient, GroundingClient, SegmentationClient, ReconstructionClient]:
+) -> tuple[
+    VLMClient | Sequence[VLMClient],
+    GroundingClient,
+    SegmentationClient,
+    ReconstructionClient,
+]:
     """Construct the real (GPU-backed) clients for every model stage, from `config` alone.
 
     Heavy imports (torch/transformers) only happen inside each client's methods -- constructing
     them here is cheap and safe even without the `ml` extra installed.
+
+    The Phase 22 int8 VLM candidate (`qwen3-vl-8b-int8`) returns ONE `Qwen3VLInt8Client`
+    per CUDA device -- the description stage runs them as a parallel worker pool (ADR 0023).
+    The pre-quantized int8 directories are taken from `model_variants["vlm_int8_paths"]`
+    (comma-separated, one per device, in device order); panel runners that build clients
+    explicitly pass their own int8 paths instead.
+
+    The fp16 `qwen3-vl-4b` candidate follows the SAME per-GPU scheme: ONE `Qwen3VLClient`
+    per CUDA device with `device={"": "cuda:N"}` (the model fits one T4, ~8.5 GiB), so
+    panels split between the cards instead of sharding one model across them.
     """
     device = config.resolve_device()
-    _, vlm_source = _runtime_candidate("vlm", config)
+    vlm_id, vlm_source = _runtime_candidate("vlm", config)
     _, grounding_source = _runtime_candidate("grounding", config)
     _, segmentation_source = _runtime_candidate("segmentation", config)
     inpainting_id, _ = _runtime_candidate("inpainting", config)
-    vlm_client = Qwen25VLClient(source=vlm_source, dtype=config.dtype)
+    vlm_client: VLMClient | list[VLMClient]
+    if vlm_id == "qwen3-vl-8b-int8":
+        int8_paths = config.model_variants.get("vlm_int8_paths", "")
+        int8_sources = [p.strip() for p in int8_paths.split(",") if p.strip()]
+        if not int8_sources:
+            raise PipelineStageError(
+                stage="analysis",
+                input_ref="vlm",
+                detail=(
+                    "candidate 'qwen3-vl-8b-int8' requires model_variants['vlm_int8_paths'] "
+                    "with one pre-quantized int8 directory per GPU"
+                ),
+                architectural=False,
+                proposed_fix="set vlm_int8_paths in the active config profile",
+            )
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        else:
+            devices = ["cpu"]
+        if len(int8_sources) != len(devices):
+            raise PipelineStageError(
+                stage="analysis",
+                input_ref="vlm",
+                detail=(
+                    f"vlm_int8_paths has {len(int8_sources)} dir(s) for {len(devices)} "
+                    "device(s) -- expected one pre-quantized int8 directory per GPU"
+                ),
+                architectural=False,
+                proposed_fix="provide one int8 directory per CUDA device, in device order",
+            )
+        vlm_client = [
+            Qwen3VLInt8Client(source=source, device=devices[i])
+            for i, source in enumerate(int8_sources)
+        ]
+    elif vlm_id == "qwen3-vl-4b":
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        else:
+            devices = ["cpu"]
+        vlm_client = [
+            Qwen3VLClient(source=vlm_source, dtype=config.dtype, device=d) for d in devices
+        ]
+    else:
+        vlm_client = Qwen3VLClient(source=vlm_source, dtype=config.dtype)
     grounding_client = GroundingDinoClient(source=grounding_source, device=device, dtype="float32")
     segmentation_client = Sam21Client(source=segmentation_source, device=device, dtype="float32")
     reconstruction_client = LamaClient(device=device, model_id=inpainting_id)

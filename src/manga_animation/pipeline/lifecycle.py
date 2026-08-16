@@ -17,6 +17,11 @@ flushes the caching allocator -- whether the stage body succeeded or raised. Eve
 pipeline stage (analysis, validation, semantic mask validation, grounding, segmentation,
 reconstruction) runs inside one, so a failed panel or a mid-stage exception can never leave a
 model resident and poison the next panel.
+
+Phase 20 co-residency (ADR 0021) widens the scope from per-stage to per-run: `run_pages`
+enters ALL needed `ModelStage`s at the start (via `ExitStack`) and keeps every model resident
+until the whole run ends. `ModelStage` itself is unchanged -- its deterministic load/unload
+ownership is exactly what makes the run-level residency safe.
 """
 
 from __future__ import annotations
