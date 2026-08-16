@@ -309,10 +309,12 @@ class TestResponseSchema:
             )
 
     def test_direction_only_for_drift(self):
-        with pytest.raises(ValidationError):
-            ObjectDescriptionResponse.model_validate(
-                json.loads(_valid_response(motion_kind="sway", direction="right"))
-            )
+        # `direction` is inert for non-drift kinds (only translate uses it); real Qwen
+        # output fills it in for sway -- the schema strips it instead of failing the read.
+        parsed = ObjectDescriptionResponse.model_validate(
+            json.loads(_valid_response(motion_kind="sway", direction="up"))
+        )
+        assert parsed.direction is None
 
     def test_null_optional_bands_are_tolerated(self):
         # Real Qwen output on a non-animatable object sets amplitude_band/speed_band/

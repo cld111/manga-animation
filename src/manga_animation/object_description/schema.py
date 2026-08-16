@@ -154,10 +154,17 @@ class ObjectDescriptionResponse(BaseModel):
             raise ValueError("animatable=true requires a motion_kind")
         if not self.animatable and self.motion_kind is not None:
             raise ValueError("animatable=false must not carry a motion_kind")
-        if self.motion_kind == MotionKind.DRIFT and self.direction is None:
-            raise ValueError("motion_kind=drift requires a direction")
-        if self.motion_kind != MotionKind.DRIFT and self.direction is not None:
-            raise ValueError("direction is only meaningful for motion_kind=drift")
+        if self.motion_kind == MotionKind.DRIFT:
+            if self.direction is None:
+                raise ValueError("motion_kind=drift requires a direction")
+        else:
+            # `direction` only ever drives the TRANSLATE (drift) transform in the mapping
+            # layer; for every other motion kind it is inert. Real Qwen output habitually
+            # fills it in for sway ("up", "up_down", ...) -- stripping it here keeps the
+            # read (all semantic fields are still strict) instead of failing the whole
+            # response on an inert field. Drift-without-direction still fails: that IS a
+            # semantic gap (a translate needs an axis).
+            self.direction = None
         return self
 
 
