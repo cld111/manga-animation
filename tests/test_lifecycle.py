@@ -725,6 +725,34 @@ def test_run_pages_vlm_worker_pool_splits_panels_across_instances(
     assert vlm_a.unload_calls == 1 and vlm_b.unload_calls == 1
 
 
+def test_build_default_clients_qwen3_vl_4b_returns_one_instance_per_device(
+    tmp_path: Path,
+):
+    """Phase 22 A/B: the fp16 `qwen3-vl-4b` candidate is built as ONE `Qwen3VLClient` per
+    CUDA device (device_map={"": "cuda:N"}), not a single device_map="auto" sharded model --
+    mirroring the int8 per-GPU scheme (ADR 0023). On a CPU-only machine this resolves to a
+    single instance pinned to "cpu"."""
+    from manga_animation.analysis import Qwen3VLClient
+    from manga_animation.core.config import load_config
+    from manga_animation.pipeline.orchestrator import build_default_clients
+
+    config = load_config(
+        "local",
+        config_dir=Path(__file__).resolve().parents[1] / "configs",
+        overrides={
+            "model_variants": {"vlm": "qwen3-vl-4b"},
+            "device": "cpu",
+        },
+    )
+    vlm, _, _, _ = build_default_clients(config)
+    clients = list(vlm)
+    assert clients, "qwen3-vl-4b must produce at least one VLM instance"
+    assert all(isinstance(c, Qwen3VLClient) for c in clients)
+    if config.resolve_device() == "cpu":
+        assert len(clients) == 1
+        assert clients[0].device == "cpu"
+
+
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
 def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
     two_panel_page_path: Path,

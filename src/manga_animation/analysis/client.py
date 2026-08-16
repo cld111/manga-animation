@@ -32,16 +32,27 @@ class Qwen3VLClient:
     idempotent `load()` (in addition to the lazy `_ensure_loaded()` used by `generate()`) so
     `ModelStage` can bring Qwen up together with DINO/SAM/LaMa on entry.
 
-    `device_map="auto"` is required, same as ADR 0005's Qwen2.5-VL path: Qwen3-VL-8B's float16
-    weights alone exceed one T4, so the session's 2xT4 must share the model. Qwen3-VL's
-    thinking mode is a model-side generation flag; the repo's chat template (transformers
-    5.0.0) renders no thinking block by default, so structured JSON output is unaffected.
+    `device_map="auto"` is required for Qwen3-VL-8B's float16: the weights alone exceed one
+    T4, so the session's 2xT4 must share the model (Phase 20 baseline, ADR 0021). A SMALLER
+    fp16 model (e.g. Qwen3-VL-4B, ~8.5 GiB) can instead run as ONE instance per GPU
+    (`device` given -> `device_map={"": device}`, Phase 22 A/B, ADR 0023 per-GPU scheme):
+    the pipeline then creates one instance per card and the description stage splits panels
+    between them, with no cross-GPU token traffic. Qwen3-VL's thinking mode is a model-side
+    generation flag; the repo's chat template (transformers 5.0.0) renders no thinking block
+    by default, so structured JSON output is unaffected.
     """
 
-    def __init__(self, source: str, dtype: str, max_new_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        source: str,
+        dtype: str,
+        max_new_tokens: int = 4096,
+        device: str | None = None,
+    ) -> None:
         self.source = source
         self.dtype = dtype
         self.max_new_tokens = max_new_tokens
+        self.device = device  # None -> device_map="auto" (shard); "cuda:N" -> one instance per GPU
         self._model: Any = None
         self._processor: Any = None
 
@@ -58,7 +69,9 @@ class Qwen3VLClient:
 
         self._processor = AutoProcessor.from_pretrained(self.source)
         self._model = Qwen3VLForConditionalGeneration.from_pretrained(
-            self.source, torch_dtype=getattr(torch, self.dtype), device_map="auto"
+            self.source,
+            torch_dtype=getattr(torch, self.dtype),
+            device_map={"": self.device} if self.device else "auto",
         )
         self._model.eval()
 

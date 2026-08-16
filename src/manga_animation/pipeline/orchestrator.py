@@ -271,7 +271,7 @@ def _candidate_source(stage: str, config: PipelineConfig) -> str:
 
 _RUNTIME_CANDIDATES: dict[str, set[str]] = {
     # Manifest entries without a production client remain benchmark candidates.
-    "vlm": {"qwen3-vl-8b-int8", "qwen3-vl-8b", "qwen2.5-vl-7b-instruct"},
+    "vlm": {"qwen3-vl-8b-int8", "qwen3-vl-8b", "qwen3-vl-4b", "qwen2.5-vl-7b-instruct"},
     "grounding": {"grounding-dino-swin-l"},
     "segmentation": {"sam2.1-hiera-base"},
     "inpainting": {"lama-large"},
@@ -318,6 +318,10 @@ def build_default_clients(
     The pre-quantized int8 directories are taken from `model_variants["vlm_int8_paths"]`
     (comma-separated, one per device, in device order); panel runners that build clients
     explicitly pass their own int8 paths instead.
+
+    The fp16 `qwen3-vl-4b` candidate follows the SAME per-GPU scheme: ONE `Qwen3VLClient`
+    per CUDA device with `device={"": "cuda:N"}` (the model fits one T4, ~8.5 GiB), so
+    panels split between the cards instead of sharding one model across them.
     """
     device = config.resolve_device()
     vlm_id, vlm_source = _runtime_candidate("vlm", config)
@@ -361,6 +365,18 @@ def build_default_clients(
         vlm_client = [
             Qwen3VLInt8Client(source=source, device=devices[i])
             for i, source in enumerate(int8_sources)
+        ]
+    elif vlm_id == "qwen3-vl-4b":
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        else:
+            devices = ["cpu"]
+        vlm_client = [
+            Qwen3VLClient(source=vlm_source, dtype=config.dtype, device=d) for d in devices
         ]
     else:
         vlm_client = Qwen3VLClient(source=vlm_source, dtype=config.dtype)

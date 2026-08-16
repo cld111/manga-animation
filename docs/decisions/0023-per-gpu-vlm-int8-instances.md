@@ -6,6 +6,12 @@ Supersedes: the `device_map="auto"` fp16 sharding of the VLM (ADR 0005's Qwen pa
 runtime default, for the Phase 22 int8 candidate. The fp16 sharded client remains available
 as `qwen3-vl-8b`.
 
+Amended (Phase 22 A/B): the same per-GPU scheme applies to a SMALL fp16 model that fits a
+single card -- `qwen3-vl-4b` (~8.5 GiB) is built as one `Qwen3VLClient` per CUDA device
+with `device_map={"": "cuda:N"}`, NOT one sharded `device_map="auto"` instance. The worker
+pool, sentinel cascade, and per-panel checkpoint lock below apply unchanged. See
+`docs/phase22-ab-test.md`.
+
 ## Context
 
 Phase 20/21 ran Qwen3-VL-8B as ONE fp16 model sharded across the session's 2xT4
@@ -71,4 +77,7 @@ can be split between them.
 - tests/test_lifecycle.py `test_run_pages_vlm_worker_pool_splits_panels_across_instances`:
   two VLM instances split the 4 panels (each called at least once, 4 total, one teardown
   each) and every panel still renders PASS.
+- tests/test_lifecycle.py `test_build_default_clients_qwen3_vl_4b_returns_one_instance_per_device`:
+  `build_default_clients` with `vlm=qwen3-vl-4b` returns one `Qwen3VLClient` per device
+  (`device_map={"": device}`), one on a CPU-only machine.
 - The real 2xT4 run will be recorded in the phase results doc.

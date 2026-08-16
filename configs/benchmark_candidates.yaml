@@ -24,6 +24,16 @@ vlm:
     notes: >
       Phase 20 runtime VLM: fp16 sharded across 2xT4 via device_map="auto" (one model,
       two cards). Kept as the comparison baseline for the Phase 22 per-GPU int8 scheme.
+  - id: qwen3-vl-4b
+    source: "Qwen/Qwen3-VL-4B-Instruct" # Hugging Face repo id
+    license: qwen-license
+    params: 4B
+    notes: >
+      Phase 22 A/B runtime VLM. fp16 (~8.5 GiB) fits a single T4, so it runs as ONE instance
+      per GPU (device_map={"": "cuda:N"}, ADR 0023 per-GPU scheme): panels split between the
+      cards by the description worker pool, no device_map="auto" sharding. Measured on
+      wind_breaker_sprint: 1015.7s panel mode, 3/4 PASS -- faster than Qwen3-VL-8B fp16
+      (1222s) and int8 (1818s). See docs/phase22-ab-test.md.
   - id: qwen2.5-vl-7b-instruct
     source: "Qwen/Qwen2.5-VL-7B-Instruct" # Hugging Face repo id
     license: qwen-license
