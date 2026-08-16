@@ -33,9 +33,9 @@ class Qwen3VLClient:
     `ModelStage` can bring Qwen up together with DINO/SAM/LaMa on entry.
 
     `device_map="auto"` is required, same as ADR 0005's Qwen2.5-VL path: Qwen3-VL-8B's float16
-    weights alone exceed one T4, so the session's 2xT4 must share the model. Qwen3-VL adds
-    native thinking mode; the structured JSON object description needs it disabled, so the chat
-    template is applied with `enable_thinking=False`.
+    weights alone exceed one T4, so the session's 2xT4 must share the model. Qwen3-VL's
+    thinking mode is a model-side generation flag; the repo's chat template (transformers
+    5.0.0) renders no thinking block by default, so structured JSON output is unaffected.
     """
 
     def __init__(self, source: str, dtype: str, max_new_tokens: int = 4096) -> None:
@@ -81,7 +81,6 @@ class Qwen3VLClient:
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,
         )
         # Inputs go on the sharded model's first device, not a fixed device string -- with
         # device_map="auto" the model spans multiple devices (see ADR 0005).
