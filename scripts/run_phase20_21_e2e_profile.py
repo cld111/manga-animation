@@ -1,27 +1,31 @@
-"""Phase 20/21 end-to-end GPU validation WITH PROFILING: Qwen3-VL-8B + panel pipeline.
+"""Phase 22 end-to-end GPU validation WITH PROFILING: Qwen3-VL-8B int8 per GPU + panel pipeline.
 
 Runs the production batch entry point (`run_pages`) on REAL manga pages with the Phase 20
-co-residency (all models loaded together for the whole run, ADR 0021) and the Phase 21
-concurrent panel pipeline (five stage workers, no stage barrier, ADR 0022), and collects a
-GPU profile alongside: an nvidia-smi sampler thread records per-GPU utilization and memory
-every `--sampler-interval-s` seconds for the whole run, and every model client is wrapped
-to record per-stage wall-clock (how long each model family was actually busy) and call
-counts -- the honest comparison for the sequential Phase 18.4 timings.
+co-residency (all models loaded together for the whole run, ADR 0021), the Phase 21
+concurrent panel pipeline (five stage workers, no stage barrier, ADR 0022) and the Phase 22
+per-GPU VLM scheme (ADR 0023): ONE bitsandbytes int8 Qwen3-VL-8B instance per GPU, panels
+split between them by a parallel description worker pool. An nvidia-smi sampler thread
+records per-GPU utilization and memory every `--sampler-interval-s` seconds for the whole
+run, and every model client is wrapped to record per-stage busy wall-clock and call counts.
 
 **Run on the Kaggle/Jupyter GPU worker, never locally** (CLAUDE.md, ADR 0003).
+
+`--qwen` must point at a PRE-QUANTIZED int8 directory (the fp16 checkpoint converted once
+via `BitsAndBytesConfig(load_in_8bit=True)` and `save_pretrained`): loading fp16 directly
+materializes the full fp16 checkpoint and OOMs a single T4.
 
 Usage (models downloaded to local dirs on the worker, pages fetched):
 
     python scripts/run_phase20_21_e2e_profile.py \
         --pages examples/realworld/wind_breaker_sprint.png \
-        --qwen /kaggle/working/models/qwen \
-        --dino /kaggle/working/models/dino \
-        --sam /kaggle/working/models/sam \
-        --out outputs/experiments/phase20_21_e2e_profile_<ts>.json
+        --qwen /kaggle/models/qwen_int8 \
+        --dino /kaggle/models/dino \
+        --sam /kaggle/models/sam \
+        --out outputs/experiments/phase22_e2e_profile_<ts>.json
 
 Writes one git-ignored experiment JSON per invocation with per-panel statuses, the VLM call
-count (one per panel, all bboxes in one prompt), per-stage busy wall-clock, the first-Qwen-
-result latency (the pipeline-overlap proof), and the GPU sampler trace.
+count (one per panel, all bboxes in one prompt), per-stage busy wall-clock per VLM instance,
+the first-Qwen-result latency, and the GPU sampler trace.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from manga_animation.analysis import Qwen3VLClient, VLMClient
+from manga_animation.analysis import Qwen3VLInt8Client, VLMClient
 from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
@@ -241,7 +245,7 @@ def main() -> None:
     config = load_config(args.env, overrides={"resolution": args.resolution})
     config.model_variants.update(
         {
-            "vlm": "qwen3-vl-8b",
+            "vlm": "qwen3-vl-8b-int8",
             "grounding": "grounding-dino-swin-l",
             "segmentation": "sam2.1-hiera-base",
         }
@@ -257,14 +261,24 @@ def main() -> None:
     sampler.start()
     started = time.perf_counter()
 
-    vlm_client = CountingVLMClient(
-        TimedClient(
-            Qwen3VLClient(source=args.qwen, dtype="float16"),
-            stage="object_description",
-            methods=("generate",),
-            t0=started,
-        )
+    import torch
+
+    devices = (
+        [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        if torch.cuda.is_available()
+        else ["cpu"]
     )
+    vlm_clients = [
+        CountingVLMClient(
+            TimedClient(
+                Qwen3VLInt8Client(source=args.qwen, device=device),
+                stage=f"object_description_{device}",
+                methods=("generate",),
+                t0=started,
+            )
+        )
+        for device in devices
+    ]
     setup_logging("INFO")
     device = config.resolve_device()
     grounding_client = TimedClient(
@@ -289,9 +303,10 @@ def main() -> None:
     )
 
     report: dict = {
-        "phase": "20.21-e2e-profile",
-        "ordering": "panel pipeline: grounding(DINO) -> object_description(Qwen3-VL) -> "
-        "segmentation(SAM, accepted only) -> plan/animate/reconstruct(LaMa) -> render",
+        "phase": "22-e2e-profile",
+        "ordering": "panel pipeline: grounding(DINO) -> object_description(Qwen3-VL int8, "
+        "ONE instance per GPU, worker pool) -> segmentation(SAM, accepted only) -> "
+        "plan/animate/reconstruct(LaMa) -> render",
         "timestamp": datetime.now(UTC).isoformat(),
         "pages": [],
     }
@@ -299,7 +314,7 @@ def main() -> None:
         page_results = run_pages(
             [Path(page) for page in args.pages],
             config,
-            vlm_client=vlm_client,
+            vlm_client=vlm_clients,
             grounding_client=grounding_client,
             segmentation_client=segmentation_client,
             reconstruction_client=reconstruction_client,
@@ -332,7 +347,13 @@ def main() -> None:
                 )
     finally:
         sampler.stop()
-        for client in (vlm_client, grounding_client, segmentation_client, reconstruction_client):
+        clients: list[object] = [
+            *vlm_clients,
+            grounding_client,
+            segmentation_client,
+            reconstruction_client,
+        ]
+        for client in clients:
             unload = getattr(client, "unload", None)
             if callable(unload):
                 try:
@@ -341,28 +362,33 @@ def main() -> None:
                     pass
 
     report["elapsed_s"] = round(time.perf_counter() - started, 1)
-    report["vlm_calls"] = vlm_client.call_count
-    report["boxes_per_vlm_call"] = vlm_client.boxes_per_call
-    report["first_vlm_result_s"] = vlm_client.first_call_at_s
+    report["vlm_calls"] = sum(client.call_count for client in vlm_clients)
+    report["boxes_per_vlm_call"] = [
+        box
+        for client in vlm_clients
+        for box in client.boxes_per_call
+    ]
     report["stage_busy_s"] = {
         client.stage: {
             "busy_s": round(client.busy_s, 1),
             "calls": client.call_count,
             "first_call_s": client.first_call_at_s,
         }
-        for client in (grounding_client, segmentation_client, reconstruction_client)
+        for client in [*vlm_clients, grounding_client, segmentation_client, reconstruction_client]
     }
-    report["stage_busy_s"]["object_description"] = {
-        "busy_s": round(vlm_client.busy_s, 1),
-        "calls": vlm_client.call_count,
-        "first_call_s": vlm_client.first_call_at_s,
+    report["stage_busy_s"]["object_description_total"] = {
+        "busy_s": round(sum(client.busy_s for client in vlm_clients), 1),
+        "calls": sum(client.call_count for client in vlm_clients),
+        "first_call_s": min(
+            (client.first_call_at_s for client in vlm_clients if client.first_call_at_s),
+            default=None,
+        ),
     }
     report["gpu_sampler_interval_s"] = args.sampler_interval_s
     report["gpu_samples"] = sampler.samples
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"wrote {args.out}")
-    print(f"VLM calls: {vlm_client.call_count}, boxes per call: {vlm_client.boxes_per_call}")
-    print(f"first VLM result at t={report['first_vlm_result_s']}s")
+    print(f"VLM calls: {report['vlm_calls']}, boxes per call: {report['boxes_per_vlm_call']}")
     print(f"stage busy: {report['stage_busy_s']}")
     print(f"GPU samples: {len(sampler.samples)}")
 

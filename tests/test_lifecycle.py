@@ -687,6 +687,44 @@ def test_run_pages_pipelines_panels_without_stage_barriers(
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_vlm_worker_pool_splits_panels_across_instances(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 22 (ADR 0023): the object-description stage accepts a POOL of VLM clients (one
+    int8 Qwen per GPU). Every panel must still be described exactly once -- the 4 panels are
+    split between the 2 instances, each instance answers only the panels it actually got."""
+    class PooledVLM(StageLevelVLMClient):
+        def __init__(self, name: str):
+            super().__init__()
+            self.name = name
+            self.generate_calls = 0
+
+        def generate(self, image, prompt: str) -> str:
+            self.generate_calls += 1
+            return super().generate(image, prompt)
+
+    vlm_a, vlm_b = PooledVLM("a"), PooledVLM("b")
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=[vlm_a, vlm_b],
+        grounding_client=CountingGroundingClient(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+    # Every panel was described exactly once, split between the two instances.
+    assert vlm_a.generate_calls + vlm_b.generate_calls == 4
+    assert vlm_a.generate_calls >= 1 and vlm_b.generate_calls >= 1
+    # Both instances were torn down by the run-level ModelStages.
+    assert vlm_a.unload_calls == 1 and vlm_b.unload_calls == 1
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
 def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
     two_panel_page_path: Path,
     two_panel_page_path_2: Path,

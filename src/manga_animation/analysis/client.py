@@ -110,6 +110,97 @@ class Qwen3VLClient:
             torch.cuda.empty_cache()
 
 
+class Qwen3VLInt8Client:
+    """Per-GPU `qwen3-vl-8b` int8 client (Phase 22, ADR 0023): ONE instance per GPU.
+
+    Phase 20/21's fp16 client sharded one Qwen across both T4s (`device_map="auto"`), so
+    every decoded token crossed the GPU boundary and both cards were only partially
+    utilized. This client instead loads a bitsandbytes int8 quantized copy of the model
+    ONTO A SINGLE GPU (~9.5 GiB): the pipeline creates one instance per card and the
+    description stage runs them as a parallel worker pool, splitting panels between the
+    cards.
+
+    The weights are pre-quantized ONCE (the fp16 repo id -> int8 conversion, saved with
+    `BitsAndBytesConfig(load_in_8bit=True, pre_quantized=True)`) so loading never
+    materializes the 16 GiB fp16 checkpoint on the card: with fp16-on-disk, transformers
+    5.0.0 materializes the whole fp16 checkpoint before quantizing (OOM on one T4), while
+    the pre-quantized safetensors load straight into the bnb int8 layout (~3 s).
+    """
+
+    def __init__(
+        self,
+        source: str,
+        device: str,
+        max_new_tokens: int = 4096,
+    ) -> None:
+        self.source = source
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+        self._model: Any = None
+        self._processor: Any = None
+
+    def load(self) -> None:
+        """Load the int8 model onto this instance's GPU (idempotent)."""
+        if self._model is not None:
+            return
+        from transformers import (
+            AutoProcessor,
+            BitsAndBytesConfig,
+            Qwen3VLForConditionalGeneration,
+        )
+
+        self._processor = AutoProcessor.from_pretrained(self.source)
+        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+            self.source,
+            quantization_config=BitsAndBytesConfig(load_in_8bit=True, pre_quantized=True),
+            device_map={"": self.device},
+        )
+        self._model.eval()
+
+    def generate(self, image: Image.Image, prompt: str) -> str:
+        import torch
+
+        assert self._model is not None and self._processor is not None, (
+            "Qwen3VLInt8Client.generate() requires load() first (the pipeline's run-level "
+            "ModelStage calls it on entry)"
+        )
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = self._processor(text=[text], images=[image], return_tensors="pt").to(
+            self.device
+        )
+        with torch.no_grad():
+            output_ids = self._model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+
+        prompt_len = inputs["input_ids"].shape[1]
+        new_tokens = output_ids[:, prompt_len:]
+        return str(self._processor.batch_decode(new_tokens, skip_special_tokens=True)[0])
+
+    def unload(self) -> None:
+        import gc
+
+        import torch
+
+        self._model = None
+        self._processor = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 class Qwen25VLClient:
     """Real `qwen2.5-vl-7b-instruct` client, per ADR 0005's confirmed-working call.
 

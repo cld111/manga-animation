@@ -46,8 +46,9 @@ page -> deterministic panel detection -> bounded scene crops
   before segmentation.
 - `segmentation` produces a full-source-image `uint8` mask and applies coverage and asymmetric
   edge-touch safety checks.
-- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen3-VL (Phase 20
-  swap from Qwen2.5-VL) sees the FULL
+- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen3-VL-8B int8
+  (Phase 22: one pre-quantized bitsandbytes int8 instance PER GPU, ADR 0023, replacing the
+  Phase 20 fp16 sharded Qwen3-VL) sees the FULL
   image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
   crop, never the mask), reads the ACTION happening in the scene, judges each candidate
   (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
@@ -76,7 +77,7 @@ The baseline in `configs/default.yaml` is:
 | Setting | Current value |
 |---|---|
 | Analysis mode default | `run_pipeline(..., analysis_mode="panel")` |
-| VLM | `qwen3-vl-8b` |
+| VLM | `qwen3-vl-8b-int8` (one int8 instance per GPU, worker pool) |
 | Grounding | `grounding-dino-swin-l` |
 | Segmentation | `sam2.1-hiera-base` |
 | Inpainting | `lama-large` |

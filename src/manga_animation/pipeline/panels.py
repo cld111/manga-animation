@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from queue import Queue
-from threading import Thread
+from threading import Lock, Thread
 
 import numpy as np
 from PIL import Image
@@ -393,9 +393,14 @@ def _pipeline_stage_description(
     token: _PanelPipelineToken,
     vlm_client: VLMClient,
     config: PipelineConfig,
+    persist_lock: Lock | None = None,
 ) -> bool:
     """The pipeline's single VLM stage: Qwen describes this panel's grounded candidates
-    (stage 1)."""
+    (stage 1).
+
+    In the Phase 22 int8 scheme several VLM workers (one per GPU instance) share this stage
+    concurrently, so the per-panel checkpoint write is guarded by `persist_lock` (one file
+    per page, several writers)."""
     state, panel = token.state, token.panel
     panel_id = panel.panel_id
     if panel_id not in state.candidates_by_panel:
@@ -417,7 +422,11 @@ def _pipeline_stage_description(
         return False
     state.descriptions_by_panel[panel_id] = desc
     state.dropped_by_panel[panel_id].extend(dropped)
-    _persist_stage(state, 1)
+    if persist_lock is not None:
+        with persist_lock:
+            _persist_stage(state, 1)
+    else:
+        _persist_stage(state, 1)
     return True
 
 
@@ -573,16 +582,28 @@ def _pipeline_worker(
     stage: int,
     process,
     errors: list[BaseException],
+    *,
+    end_expected: int = 1,
+    end_sent: int = 1,
 ) -> None:
     """One pipeline stage's worker: pull tokens from `in_q`, process the ones that still
-    need this stage, forward the survivors to `out_q`. `None` is the shutdown sentinel
-    propagated downstream; any worker failure is recorded and still cascades the sentinel,
-    so no worker can deadlock waiting on a queue whose producer died."""
+    need this stage, forward the survivors to `out_q`. `None` is the shutdown sentinel.
+
+    The description stage (Phase 22, ADR 0023) runs as a WORKER POOL -- one worker per VLM
+    instance, all consuming the same input queue and feeding the same output queue. To make
+    that safe, `end_expected` is how many sentinels this worker must observe before it
+    stops (1 for a single producer; N when N workers feed this queue), and `end_sent` is how
+    many sentinels it emits on shutdown (N when N consumers wait on `out_q`). The upstream
+    stage emits one sentinel PER downstream consumer. Any worker failure is recorded and
+    still emits its sentinels, so no worker can deadlock waiting on a queue whose producer
+    died."""
+    ended = 0
     try:
-        while True:
+        while ended < end_expected:
             token = in_q.get()
             if token is None:
-                break
+                ended += 1
+                continue
             if token.start_stage <= stage:
                 if not process(token):
                     continue  # panel failed at this stage -- it leaves the pipeline
@@ -592,7 +613,8 @@ def _pipeline_worker(
         errors.append(exc)
     finally:
         if out_q is not None:
-            out_q.put(None)
+            for _ in range(end_sent):
+                out_q.put(None)
 
 
 def _run_panel_pipeline(
@@ -601,26 +623,32 @@ def _run_panel_pipeline(
     labels: Sequence[str],
     config: PipelineConfig,
     grounding_client: GroundingClient,
-    vlm_client: VLMClient,
+    vlm_client: VLMClient | Sequence[VLMClient],
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient,
 ) -> None:
     """Run the five-stage concurrent panel pipeline over every eligible panel.
 
-    Each stage has ONE worker thread pulling from its input queue and pushing survivors to
-    the next stage's queue (bounded, giving backpressure). A panel moves to the next model
-    as soon as the previous stage produced its result -- Qwen can describe panel 2 while
-    DINO still grounds panel 3 (Phase 21; no stage barrier). Determinism is preserved:
-    tokens enter the pipeline in fixed page/panel order, each worker is single-threaded and
-    processes its queue FIFO, so per-panel results are identical to the sequential scheme.
+    Each stage has one or more worker threads pulling from its input queue and pushing
+    survivors to the next stage's queue (bounded, giving backpressure). A panel moves to
+    the next model as soon as the previous stage produced its result -- no stage barrier
+    (Phase 21). The object-description stage runs as a WORKER POOL (Phase 22, ADR 0023):
+    one worker per VLM instance (one int8 Qwen per GPU), all consuming the shared panel
+    queue, so panels are split between the GPUs. Per-panel results are identical to the
+    sequential scheme regardless of which worker processed a panel: each worker computes
+    the same per-panel stage function, and checkpoints are written per panel.
     """
+    vlm_clients = list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
+    n_desc = len(vlm_clients)
     q_ground: Queue = Queue(maxsize=8)
     q_desc: Queue = Queue(maxsize=8)
     q_seg: Queue = Queue(maxsize=8)
     q_plan: Queue = Queue(maxsize=8)
     q_render: Queue = Queue(maxsize=8)
     errors: list[BaseException] = []
-    workers = [
+    persist_lock = Lock()
+
+    workers: list[Thread] = [
         Thread(
             target=_pipeline_worker,
             args=(
@@ -634,62 +662,80 @@ def _run_panel_pipeline(
                 ),
                 errors,
             ),
+            kwargs={"end_sent": n_desc},  # one sentinel per description worker
             name="pipeline-grounding",
             daemon=True,
         ),
-        Thread(
-            target=_pipeline_worker,
-            args=(
-                q_desc,
-                q_seg,
-                1,
-                partial(_pipeline_stage_description, vlm_client=vlm_client, config=config),
-                errors,
-            ),
-            name="pipeline-description",
-            daemon=True,
-        ),
-        Thread(
-            target=_pipeline_worker,
-            args=(
-                q_seg,
-                q_plan,
-                2,
-                partial(_pipeline_stage_segmentation, segmentation_client=segmentation_client),
-                errors,
-            ),
-            name="pipeline-segmentation",
-            daemon=True,
-        ),
-        Thread(
-            target=_pipeline_worker,
-            args=(
-                q_plan,
-                q_render,
-                3,
-                partial(
-                    _pipeline_stage_plan,
-                    config=config,
-                    reconstruction_client=reconstruction_client,
-                ),
-                errors,
-            ),
-            name="pipeline-plan-animate-reconstruct",
-            daemon=True,
-        ),
-        Thread(
-            target=_pipeline_worker,
-            args=(
-                q_render,
-                None,
-                4,
-                partial(_pipeline_stage_render, config=config),
-                errors,
-            ),
-            name="pipeline-render",
-            daemon=True,
-        ),
     ]
+    for index, vlm in enumerate(vlm_clients):
+        workers.append(
+            Thread(
+                target=_pipeline_worker,
+                args=(
+                    q_desc,
+                    q_seg,
+                    1,
+                    partial(
+                        _pipeline_stage_description,
+                        vlm_client=vlm,
+                        config=config,
+                        persist_lock=persist_lock,
+                    ),
+                    errors,
+                ),
+                kwargs={"end_expected": 1, "end_sent": 1},
+                name=f"pipeline-description-{index}",
+                daemon=True,
+            )
+        )
+    workers.extend(
+        [
+            Thread(
+                target=_pipeline_worker,
+                args=(
+                    q_seg,
+                    q_plan,
+                    2,
+                    partial(
+                        _pipeline_stage_segmentation,
+                        segmentation_client=segmentation_client,
+                    ),
+                    errors,
+                ),
+                kwargs={"end_expected": n_desc},  # every description worker terminates us
+                name="pipeline-segmentation",
+                daemon=True,
+            ),
+            Thread(
+                target=_pipeline_worker,
+                args=(
+                    q_plan,
+                    q_render,
+                    3,
+                    partial(
+                        _pipeline_stage_plan,
+                        config=config,
+                        reconstruction_client=reconstruction_client,
+                    ),
+                    errors,
+                ),
+                name="pipeline-plan-animate-reconstruct",
+                daemon=True,
+            ),
+            Thread(
+                target=_pipeline_worker,
+                args=(
+                    q_render,
+                    None,
+                    4,
+                    partial(_pipeline_stage_render, config=config),
+                    errors,
+                ),
+                name="pipeline-render",
+                daemon=True,
+            ),
+        ]
+    )
     for worker in workers:
         worker.start()
     try:
@@ -716,7 +762,7 @@ def run_pages(
     image_paths: Sequence[Path],
     config: PipelineConfig,
     *,
-    vlm_client: VLMClient,
+    vlm_client: VLMClient | Sequence[VLMClient],
     grounding_client: GroundingClient,
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient,
@@ -727,10 +773,12 @@ def run_pages(
 
     ALL model clients that have pending work are loaded TOGETHER at the start of the call
     and stay resident until the whole run finishes (Phase 20 co-residency, ADR 0021), then
-    five single-threaded pipeline stages (grounding -> object description -> segmentation ->
+    pipeline stages (grounding -> object description -> segmentation ->
     plan/animate/reconstruct -> render) process panels through bounded queues: a panel
     moves to the next model as soon as the previous stage produced its result, with NO
-    stage barrier waiting for all pages (Phase 21, ADR 0022).
+    stage barrier waiting for all pages (Phase 21, ADR 0022). The object-description stage
+    accepts ONE VLM client OR a pool of them (Phase 22, ADR 0023): one int8 Qwen instance
+    per GPU, all consuming the shared panel queue, so panels are split across the GPUs.
 
     Resume is per-panel (Phase 18.4 persistence): a panel whose checkpoint entry exists for
     a stage skips that stage -- and its model is never loaded if NO panel needs it -- so a
@@ -798,7 +846,13 @@ def run_pages(
         if need_dino:
             residency.enter_context(ModelStage(grounding_client, name="grounding"))
         if need_qwen:
-            residency.enter_context(ModelStage(vlm_client, name="object_description"))
+            vlm_clients = (
+                list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
+            )
+            for index, vlm in enumerate(vlm_clients):
+                residency.enter_context(
+                    ModelStage(vlm, name=f"object_description_{index}")
+                )
         if need_sam:
             residency.enter_context(ModelStage(segmentation_client, name="segmentation"))
         residency.enter_context(ModelStage(reconstruction_client, name="reconstruction"))

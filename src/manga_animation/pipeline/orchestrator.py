@@ -38,7 +38,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from manga_animation.analysis import Qwen3VLClient, VLMClient
+from manga_animation.analysis import Qwen3VLClient, Qwen3VLInt8Client, VLMClient
 from manga_animation.animation import generate_transformed_layer
 from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame_stack
@@ -271,7 +271,7 @@ def _candidate_source(stage: str, config: PipelineConfig) -> str:
 
 _RUNTIME_CANDIDATES: dict[str, set[str]] = {
     # Manifest entries without a production client remain benchmark candidates.
-    "vlm": {"qwen3-vl-8b", "qwen2.5-vl-7b-instruct"},
+    "vlm": {"qwen3-vl-8b-int8", "qwen3-vl-8b", "qwen2.5-vl-7b-instruct"},
     "grounding": {"grounding-dino-swin-l"},
     "segmentation": {"sam2.1-hiera-base"},
     "inpainting": {"lama-large"},
@@ -302,18 +302,68 @@ def _runtime_candidate(stage: str, config: PipelineConfig) -> tuple[str, str]:
 
 def build_default_clients(
     config: PipelineConfig,
-) -> tuple[VLMClient, GroundingClient, SegmentationClient, ReconstructionClient]:
+) -> tuple[
+    VLMClient | Sequence[VLMClient],
+    GroundingClient,
+    SegmentationClient,
+    ReconstructionClient,
+]:
     """Construct the real (GPU-backed) clients for every model stage, from `config` alone.
 
     Heavy imports (torch/transformers) only happen inside each client's methods -- constructing
     them here is cheap and safe even without the `ml` extra installed.
+
+    The Phase 22 int8 VLM candidate (`qwen3-vl-8b-int8`) returns ONE `Qwen3VLInt8Client`
+    per CUDA device -- the description stage runs them as a parallel worker pool (ADR 0023).
+    The pre-quantized int8 directories are taken from `model_variants["vlm_int8_paths"]`
+    (comma-separated, one per device, in device order); panel runners that build clients
+    explicitly pass their own int8 paths instead.
     """
     device = config.resolve_device()
-    _, vlm_source = _runtime_candidate("vlm", config)
+    vlm_id, vlm_source = _runtime_candidate("vlm", config)
     _, grounding_source = _runtime_candidate("grounding", config)
     _, segmentation_source = _runtime_candidate("segmentation", config)
     inpainting_id, _ = _runtime_candidate("inpainting", config)
-    vlm_client = Qwen3VLClient(source=vlm_source, dtype=config.dtype)
+    vlm_client: VLMClient | list[VLMClient]
+    if vlm_id == "qwen3-vl-8b-int8":
+        int8_paths = config.model_variants.get("vlm_int8_paths", "")
+        int8_sources = [p.strip() for p in int8_paths.split(",") if p.strip()]
+        if not int8_sources:
+            raise PipelineStageError(
+                stage="analysis",
+                input_ref="vlm",
+                detail=(
+                    "candidate 'qwen3-vl-8b-int8' requires model_variants['vlm_int8_paths'] "
+                    "with one pre-quantized int8 directory per GPU"
+                ),
+                architectural=False,
+                proposed_fix="set vlm_int8_paths in the active config profile",
+            )
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        else:
+            devices = ["cpu"]
+        if len(int8_sources) != len(devices):
+            raise PipelineStageError(
+                stage="analysis",
+                input_ref="vlm",
+                detail=(
+                    f"vlm_int8_paths has {len(int8_sources)} dir(s) for {len(devices)} "
+                    "device(s) -- expected one pre-quantized int8 directory per GPU"
+                ),
+                architectural=False,
+                proposed_fix="provide one int8 directory per CUDA device, in device order",
+            )
+        vlm_client = [
+            Qwen3VLInt8Client(source=source, device=devices[i])
+            for i, source in enumerate(int8_sources)
+        ]
+    else:
+        vlm_client = Qwen3VLClient(source=vlm_source, dtype=config.dtype)
     grounding_client = GroundingDinoClient(source=grounding_source, device=device, dtype="float32")
     segmentation_client = Sam21Client(source=segmentation_source, device=device, dtype="float32")
     reconstruction_client = LamaClient(device=device, model_id=inpainting_id)
