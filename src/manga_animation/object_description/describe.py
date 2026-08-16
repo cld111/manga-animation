@@ -59,10 +59,19 @@ METHOD_ID = "vlm_full_image_bbox_v1"
 _RECOVERY_PROMPT_TEMPLATE = """Your previous response could not be parsed/validated as the \
 required JSON object. Error: {error}
 
-Return ONLY the corrected JSON object with the exact same fields as before ("bbox_assessment", \
-"object_identity", "matches_semantic_label", "animatable", "movable_parts", "static_parts", \
-"motion_kind", "direction", "amplitude_band", "speed_band", "pivot_hint", "constraints", \
-"neighbor_conflicts", "confidence", "reason"). No prose, no markdown fences."""
+Return ONLY the corrected JSON object, in exactly this shape:
+{{"bbox_assessment": one of "pass" | "ambiguous" | "partial" | "reject" | "not_animatable" \
+(only these five, exactly), "object_identity": "short snake_case name", \
+"matches_semantic_label": true or false, "animatable": true or false, "movable_parts": [...], \
+"static_parts": [...], "motion_kind": null or one of "sway"|"flow"|"drift"|"rotate"|"pulse"|"breathe"|"flicker", \
+"direction": null or one of "up"|"down"|"left"|"right"|"up_left"|"up_right"|"down_left"|"down_right", \
+"amplitude_band": "subtle"|"moderate"|"pronounced", "speed_band": "slow"|"normal"|"fast", \
+"pivot_hint": "top"|"center"|"bottom", "constraints": [...], "neighbor_conflicts": [...], \
+"confidence": a float 0-1, "reason": "one short sentence"}}
+
+Rules: "motion_kind" is required iff "animatable" is true; "direction" is required iff \
+"motion_kind" is "drift", otherwise "direction" is null. Use ONLY the listed enum values -- \
+never anything else. No prose, no markdown fences."""
 
 
 def _parse_response(raw_text: str) -> ObjectDescriptionResponse | None:

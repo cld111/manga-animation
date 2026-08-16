@@ -168,12 +168,13 @@ literally names it, e.g. "text_banner"): speech bubbles, dialogue, sound effects
 banners of text -- any box whose content is text-like must be assessed "not_animatable" (or \
 "reject" if the box is mostly background).
 4. "motion_kind" is required iff "animatable" is true; "direction" is required iff \
-"motion_kind" is "drift"; otherwise both are null. "amplitude_band", "speed_band" and \
-"pivot_hint" always carry one of their listed values -- never null. "object_identity", \
-"movable_parts", "static_parts", "constraints", "neighbor_conflicts" are never null and never \
-placeholder text: name what you actually see, use empty lists where nothing applies, and make \
-"constraints" list the specific rules that follow from THIS box (e.g. which part must stay \
-still, what must not be crossed).
+"motion_kind" is "drift"; otherwise both are null. "direction" is ONLY for drift -- for sway, \
+flow, rotate, pulse, breathe, flicker it is always null (never invent values like "up_down" \
+or "left_right"). "amplitude_band", "speed_band" and "pivot_hint" always carry one of their \
+listed values -- never null. "object_identity", "movable_parts", "static_parts", \
+"constraints", "neighbor_conflicts" are never null and never placeholder text: name what you \
+actually see, use empty lists where nothing applies, and make "constraints" list the specific \
+rules that follow from THIS box (e.g. which part must stay still, what must not be crossed).
 5. "confidence" must reflect genuine uncertainty -- write the doubts into \
 "neighbor_conflicts" or "reason". """
 
