@@ -18,8 +18,8 @@ The implemented order is:
 
 ```text
 page -> deterministic panel detection -> bounded scene crops
-  -> independent analysis -> grounding -> validation -> segmentation -> mask_semantics
-  -> object_description -> animation -> reconstruction -> compositing -> rendering
+  -> grounding -> segmentation -> object_description -> animation
+  -> reconstruction -> compositing -> rendering
 ```
 
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
@@ -36,14 +36,16 @@ page -> deterministic panel detection -> bounded scene crops
 - `mask_semantics` checks the real segmented mask's content with a VLM, independently of the
   pre-segmentation bbox check. It returns `ACCEPT`, `REJECT`, or `ABSTAIN` and is enabled by
   default.
-- `object_description` (Phase 18.3) is the per-candidate VLM stage between `mask_semantics`
-  and `animation`: Qwen2.5-VL sees the FULL pipeline image plus the accepted grounding bbox
-  as pixel coordinates (never a crop, never the mask), judges the candidate itself
+- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen2.5-VL sees the FULL
+  image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
+  crop, never the mask), reads the ACTION happening in the scene, judges each candidate
   (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
-  description whose deterministically-mapped `MotionSpec` drives the animation stage. It is
-  fail-closed: a non-accepted PRIMARY candidate rejects the run, a SECONDARY/MICRO one is
-  dropped; raw responses are logged and kept in the result. Enabled by default
-  (`enable_object_description_validation`). See docs/phase18.3-results.md.
+  description whose deterministically-mapped `MotionSpec` drives the animation stage (with the
+  SAM mask). Fail-closed: candidates with a non-pass read, an identity-conflict (text/bubble/
+  background), or a geometrically unsafe bbox+transform are dropped; a panel with no accepted
+  candidate is REJECTED. The architecture has no analysis stage, no crop-based VLM validation
+  and no mask-semantics stage; candidate labels come from the caller
+  (`DEFAULT_ANIMATION_LABELS`). See docs/phase18.3-results.md.
 - Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
   z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
