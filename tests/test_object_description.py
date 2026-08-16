@@ -251,6 +251,46 @@ class TestFailClosed:
         assert result.accepted is False
         assert result.rejection_reason == "not_animatable"
 
+    def test_identity_conflict_is_fail_closed(self):
+        """The observed real false-accept (phase18_3_final, villainess): a recovery response
+        claimed `object_identity: "speech_bubble"` while still saying matches=true and
+        animatable=true -- all three soft signals said "accept". The deterministic identity
+        backstop must reject it."""
+        image = np.full((200, 220, 3), 245, dtype=np.uint8)
+        client = RecordingVLMClient(
+            [
+                _valid_response(
+                    object_identity="speech_bubble",
+                    matches_semantic_label=True,
+                    animatable=True,
+                    motion_kind="sway",
+                )
+            ]
+        )
+        result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
+                                 max_long_edge=1536)
+        assert result.accepted is False
+        assert result.rejection_reason == "identity_conflict=speech_bubble"
+
+    def test_identity_keyword_variants_are_rejected(self):
+        for identity in ("speech_bubble", "speech bubble", "text_banner", "lettering",
+                         "dialogue text", "background", "panel_border"):
+            image = np.full((200, 220, 3), 245, dtype=np.uint8)
+            client = RecordingVLMClient(
+                [
+                    _valid_response(
+                        object_identity=identity,
+                        matches_semantic_label=True,
+                        animatable=True,
+                        motion_kind="sway",
+                    )
+                ]
+            )
+            result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
+                                     max_long_edge=1536)
+            assert result.accepted is False, identity
+            assert result.rejection_reason == f"identity_conflict={identity}"
+
     def test_malformed_json_then_valid_gets_one_recovery_attempt(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
         client = RecordingVLMClient(["not json at all", _valid_response()])

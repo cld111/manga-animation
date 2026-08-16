@@ -40,6 +40,14 @@ Semantic mask validation         — src/manga_animation/validation (mask_semant
     │  docs/decisions/0018-semantic-mask-validation.md; a geometrically unremarkable mask
     │  is not automatically a semantically correct one)
     ▼
+Per-candidate VLM description    — src/manga_animation/object_description
+    │  Phase 18.3: for every still-animated object, the VLM sees the FULL pipeline image
+    │  plus the accepted grounding bbox as pixel coordinates (never a crop of the
+    │  candidate, never the mask), judges the candidate itself (pass/ambiguous/partial/
+    │  reject/not_animatable) and produces a structured animation description whose
+    │  deterministically-mapped MotionSpec drives the animation stage. Fail-closed:
+    │  PRIMARY non-PASS rejects the run, SECONDARY/MICRO drops the object.
+    ▼
 Deterministic / kinematic       — src/manga_animation/animation
     animation                    │  apply MotionSpec transforms locally
     ▼
@@ -92,6 +100,12 @@ consumes `segmentation`'s own real mask output, and its job ("does the real mask
 match the label") is a mask-quality question, distinct from `validate_target`'s pre-segmentation
 bbox-plausibility question but structurally the same kind of gate.
 
+The **per-candidate VLM description** stage (`src/manga_animation/object_description`,
+Phase 18.3) is owned by the orchestrating session/`qa-agent` together with `cv-agent`: it
+sits between `mask_semantics` and `animation`, consumes the accepted grounding bbox (the
+mask stays downstream-only), and its output — the mapped `MotionSpec` — is what the
+animation stage applies.
+
 ## Model Lifecycle
 
 Model residency is stage-level and explicitly owned (Phase 14, ADR 0020). Each model-backed
@@ -100,7 +114,8 @@ that loads the client on entry and deterministically releases it on exit -- on s
 exception -- by dropping references, collecting cyclic garbage, and flushing the CUDA caching
 allocator. `run_page_panels` processes panels stage-by-stage: analysis (VLM) for all eligible
 panels, then grounding (DINO), then validation (VLM), then segmentation (SAM), then semantic
-mask validation (VLM), then animation/reconstruction/compositing/rendering (LaMa loaded once).
+mask validation (VLM), then object description (VLM, Phase 18.3), then
+animation/reconstruction/compositing/rendering (LaMa loaded once).
 One model family is resident at a time, never per-panel. A benchmark adapter is also unloaded
 after success or failure.
 

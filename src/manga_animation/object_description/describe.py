@@ -94,14 +94,46 @@ def _parse_response(raw_text: str) -> ObjectDescriptionResponse | None:
 
 def _accepted(parsed: ObjectDescriptionResponse) -> tuple[bool, str | None]:
     """The fail-closed acceptance rule, with the exact reason for a rejection. `rejection_reason`
-    is machine-readable ("bbox_assessment=...", "semantic_label_mismatch", "not_animatable")."""
+    is machine-readable ("bbox_assessment=...", "semantic_label_mismatch", "not_animatable",
+    "identity_conflict")."""
     if parsed.bbox_assessment != BBoxAssessment.PASS:
         return False, f"bbox_assessment={parsed.bbox_assessment.value} (must be 'pass')"
     if not parsed.matches_semantic_label:
         return False, "semantic_label_mismatch"
     if not parsed.animatable:
         return False, "not_animatable"
+    identity = (parsed.object_identity or "").lower()
+    if any(kw in identity for kw in _NON_ANIMATABLE_IDENTITY_KEYWORDS):
+        return False, f"identity_conflict={parsed.object_identity}"
     return True, None
+
+
+# Deterministic backstop for the observed real false-accept (phase18_3_final, villainess):
+# a recovery response can say `object_identity: "speech_bubble"` while still claiming
+# `matches_semantic_label: true` and `animatable: true` -- the model contradicts itself and
+# every soft signal says "accept". Content categories that can NEVER be a valid animation
+# target are rejected on the identity string alone, mirroring
+# `analysis.plan_builder._is_text_label`'s label-keyed guard. "bubble" matches both speech
+# bubbles and thought bubbles; "panel"/"background"/"lettering"/"text" are the other rigid
+# or non-object categories.
+_NON_ANIMATABLE_IDENTITY_KEYWORDS: tuple[str, ...] = (
+    "speech_bubble",
+    "speech bubble",
+    "thought_bubble",
+    "thought bubble",
+    "bubble",
+    "text",
+    "lettering",
+    "caption",
+    "dialogue",
+    "narration",
+    "sound_effect",
+    "sfx",
+    "panel_border",
+    "panel",
+    "background",
+    "border",
+)
 
 
 def describe_object(
