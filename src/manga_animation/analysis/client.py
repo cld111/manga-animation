@@ -54,10 +54,10 @@ class Qwen3VLClient:
         if self._model is not None:
             return
         import torch
-        from transformers import AutoProcessor, Qwen3_VLForConditionalGeneration
+        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
         self._processor = AutoProcessor.from_pretrained(self.source)
-        self._model = Qwen3_VLForConditionalGeneration.from_pretrained(
+        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.source, torch_dtype=getattr(torch, self.dtype), device_map="auto"
         )
         self._model.eval()
