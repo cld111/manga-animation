@@ -160,7 +160,7 @@ python scripts/fetch_phase9_realworld_pages.py
 mkdir -p /kaggle/working/models
 python - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen2.5-VL-7B-Instruct", local_dir="/kaggle/working/models/qwen")
+snapshot_download("Qwen/Qwen3-VL-8B-Instruct", local_dir="/kaggle/working/models/qwen")
 snapshot_download("IDEA-Research/grounding-dino-base", local_dir="/kaggle/working/models/dino")
 snapshot_download("facebook/sam2.1-hiera-base-plus", local_dir="/kaggle/working/models/sam")
 PY
@@ -233,9 +233,10 @@ serialize them (Phase 15 rule: don't trade VRAM stability for artificial paralle
 - `torch.cuda.memory_free()` / `torch.cuda.mem_get_info()` — actual free / total device
   memory (the true headroom the driver reports).
 
-In this project the stage-level lifecycle keeps each model's tensors released between stages,
-so `allocated` returning to ~9 MB after a stage while `nvidia-smi` still shows the CUDA
-context is expected and correct.
+In this project the run-level lifecycle (ADR 0021) keeps every model resident for the whole
+run and releases them all together at the end, so `allocated` staying high between stages
+while `nvidia-smi` shows the CUDA context is expected and correct; it drops back to ~9 MB
+after the run finishes.
 
 **CUDA OOM detection:** a real OOM surfaces as `torch.OutOfMemoryError: CUDA out of memory`
 in the job log. Check the log, not just exit codes.

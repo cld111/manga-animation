@@ -12,6 +12,17 @@ Phase 18.4 batch mode: `run_pages` processes MANY pages with stage-level model r
 ACROSS pages. Each model loads ONCE, processes every eligible panel of EVERY page, saves its
 results, and only then is released and the next model loads. `run_page_panels` is the
 single-page convenience wrapper over the same code path.
+
+Phase 20 co-residency: the sequential stage-by-stage residency (ADR 0020) is replaced by a
+run-level residency (ADR 0021) -- ALL model clients are loaded together at the start of a
+`run_pages` call and stay resident until it finishes, with deterministic unload only at the
+end. Models are still only loaded when their stage has pending work (a fully checkpointed
+stage is restored from disk and its model never loads).
+
+Phase 21 panel pipeline (ADR 0022): the stages run CONCURRENTLY as five single-threaded
+workers connected by bounded queues. A panel moves to the next model as soon as the previous
+stage produced its result -- no stage barrier waits for every panel of every page. Checkpoint
+resume is per-panel; PASS/STATIC panels from an earlier manifest are skipped entirely.
 """
 
 from __future__ import annotations
@@ -19,8 +30,12 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 
 import numpy as np
 from PIL import Image
@@ -148,11 +163,14 @@ def _set_failure(panel: PanelUnit, status: PanelStatus, stage: str, reason: str)
 
 @dataclass
 class _PageRunState:
-    """Everything one page accumulates across the batch's model stages.
+    """Everything one page accumulates across the run's model stages.
 
-    Stage outputs live here between stages: a model processes ALL pages (every eligible
-    panel of each), saves its results into the corresponding state, and only then is
-    released and the next model loads (Phase 18.4 batch residency).
+    Stage outputs live here across stages. Phase 20 co-residency (ADR 0021): ALL models with
+    pending work stay resident for the whole `run_pages` call -- there is no per-stage
+    load/unload. Phase 21 (ADR 0022) executes the stages concurrently as a panel pipeline;
+    each field below is written by exactly one pipeline worker per panel, and readers only
+    touch a panel's entries after the producing worker handed the token downstream (queue
+    happens-before), so no cross-thread races exist.
     """
 
     image_path: Path
@@ -294,6 +312,406 @@ def _write_all_manifests(states: list[_PageRunState]) -> None:
         )
 
 
+class _PanelPipelineToken:
+    """One panel flowing through the concurrent panel pipeline (Phase 21).
+
+    A token is created per panel with `start_stage` = the first stage that still has work
+    for it (0=grounding, 1=object description, 2=segmentation, 3=plan/animate/reconstruct,
+    4=render). A worker whose stage is below `start_stage` passes the token through without
+    processing it -- which is how resume (checkpointed stages) and the fresh-run path share
+    one pipeline.
+    """
+
+    __slots__ = ("state", "panel", "start_stage")
+
+    def __init__(self, state: _PageRunState, panel: PanelUnit, start_stage: int) -> None:
+        self.state = state
+        self.panel = panel
+        self.start_stage = start_stage
+
+
+def _panel_start_stage(state: _PageRunState, panel: PanelUnit) -> int:
+    """The first pipeline stage that still has work for this panel, given the checkpoints
+    already loaded into `state` (Phase 18.4 persistence): a panel absent from a stage's
+    checkpoint re-runs that stage -- per-panel resume, not per-page."""
+    panel_id = panel.panel_id
+    if panel_id not in state.candidates_by_panel:
+        return 0
+    if panel_id not in state.descriptions_by_panel:
+        return 1
+    if panel_id not in state.segmentation_by_panel:
+        return 2
+    return 3
+
+
+def _persist_stage(state: _PageRunState, stage: int) -> None:
+    """Re-write the checkpoint file of one completed stage for one page. Each stage's
+    checkpoint is written only by that stage's pipeline worker (one writer per file)."""
+    if stage == 0:
+        save_grounding(
+            state.page_dir,
+            state.candidates_by_panel,
+            state.plan_by_object_by_panel,
+            state.dropped_by_panel,
+        )
+    elif stage == 1:
+        save_descriptions(state.page_dir, state.descriptions_by_panel)
+    elif stage == 2:
+        save_segmentation(state.page_dir, state.segmentation_by_panel)
+
+
+def _pipeline_stage_grounding(
+    token: _PanelPipelineToken,
+    labels: Sequence[str],
+    grounding_client: GroundingClient,
+) -> bool:
+    """DINO grounds every candidate label on this panel's crop (stage 0)."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    state.panel_started_at[panel_id] = time.perf_counter()
+    try:
+        plans, grounded, dropped = _ground_labels(
+            state.crops[panel_id],
+            labels,
+            grounding_client,
+            panel_bbox_px=_crop_local_panel_bbox(state, panel),
+        )
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        return False
+    state.candidates_by_panel[panel_id] = grounded
+    state.plan_by_object_by_panel[panel_id] = {p.object_id: p for p in plans}
+    state.dropped_by_panel[panel_id] = dropped
+    _persist_stage(state, 0)
+    return True
+
+
+def _pipeline_stage_description(
+    token: _PanelPipelineToken,
+    vlm_client: VLMClient,
+    config: PipelineConfig,
+) -> bool:
+    """The pipeline's single VLM stage: Qwen describes this panel's grounded candidates
+    (stage 1)."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.candidates_by_panel:
+        return False  # failed at grounding
+    try:
+        desc, dropped = _describe_candidates(
+            state.crops[panel_id],
+            state.candidates_by_panel[panel_id],
+            state.plan_by_object_by_panel[panel_id],
+            vlm_client,
+            config,
+            panel_bbox_px=_crop_local_panel_bbox(state, panel),
+        )
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        return False
+    state.descriptions_by_panel[panel_id] = desc
+    state.dropped_by_panel[panel_id].extend(dropped)
+    _persist_stage(state, 1)
+    return True
+
+
+def _pipeline_stage_segmentation(
+    token: _PanelPipelineToken,
+    segmentation_client: SegmentationClient,
+) -> bool:
+    """SAM segments ONLY the accepted candidates of this panel (stage 2)."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.descriptions_by_panel:
+        return False  # failed at grounding or object description
+    accepted_keys = {
+        key
+        for key, description in state.descriptions_by_panel[panel_id].items()
+        if description.accepted
+    }
+    try:
+        seg, dropped = _segment_candidates(
+            state.crops[panel_id],
+            state.candidates_by_panel[panel_id],
+            state.plan_by_object_by_panel[panel_id],
+            segmentation_client,
+            accepted_keys=accepted_keys,
+        )
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        return False
+    state.segmentation_by_panel[panel_id] = seg
+    state.dropped_by_panel[panel_id].extend(dropped)
+    _persist_stage(state, 2)
+    return True
+
+
+def _pipeline_stage_plan(
+    token: _PanelPipelineToken,
+    config: PipelineConfig,
+    reconstruction_client: ReconstructionClient,
+) -> bool:
+    """Deterministic plan ranking + animation + LaMa reconstruction for this panel
+    (stage 3). CV work is CPU-only; LaMa is the only model used here."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.descriptions_by_panel:
+        return False  # failed earlier
+    state.panel_started_at.setdefault(panel_id, time.perf_counter())
+    try:
+        accepted = []
+        for (object_id, rank), description in state.descriptions_by_panel[panel_id].items():
+            if not description.accepted:
+                continue
+            if (object_id, rank) not in state.segmentation_by_panel[panel_id]:
+                continue  # accepted by the VLM but dropped at segmentation
+            accepted.append(
+                (
+                    object_id,
+                    rank,
+                    state.plan_by_object_by_panel[panel_id][object_id],
+                    state.candidates_by_panel[panel_id][object_id][rank],
+                    state.segmentation_by_panel[panel_id][(object_id, rank)],
+                    description,
+                )
+            )
+        plan, primary, kept = _build_plan(
+            panel.scene_crop_path,
+            state.crops[panel_id].shape[:2],
+            config,
+            accepted=accepted,
+            global_origin=(panel.scene_crop_bbox.x0, panel.scene_crop_bbox.y0),
+            logical_panel_bbox_px=panel.panel_bbox,
+            neighboring_panel_bboxes=tuple(p.panel_bbox for p in state.panels),
+        )
+        animated_objects = [item[0] for item in kept]
+        segmentation_by_object = {item[0].object_id: item[2] for item in kept}
+        panel_bbox_px_by_object = {
+            obj.object_id: panel.panel_bbox for obj in animated_objects
+        }
+        layers, layers_by_object = _animate_objects(
+            state.crops[panel_id],
+            animated_objects,
+            segmentation_by_object,
+            panel_bbox_px_by_object,
+            plan,
+        )
+        reconstructions = _reconstruct_objects(
+            state.crops[panel_id],
+            animated_objects,
+            segmentation_by_object,
+            layers_by_object,
+            reconstruction_client,
+            config,
+        )
+        state.plans_by_panel[panel_id] = plan
+        state.animated_by_panel[panel_id] = animated_objects
+        state.seg_by_object_by_panel[panel_id] = segmentation_by_object
+        state.layers_by_panel[panel_id] = layers
+        state.layers_by_object_by_panel[panel_id] = layers_by_object
+        state.reconstructions_by_panel[panel_id] = reconstructions
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        return False
+    return True
+
+
+def _pipeline_stage_render(token: _PanelPipelineToken, config: PipelineConfig) -> bool:
+    """Render this panel's frames to H.264, update its status, and re-write the page
+    manifest (stage 4, CPU)."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.plans_by_panel:
+        return False  # failed earlier
+    try:
+        render_result = _composite_and_render(
+            state.crops[panel_id],
+            state.layers_by_panel[panel_id],
+            state.reconstructions_by_panel[panel_id],
+            state.plans_by_panel[panel_id],
+            state.page_dir,
+            config,
+            video_filename=f"{panel_id}.mp4",
+            frames_dir=state.page_dir / "frames" / panel_id,
+        )
+        panel.status = "PASS"
+        panel.output_video = render_result.output_path
+        panel.metrics["frame_count"] = render_result.frame_count
+        panel.metrics["runtime_s"] = round(
+            time.perf_counter() - state.panel_started_at.pop(panel_id), 6
+        )
+        # Crash-safe manifest: a killed run keeps every rendered panel reusable (PASS).
+        _write_manifest(
+            state.manifest_path,
+            state.page_id,
+            state.image_path,
+            state.panels,
+            started_at=0.0,
+        )
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+    return True
+
+
+def _pipeline_worker(
+    in_q: Queue,
+    out_q: Queue | None,
+    stage: int,
+    process,
+    errors: list[BaseException],
+) -> None:
+    """One pipeline stage's worker: pull tokens from `in_q`, process the ones that still
+    need this stage, forward the survivors to `out_q`. `None` is the shutdown sentinel
+    propagated downstream; any worker failure is recorded and still cascades the sentinel,
+    so no worker can deadlock waiting on a queue whose producer died."""
+    try:
+        while True:
+            token = in_q.get()
+            if token is None:
+                break
+            if token.start_stage <= stage:
+                if not process(token):
+                    continue  # panel failed at this stage -- it leaves the pipeline
+            if out_q is not None:
+                out_q.put(token)
+    except BaseException as exc:  # noqa: BLE001 -- worker-level failure (not panel-level)
+        errors.append(exc)
+    finally:
+        if out_q is not None:
+            out_q.put(None)
+
+
+def _run_panel_pipeline(
+    states: list[_PageRunState],
+    *,
+    labels: Sequence[str],
+    config: PipelineConfig,
+    grounding_client: GroundingClient,
+    vlm_client: VLMClient,
+    segmentation_client: SegmentationClient,
+    reconstruction_client: ReconstructionClient,
+) -> None:
+    """Run the five-stage concurrent panel pipeline over every eligible panel.
+
+    Each stage has ONE worker thread pulling from its input queue and pushing survivors to
+    the next stage's queue (bounded, giving backpressure). A panel moves to the next model
+    as soon as the previous stage produced its result -- Qwen can describe panel 2 while
+    DINO still grounds panel 3 (Phase 21; no stage barrier). Determinism is preserved:
+    tokens enter the pipeline in fixed page/panel order, each worker is single-threaded and
+    processes its queue FIFO, so per-panel results are identical to the sequential scheme.
+    """
+    q_ground: Queue = Queue(maxsize=8)
+    q_desc: Queue = Queue(maxsize=8)
+    q_seg: Queue = Queue(maxsize=8)
+    q_plan: Queue = Queue(maxsize=8)
+    q_render: Queue = Queue(maxsize=8)
+    errors: list[BaseException] = []
+    workers = [
+        Thread(
+            target=_pipeline_worker,
+            args=(
+                q_ground,
+                q_desc,
+                0,
+                partial(
+                    _pipeline_stage_grounding,
+                    labels=labels,
+                    grounding_client=grounding_client,
+                ),
+                errors,
+            ),
+            name="pipeline-grounding",
+            daemon=True,
+        ),
+        Thread(
+            target=_pipeline_worker,
+            args=(
+                q_desc,
+                q_seg,
+                1,
+                partial(_pipeline_stage_description, vlm_client=vlm_client, config=config),
+                errors,
+            ),
+            name="pipeline-description",
+            daemon=True,
+        ),
+        Thread(
+            target=_pipeline_worker,
+            args=(
+                q_seg,
+                q_plan,
+                2,
+                partial(_pipeline_stage_segmentation, segmentation_client=segmentation_client),
+                errors,
+            ),
+            name="pipeline-segmentation",
+            daemon=True,
+        ),
+        Thread(
+            target=_pipeline_worker,
+            args=(
+                q_plan,
+                q_render,
+                3,
+                partial(
+                    _pipeline_stage_plan,
+                    config=config,
+                    reconstruction_client=reconstruction_client,
+                ),
+                errors,
+            ),
+            name="pipeline-plan-animate-reconstruct",
+            daemon=True,
+        ),
+        Thread(
+            target=_pipeline_worker,
+            args=(
+                q_render,
+                None,
+                4,
+                partial(_pipeline_stage_render, config=config),
+                errors,
+            ),
+            name="pipeline-render",
+            daemon=True,
+        ),
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        for state in states:
+            for panel in state.panels:
+                if panel.status in ("PASS", "STATIC"):
+                    continue  # resumed from an earlier manifest
+                q_ground.put(
+                    _PanelPipelineToken(
+                        state, panel, _panel_start_stage(state, panel)
+                    )
+                )
+    finally:
+        q_ground.put(None)
+    for worker in workers:
+        worker.join(timeout=600)
+    if any(worker.is_alive() for worker in workers):
+        raise RuntimeError("panel pipeline workers failed to terminate")
+    if errors:
+        raise errors[0]
+
+
 def run_pages(
     image_paths: Sequence[Path],
     config: PipelineConfig,
@@ -305,29 +723,30 @@ def run_pages(
     out_dir: Path,
     labels: Sequence[str] | None = None,
 ) -> list[PagePanelsResult]:
-    """Process MANY pages with stage-level model residency ACROSS pages (Phase 18.4 batch).
+    """Process MANY pages through the concurrent panel pipeline (Phase 21).
 
-    Each model-backed stage loads its client ONCE, processes every eligible panel of EVERY
-    page (saving its outputs into that page's state), then deterministically releases it
-    (ADR 0020). A model never loads per page. The VLM runs exactly ONCE per panel -- the
-    object-description stage, before segmentation (DINO -> Qwen -> SAM): SAM segments only
-    the bboxes that earned an action description. A panel failure is recorded and
-    processing continues; manifests are written after each stage so completed PASS/STATIC
-    panels are reusable on a later invocation.
+    ALL model clients that have pending work are loaded TOGETHER at the start of the call
+    and stay resident until the whole run finishes (Phase 20 co-residency, ADR 0021), then
+    five single-threaded pipeline stages (grounding -> object description -> segmentation ->
+    plan/animate/reconstruct -> render) process panels through bounded queues: a panel
+    moves to the next model as soon as the previous stage produced its result, with NO
+    stage barrier waiting for all pages (Phase 21, ADR 0022).
 
-    Stage outputs are ALSO persisted to disk after every model stage (Phase 18.4): each
-    page dir receives `grounding.json`, `descriptions.json`, and `segmentation.json` +
-    mask `.npz` files. On a later invocation the completed stages are loaded from disk and
-    their models are NOT loaded at all -- a killed session resumes from the last completed
-    stage instead of re-running DINO/Qwen/SAM from scratch.
+    Resume is per-panel (Phase 18.4 persistence): a panel whose checkpoint entry exists for
+    a stage skips that stage -- and its model is never loaded if NO panel needs it -- so a
+    killed session resumes from the last completed stage instead of re-running
+    DINO/Qwen/SAM from scratch. The VLM runs exactly ONCE per panel, before segmentation
+    (DINO -> Qwen -> SAM): SAM segments only the bboxes that earned an action description.
+    A panel failure is recorded and processing continues; manifests are written after each
+    rendered panel so completed PASS panels are reusable on a later invocation.
     """
     active_labels = list(labels or DEFAULT_ANIMATION_LABELS)
     states = [_prepare_page_state(path, out_dir, config) for path in image_paths]
     _write_all_manifests(states)
 
     # -------------------------------------------------------------------------------------
-    # Stage 1: grounding -- DINO processes every eligible panel of EVERY page, then releases.
-    # A completed grounding stage is restored from disk (no model load at all).
+    # Restore every completed model stage from disk FIRST (Phase 18.4 persistence): the
+    # restored stages must not load, and the remaining pending panels define what loads.
     # -------------------------------------------------------------------------------------
     resume_grounding = [s for s in states if has_grounding(s.page_dir)]
     for state in resume_grounding:
@@ -341,48 +760,6 @@ def run_pages(
             len(state.candidates_by_panel),
             state.page_dir / "grounding.json",
         )
-    pending_grounding = [s for s in states if not has_grounding(s.page_dir)]
-    if pending_grounding:
-        with ModelStage(grounding_client, name="grounding"):
-            for state in pending_grounding:
-                for panel in state.panels:
-                    panel_id = panel.panel_id
-                    if panel.status in ("PASS", "STATIC"):
-                        continue  # resumed from an earlier manifest
-                    state.panel_started_at[panel.panel_id] = time.perf_counter()
-                    try:
-                        plans, grounded, dropped = _ground_labels(
-                            state.crops[panel_id],
-                            active_labels,
-                            grounding_client,
-                            panel_bbox_px=_crop_local_panel_bbox(state, panel),
-                        )
-                    except PipelineStageError as exc:
-                        _finalize(
-                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
-                        )
-                        continue
-                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
-                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                        continue
-                    state.candidates_by_panel[panel_id] = grounded
-                    state.plan_by_object_by_panel[panel_id] = {p.object_id: p for p in plans}
-                    state.dropped_by_panel[panel_id] = dropped
-        for state in pending_grounding:
-            save_grounding(
-                state.page_dir,
-                state.candidates_by_panel,
-                state.plan_by_object_by_panel,
-                state.dropped_by_panel,
-            )
-    _write_all_manifests(states)
-
-    # -------------------------------------------------------------------------------------
-    # Stage 2: object description -- THE single VLM stage. Qwen loads once and processes
-    # every eligible panel's grounded candidates of EVERY page, then releases. Runs BEFORE
-    # segmentation (Phase 18.4 ordering: DINO -> Qwen -> SAM). A completed description stage
-    # is restored from disk (no Qwen load at all).
-    # -------------------------------------------------------------------------------------
     resume_descriptions = [s for s in states if has_descriptions(s.page_dir)]
     for state in resume_descriptions:
         state.descriptions_by_panel = load_descriptions(state.page_dir)
@@ -391,42 +768,6 @@ def run_pages(
             len(state.descriptions_by_panel),
             state.page_dir / "descriptions.json",
         )
-    pending_descriptions = [s for s in states if not has_descriptions(s.page_dir)]
-    if pending_descriptions:
-        with ModelStage(vlm_client, name="object_description"):
-            for state in pending_descriptions:
-                for panel in state.panels:
-                    panel_id = panel.panel_id
-                    if panel_id not in state.candidates_by_panel:
-                        continue  # failed at grounding
-                    try:
-                        desc, dropped = _describe_candidates(
-                            state.crops[panel_id],
-                            state.candidates_by_panel[panel_id],
-                            state.plan_by_object_by_panel[panel_id],
-                            vlm_client,
-                            config,
-                            panel_bbox_px=_crop_local_panel_bbox(state, panel),
-                        )
-                    except PipelineStageError as exc:
-                        _finalize(
-                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
-                        )
-                        continue
-                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
-                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                        continue
-                    state.descriptions_by_panel[panel_id] = desc
-                    state.dropped_by_panel[panel_id].extend(dropped)
-        for state in pending_descriptions:
-            save_descriptions(state.page_dir, state.descriptions_by_panel)
-    _write_all_manifests(states)
-
-    # -------------------------------------------------------------------------------------
-    # Stage 3: segmentation -- SAM processes ONLY the accepted candidates of every eligible
-    # panel of EVERY page, then releases (Phase 18.4 ordering: DINO -> Qwen -> SAM). A
-    # completed segmentation stage is restored from disk (no SAM load at all).
-    # -------------------------------------------------------------------------------------
     resume_segmentation = [s for s in states if has_segmentation(s.page_dir)]
     for state in resume_segmentation:
         state.segmentation_by_panel = load_segmentation(state.page_dir)
@@ -435,145 +776,48 @@ def run_pages(
             len(state.segmentation_by_panel),
             state.page_dir / "segmentation.json",
         )
-    pending_segmentation = [s for s in states if not has_segmentation(s.page_dir)]
-    if pending_segmentation:
-        with ModelStage(segmentation_client, name="segmentation"):
-            for state in pending_segmentation:
-                for panel in state.panels:
-                    panel_id = panel.panel_id
-                    if panel_id not in state.descriptions_by_panel:
-                        continue  # failed at grounding or object description
-                    accepted_keys = {
-                        key
-                        for key, description in state.descriptions_by_panel[panel_id].items()
-                        if description.accepted
-                    }
-                    try:
-                        seg, dropped = _segment_candidates(
-                            state.crops[panel_id],
-                            state.candidates_by_panel[panel_id],
-                            state.plan_by_object_by_panel[panel_id],
-                            segmentation_client,
-                            accepted_keys=accepted_keys,
-                        )
-                    except PipelineStageError as exc:
-                        _finalize(
-                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
-                        )
-                        continue
-                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
-                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                        continue
-                    state.segmentation_by_panel[panel_id] = seg
-                    state.dropped_by_panel[panel_id].extend(dropped)
-        for state in pending_segmentation:
-            save_segmentation(state.page_dir, state.segmentation_by_panel)
-    _write_all_manifests(states)
+
+    starts = [
+        _panel_start_stage(state, panel)
+        for state in states
+        for panel in state.panels
+        if panel.status not in ("PASS", "STATIC")
+    ]
+    need_dino = any(start == 0 for start in starts)
+    need_qwen = any(start <= 1 for start in starts)
+    need_sam = any(start <= 2 for start in starts)
 
     # -------------------------------------------------------------------------------------
-    # Stage 4: animation planning (deterministic) + animation + reconstruction (LaMa loaded
-    # once for EVERY page) + compositing + rendering. CV work is CPU-only.
+    # Phase 20 run-level co-residency: every model with pending work loads ONCE, up front,
+    # and stays resident until the entire run ends (ADR 0021). ExitStack exits unwind on
+    # completion AND on exception, so a failed run still deterministically releases every
+    # loaded model. LaMa always has work: even fully checkpointed pages still re-render
+    # (the CV animation/reconstruction stages re-run on every invocation).
     # -------------------------------------------------------------------------------------
-    with ModelStage(reconstruction_client, name="reconstruction"):
-        for state in states:
-            for panel in state.panels:
-                panel_id = panel.panel_id
-                if panel_id not in state.descriptions_by_panel:
-                    continue  # failed earlier
-                state.panel_started_at.setdefault(panel_id, time.perf_counter())
-                try:
-                    accepted = []
-                    for (object_id, rank), description in state.descriptions_by_panel[
-                        panel_id
-                    ].items():
-                        if not description.accepted:
-                            continue
-                        if (object_id, rank) not in state.segmentation_by_panel[panel_id]:
-                            continue  # accepted by the VLM but dropped at segmentation
-                        accepted.append(
-                            (
-                                object_id,
-                                rank,
-                                state.plan_by_object_by_panel[panel_id][object_id],
-                                state.candidates_by_panel[panel_id][object_id][rank],
-                                state.segmentation_by_panel[panel_id][(object_id, rank)],
-                                description,
-                            )
-                        )
-                    plan, primary, kept = _build_plan(
-                        panel.scene_crop_path,
-                        state.crops[panel_id].shape[:2],
-                        config,
-                        accepted=accepted,
-                        global_origin=(panel.scene_crop_bbox.x0, panel.scene_crop_bbox.y0),
-                        logical_panel_bbox_px=panel.panel_bbox,
-                        neighboring_panel_bboxes=tuple(
-                            p.panel_bbox for p in state.panels
-                        ),
-                    )
-                    animated_objects = [item[0] for item in kept]
-                    segmentation_by_object = {item[0].object_id: item[2] for item in kept}
-                    panel_bbox_px_by_object = {
-                        obj.object_id: panel.panel_bbox for obj in animated_objects
-                    }
-                    layers, layers_by_object = _animate_objects(
-                        state.crops[panel_id],
-                        animated_objects,
-                        segmentation_by_object,
-                        panel_bbox_px_by_object,
-                        plan,
-                    )
-                    reconstructions = _reconstruct_objects(
-                        state.crops[panel_id],
-                        animated_objects,
-                        segmentation_by_object,
-                        layers_by_object,
-                        reconstruction_client,
-                        config,
-                    )
-                    state.plans_by_panel[panel_id] = plan
-                    state.animated_by_panel[panel_id] = animated_objects
-                    state.seg_by_object_by_panel[panel_id] = segmentation_by_object
-                    state.layers_by_panel[panel_id] = layers
-                    state.layers_by_object_by_panel[panel_id] = layers_by_object
-                    state.reconstructions_by_panel[panel_id] = reconstructions
-                except PipelineStageError as exc:
-                    _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
-                    continue
-                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                    _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                    continue
-    _write_all_manifests(states)
+    with ExitStack() as residency:
+        if need_dino:
+            residency.enter_context(ModelStage(grounding_client, name="grounding"))
+        if need_qwen:
+            residency.enter_context(ModelStage(vlm_client, name="object_description"))
+        if need_sam:
+            residency.enter_context(ModelStage(segmentation_client, name="segmentation"))
+        residency.enter_context(ModelStage(reconstruction_client, name="reconstruction"))
 
-    # -------------------------------------------------------------------------------------
-    # Stage 5: render every planned panel (CPU), update statuses, write manifests.
-    # -------------------------------------------------------------------------------------
-    for state in states:
-        for panel in state.panels:
-            panel_id = panel.panel_id
-            if panel_id not in state.plans_by_panel:
-                continue  # failed earlier
-            try:
-                render_result = _composite_and_render(
-                    state.crops[panel_id],
-                    state.layers_by_panel[panel_id],
-                    state.reconstructions_by_panel[panel_id],
-                    state.plans_by_panel[panel_id],
-                    state.page_dir,
-                    config,
-                    video_filename=f"{panel_id}.mp4",
-                    frames_dir=state.page_dir / "frames" / panel_id,
-                )
-                panel.status = "PASS"
-                panel.output_video = render_result.output_path
-                panel.metrics["frame_count"] = render_result.frame_count
-                panel.metrics["runtime_s"] = round(
-                    time.perf_counter() - state.panel_started_at.pop(panel_id), 6
-                )
-            except PipelineStageError as exc:
-                _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
-            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        # ---------------------------------------------------------------------------------
+        # The concurrent panel pipeline: five stages, one worker thread each, bounded
+        # queues between them (Phase 21, ADR 0022). No stage barrier: each panel moves
+        # forward as soon as the previous stage produced its result.
+        # ---------------------------------------------------------------------------------
+        _run_panel_pipeline(
+            states,
+            labels=active_labels,
+            config=config,
+            grounding_client=grounding_client,
+            vlm_client=vlm_client,
+            segmentation_client=segmentation_client,
+            reconstruction_client=reconstruction_client,
+        )
+
     _write_all_manifests(states)
 
     return [

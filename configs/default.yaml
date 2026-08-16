@@ -8,7 +8,7 @@ dtype: float32
 # cross-candidate comparison. See docs/current-status.md and "Model Abstraction" in
 # docs/architecture.md.
 model_variants:
-  vlm: qwen2.5-vl-7b-instruct
+  vlm: qwen3-vl-8b
   grounding: grounding-dino-swin-l
   segmentation: sam2.1-hiera-base
   inpainting: lama-large

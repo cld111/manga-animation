@@ -57,15 +57,21 @@ panel. The scene crop, not the strict logical `panel_bbox`, is the source image 
 segmentation, CV transforms, reconstruction, compositing and video rendering. Page-space
 coordinates are recovered for cross-panel safety checks by adding the scene crop origin.
 
-`run_pages` is the batch entry point (Phase 18.4): it processes MANY pages with stage-level
-model residency ACROSS pages. Each model loads ONCE, processes every eligible panel of EVERY
-page (saving its outputs into that page's state), and only then is released and the next
-model loads -- never a per-page load/unload cycle. Every model stage ALSO persists its
-outputs to disk before the model is released (`grounding.json`, `descriptions.json`,
+`run_pages` is the batch entry point (Phase 18.4): it processes MANY pages in one call.
+Every model stage persists its outputs to disk (`grounding.json`, `descriptions.json`,
 `segmentation.json` + mask `.npz` per page): a later invocation loads the completed stages
 from disk and never re-loads their models, so a killed session resumes from the last
 completed stage instead of re-running DINO/Qwen/SAM. `run_page_panels` is the single-page
 convenience wrapper over the same code path.
+
+Since Phase 21 the stage execution is a CONCURRENT PANEL PIPELINE (ADR 0022): five
+single-threaded workers (grounding -> object description -> segmentation ->
+plan/animate/reconstruct -> render) pass panels through bounded queues. A panel moves to the
+next model as soon as the previous stage produced ITS result -- there is no stage barrier
+that waits for every panel of every page. Per-panel results are byte-identical to the
+sequential scheme: tokens enter the pipeline in fixed page/panel order and each worker
+processes its queue FIFO. Checkpoints are written per panel, so resume is per-panel too: a
+panel absent from a stage's checkpoint re-runs exactly that stage.
 
 Each panel is recorded as `PASS`, `STATIC`, `REJECTED` or `ERROR`. A page manifest is written
 after every panel so successful outputs can be reused and a later panel failure cannot erase
@@ -91,15 +97,19 @@ the mapped `MotionSpec` — is what the animation stage applies. It runs before 
 
 ## Model Lifecycle
 
-Model residency is stage-level and explicitly owned (Phase 14, ADR 0020). Each model-backed
-stage runs inside a `ModelStage` context manager (`src/manga_animation/pipeline/lifecycle.py`)
-that loads the client on entry and deterministically releases it on exit -- on success AND on
-exception -- by dropping references, collecting cyclic garbage, and flushing the CUDA caching
-allocator. `run_pages` (and the single-page wrapper `run_page_panels`) processes panels
-stage-by-stage: grounding (DINO) for all eligible panels of ALL pages, then object
-description (VLM, the pipeline's single Qwen call), then segmentation (SAM, only for
-accepted bboxes), then animation/reconstruction/compositing/rendering (LaMa loaded once).
-One model family is resident at a time, never per-panel and never per-page.
+Model residency is run-level and explicitly owned (Phase 20, ADR 0021, superseding ADR 0020's
+stage-level scheme). `run_pages` loads ALL model clients that have pending work TOGETHER at the
+start of the call -- grounding (DINO), object description (Qwen3-VL), segmentation (SAM 2.1)
+and reconstruction (LaMa) co-reside in GPU memory for the whole run, and each stage processes
+every eligible panel of every page in turn. Release happens exactly once, deterministically,
+at the end: every model-backed stage runs inside a `ModelStage` context manager
+(`src/manga_animation/pipeline/lifecycle.py`, composed via `ExitStack`) that loads the client
+on entry and releases it on exit -- on success AND on exception -- by dropping references,
+collecting cyclic garbage, and flushing the CUDA caching allocator. The stages themselves
+execute concurrently as a panel pipeline (Phase 21, ADR 0022) on top of this residency:
+each worker calls only its own client, so the co-resident models are never shared between
+threads. Resume is preserved: a stage whose checkpoint exists on disk is restored from it and
+its model is never loaded, so a killed session resumes from the last completed stage.
 
 The VLM's `device_map="auto"` client specifically requires `gc.collect()` before
 `torch.cuda.empty_cache()`; without it the ~16 GiB model survives `unload()` inside cyclic

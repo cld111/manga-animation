@@ -5,7 +5,7 @@ per-candidate object-description stage, which now runs BEFORE segmentation. Ther
 analysis stage (no Qwen-driven AnimationPlan up front), no crop-based VLM validation, and
 no mask-semantics VLM gate:
 
-    grounding (DINO, labels from the caller) -> object_description (Qwen2.5-VL: FULL image
+    grounding (DINO, labels from the caller) -> object_description (Qwen3-VL: FULL image
     + bbox pixel coordinates -> structured description; fail-closed) -> segmentation (SAM2,
     ONLY for accepted bboxes, masks kept for animation) -> animation planning
     (deterministic ranking and MotionSpec mapping + transform-geometry gate) -> animation
@@ -13,9 +13,10 @@ no mask-semantics VLM gate:
     loop metrics)
 
 Candidate labels are supplied by the caller (or the documented default list): the pipeline
-no longer invents them with a VLM. Every model family is loaded once per stage
-(`ModelStage`, ADR 0020); Qwen is resident during ONE stage (object_description) and
-processes every candidate of every panel there -- never again.
+no longer invents them with a VLM. Every model family is loaded once for the WHOLE run and
+stays co-resident until it finishes (`ModelStage` run-level scope, ADR 0021); Qwen is
+resident from the start and processes every candidate of every panel at its one stage --
+never again.
 
 A candidate that fails a deterministic or model gate is dropped (logged); if NO candidate is
 accepted, the run fails with stage="object_description" (fail closed, never an unvalidated
@@ -37,7 +38,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from manga_animation.analysis import Qwen25VLClient, VLMClient
+from manga_animation.analysis import Qwen3VLClient, VLMClient
 from manga_animation.animation import generate_transformed_layer
 from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame_stack
@@ -270,7 +271,7 @@ def _candidate_source(stage: str, config: PipelineConfig) -> str:
 
 _RUNTIME_CANDIDATES: dict[str, set[str]] = {
     # Manifest entries without a production client remain benchmark candidates.
-    "vlm": {"qwen2.5-vl-7b-instruct"},
+    "vlm": {"qwen3-vl-8b", "qwen2.5-vl-7b-instruct"},
     "grounding": {"grounding-dino-swin-l"},
     "segmentation": {"sam2.1-hiera-base"},
     "inpainting": {"lama-large"},
@@ -312,7 +313,7 @@ def build_default_clients(
     _, grounding_source = _runtime_candidate("grounding", config)
     _, segmentation_source = _runtime_candidate("segmentation", config)
     inpainting_id, _ = _runtime_candidate("inpainting", config)
-    vlm_client = Qwen25VLClient(source=vlm_source, dtype=config.dtype)
+    vlm_client = Qwen3VLClient(source=vlm_source, dtype=config.dtype)
     grounding_client = GroundingDinoClient(source=grounding_source, device=device, dtype="float32")
     segmentation_client = Sam21Client(source=segmentation_source, device=device, dtype="float32")
     reconstruction_client = LamaClient(device=device, model_id=inpainting_id)

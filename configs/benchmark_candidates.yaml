@@ -7,18 +7,22 @@
 # runtime baseline; candidates without a production adapter must not be selected silently.
 
 vlm:
+  - id: qwen3-vl-8b
+    source: "Qwen/Qwen3-VL-8B-Instruct" # Hugging Face repo id
+    license: qwen-license
+    params: 8B
+    notes: >
+      Phase 20 runtime VLM. Newer generation than 2.5-VL (native thinking mode, which the
+      production client disables for the structured JSON output). ~16 GiB float16 weights
+      shard across 2xT4 via device_map="auto", same as the 2.5-VL path (ADR 0005).
   - id: qwen2.5-vl-7b-instruct
     source: "Qwen/Qwen2.5-VL-7B-Instruct" # Hugging Face repo id
     license: qwen-license
     params: 7B
     notes: >
       Strong OCR (OCRBench ~888) — manga pages are text-dense. Fits comfortably on a
-      T4/L4 at this size.
-  - id: qwen3-vl-small
-    source: "Qwen/Qwen3-VL" # exact small-variant repo id to confirm at integration time
-    license: qwen-license
-    params: sub-10B (variant TBD)
-    notes: Newer generation than 2.5-VL; benchmark head-to-head rather than assuming it wins.
+      T4/L4 at this size. Phase 20 replaces it as the runtime default, kept as a
+      historical/benchmark candidate.
   - id: internvl3-8b
     source: "OpenGVLab/InternVL3-8B"
     license: MIT

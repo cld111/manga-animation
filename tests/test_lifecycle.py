@@ -538,6 +538,155 @@ def test_run_pages_batch_loads_each_model_once_for_all_pages(
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_co_residency_loads_all_models_up_front_and_unloads_at_the_end(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 20 run-level co-residency (ADR 0021): every model with pending work is loaded
+    TOGETHER before the first stage call, stays resident across ALL stages, and is released
+    exactly once, only after the last stage -- never a stage-by-stage load/unload cycle
+    (ADR 0020's sequential scheme)."""
+    events: list[str] = []
+
+    class LoggedGrounding(CountingGroundingClient):
+        def load(self) -> None:
+            events.append("load:dino")
+            super().load()
+
+        def detect(self, image, text_prompt: str) -> list[Detection]:
+            events.append("detect")
+            return super().detect(image, text_prompt)
+
+        def unload(self) -> None:
+            events.append("unload:dino")
+            super().unload()
+
+    class LoggedSegmentation(CountingSegmentationClient):
+        def load(self) -> None:
+            events.append("load:sam")
+            super().load()
+
+        def segment(self, image, box) -> list[MaskCandidate]:
+            events.append("segment")
+            return super().segment(image, box)
+
+        def unload(self) -> None:
+            events.append("unload:sam")
+            super().unload()
+
+    class LoggedReconstruction(CountingReconstructionClient):
+        def load(self) -> None:
+            events.append("load:lama")
+            super().load()
+
+        def inpaint(self, image, hole_mask):
+            events.append("inpaint")
+            return super().inpaint(image, hole_mask)
+
+        def unload(self) -> None:
+            events.append("unload:lama")
+            super().unload()
+
+    class LoggedVLM(StageLevelVLMClient):
+        def __init__(self):
+            super().__init__()
+            self._n = 0
+
+        def generate(self, image, prompt: str) -> str:
+            self._n += 1
+            events.append(f"generate:{self._n}")
+            return super().generate(image, prompt)
+
+    grounding = LoggedGrounding()
+    segmentation = LoggedSegmentation()
+    reconstruction = LoggedReconstruction()
+    vlm = LoggedVLM()
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=grounding,
+        segmentation_client=segmentation,
+        reconstruction_client=reconstruction,
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+
+    # Every model loaded once for the whole run, released exactly once.
+    assert grounding.load_calls == 1 and grounding.unload_calls == 1
+    assert segmentation.load_calls == 1 and segmentation.unload_calls == 1
+    assert reconstruction.load_calls == 1 and reconstruction.unload_calls == 1
+
+    # Co-residency ordering: all loads happen BEFORE the first stage call, and all unloads
+    # happen AFTER the last stage call -- no mid-run load/unload cycles between stages.
+    first_detect = events.index("detect")
+    for load_event in ("load:dino", "load:sam", "load:lama"):
+        assert events.index(load_event) < first_detect
+    last_stage_call = max(
+        events.index("generate:4"), events.index("inpaint"), events.index("segment")
+    )
+    for unload_event in ("unload:dino", "unload:sam", "unload:lama"):
+        assert events.index(unload_event) > last_stage_call
+    # Unloads unwind in LIFO order (ExitStack: last entered, first exited), and nothing
+    # loads again after the run.
+    assert events.index("unload:lama") == len(events) - 3
+    assert events.index("unload:sam") == len(events) - 2
+    assert events.index("unload:dino") == len(events) - 1
+    assert "load:" not in events[len(events) - 3 :]
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_pipelines_panels_without_stage_barriers(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 21 panel pipeline: a panel moves to the next model as soon as the previous
+    stage produced ITS result -- there is no stage barrier. DINO must still be working on
+    panel 2 while Qwen is already describing panel 1: the pipeline gates DINO's second
+    panel behind an event that only Qwen's first generate() sets."""
+    import threading
+
+    qwen_started = threading.Event()
+    n_labels = len(DEFAULT_ANIMATION_LABELS)
+
+    class GatedGrounding(CountingGroundingClient):
+        def detect(self, image, text_prompt: str) -> list[Detection]:
+            if self.detect_calls >= n_labels and not qwen_started.is_set():
+                # Panel 2 is being grounded while Qwen has not yet started panel 1 -- a
+                # stage barrier would let DINO finish everything first. Wait for Qwen.
+                if not qwen_started.wait(timeout=30):
+                    raise AssertionError(
+                        "Qwen never started before DINO finished panel 1: stage barrier"
+                    )
+            return super().detect(image, text_prompt)
+
+    class SignalingVLM(StageLevelVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            qwen_started.set()  # Qwen began describing panel 1
+            return super().generate(image, prompt)
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=SignalingVLM(),
+        grounding_client=GatedGrounding(),
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+    assert all(p.status == "PASS" for result in results for p in result.panels)
+    assert qwen_started.is_set()
+    # The pipeline completed despite DINO's gate, proving overlap happened (and the gated
+    # client would have deadlocked under the old sequential scheme).
+    assert sum(r.manifest_path.exists() for r in results) == 2
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
 def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
     two_panel_page_path: Path,
     two_panel_page_path_2: Path,
@@ -644,7 +793,9 @@ def test_run_pages_partial_checkpoint_resumes_after_grounding_only(
 ):
     """A killed run leaves only the grounding checkpoint: the next invocation must skip DINO
     (grounding restored from disk) but still run Qwen/SAM -- proving per-stage resume, not
-    just full-run checkpointing."""
+    just full-run checkpointing. The manifest is removed together with the later
+    checkpoints: a PASS manifest entry means the panel is fully done (Phase 21 reuse), so
+    the test must not rely on it to fake a partial state."""
     out_dir = tmp_path / "videos"
     page_dir = out_dir / two_panel_page_path.stem
 
@@ -666,6 +817,7 @@ def test_run_pages_partial_checkpoint_resumes_after_grounding_only(
         for f in (page_dir / "segmentation").glob("*.npz"):
             f.unlink()
         (page_dir / "segmentation.json").unlink()
+        (page_dir / "page_manifest.json").unlink()
 
     class AssertiveGrounding(CountingGroundingClient):
         def load(self) -> None:
