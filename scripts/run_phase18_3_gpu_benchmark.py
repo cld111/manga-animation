@@ -447,6 +447,7 @@ def main() -> None:
         "--parts", default="abc", help="which parts to run (default: all)"
     )
     parser.add_argument("--resolution", type=int, default=1536)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     args = parser.parse_args()
 
     out_path = Path(args.out)
@@ -460,7 +461,9 @@ def main() -> None:
         "parts": {},
     }
 
-    vlm_client = Qwen25VLClient(source=args.qwen, dtype="float16", max_new_tokens=768)
+    vlm_client = Qwen25VLClient(
+        source=args.qwen, dtype="float16", max_new_tokens=args.max_new_tokens
+    )
 
     try:
         if "a" in args.parts:
