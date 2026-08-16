@@ -124,6 +124,7 @@ def _run_mode_b(
     labels: list[str],
     qwen: Qwen3VLClient,
     dino: GroundingDinoClient,
+    sam_source: str,
     out_dir: Path,
     max_long_edge: int,
     max_new_tokens: int,
@@ -182,7 +183,9 @@ def _run_mode_b(
         config,
         vlm_client=CountingVLM(qwen),
         grounding_client=dino,
-        segmentation_client=Sam21Client(device=config.resolve_device(), dtype="float32"),
+        segmentation_client=Sam21Client(
+            source=sam_source, device=config.resolve_device(), dtype="float32"
+        ),
         reconstruction_client=LamaClient(device=config.resolve_device(), model_id="lama-large"),
         out_dir=out_dir,
         labels=labels,
@@ -204,6 +207,7 @@ def _run_mode_a(
     labels: list[str],
     qwen: Qwen3VLClient,
     dino: GroundingDinoClient,
+    sam_source: str,
     out_dir: Path,
 ) -> dict:
     """Panel mode: the production `run_pages` path, one Qwen call per panel."""
@@ -214,7 +218,9 @@ def _run_mode_a(
         config,
         vlm_client=counting,
         grounding_client=dino,
-        segmentation_client=Sam21Client(device=config.resolve_device(), dtype="float32"),
+        segmentation_client=Sam21Client(
+            source=sam_source, device=config.resolve_device(), dtype="float32"
+        ),
         reconstruction_client=LamaClient(device=config.resolve_device(), model_id="lama-large"),
         out_dir=out_dir,
         labels=labels,
@@ -303,6 +309,7 @@ def main() -> None:
                 labels=labels,
                 qwen=qwen,
                 dino=dino,
+                sam_source=args.sam,
                 out_dir=out_dir / "mode_a",
             )
             report["modes"]["A"] = mode_a
@@ -314,6 +321,7 @@ def main() -> None:
                 labels=labels,
                 qwen=qwen,
                 dino=dino,
+                sam_source=args.sam,
                 out_dir=out_dir / "mode_b",
                 max_long_edge=args.resolution_b,
                 max_new_tokens=args.max_new_tokens_b,
