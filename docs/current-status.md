@@ -30,7 +30,10 @@ page -> deterministic panel detection -> bounded scene crops
   It is the single-page wrapper over the Phase 18.4 batch entry point `run_pages`, which
   processes MANY pages with one model residency per stage ACROSS pages: each model loads ONCE,
   processes every eligible panel of every page (saving results per page), then releases --
-  never a per-page load/unload cycle.
+  never a per-page load/unload cycle. Each model stage persists its outputs to disk before
+  release (`grounding.json`, `descriptions.json`, `segmentation.json` + mask `.npz` per page),
+  and a later invocation loads completed stages from disk without re-loading their models
+  (a killed session resumes from the last completed stage).
 - `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
   is bounded by page edges and nearby panel geometry.
 - Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result

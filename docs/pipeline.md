@@ -60,7 +60,11 @@ coordinates are recovered for cross-panel safety checks by adding the scene crop
 `run_pages` is the batch entry point (Phase 18.4): it processes MANY pages with stage-level
 model residency ACROSS pages. Each model loads ONCE, processes every eligible panel of EVERY
 page (saving its outputs into that page's state), and only then is released and the next
-model loads -- never a per-page load/unload cycle. `run_page_panels` is the single-page
+model loads -- never a per-page load/unload cycle. Every model stage ALSO persists its
+outputs to disk before the model is released (`grounding.json`, `descriptions.json`,
+`segmentation.json` + mask `.npz` per page): a later invocation loads the completed stages
+from disk and never re-loads their models, so a killed session resumes from the last
+completed stage instead of re-running DINO/Qwen/SAM. `run_page_panels` is the single-page
 convenience wrapper over the same code path.
 
 Each panel is recorded as `PASS`, `STATIC`, `REJECTED` or `ERROR`. A page manifest is written

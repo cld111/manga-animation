@@ -28,6 +28,7 @@ from PIL import Image
 from manga_animation.analysis import VLMClient, detect_panels
 from manga_animation.analysis.panels import derive_scene_crop_bbox
 from manga_animation.core.config import PipelineConfig
+from manga_animation.core.logging import get_logger
 from manga_animation.grounding import GroundingClient
 from manga_animation.pipeline.lifecycle import ModelStage
 from manga_animation.pipeline.orchestrator import (
@@ -40,6 +41,17 @@ from manga_animation.pipeline.orchestrator import (
     _ground_labels,
     _reconstruct_objects,
     _segment_candidates,
+)
+from manga_animation.pipeline.persistence import (
+    has_descriptions,
+    has_grounding,
+    has_segmentation,
+    load_descriptions,
+    load_grounding,
+    load_segmentation,
+    save_descriptions,
+    save_grounding,
+    save_segmentation,
 )
 from manga_animation.pipeline.types import (
     BBoxPx,
@@ -55,6 +67,8 @@ from manga_animation.pipeline.types import (
 from manga_animation.reconstruction import ReconstructionClient
 from manga_animation.schemas.animation_plan import AnimationPlan, ObjectPlan
 from manga_animation.segmentation import SegmentationClient
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -300,6 +314,12 @@ def run_pages(
     the bboxes that earned an action description. A panel failure is recorded and
     processing continues; manifests are written after each stage so completed PASS/STATIC
     panels are reusable on a later invocation.
+
+    Stage outputs are ALSO persisted to disk after every model stage (Phase 18.4): each
+    page dir receives `grounding.json`, `descriptions.json`, and `segmentation.json` +
+    mask `.npz` files. On a later invocation the completed stages are loaded from disk and
+    their models are NOT loaded at all -- a killed session resumes from the last completed
+    stage instead of re-running DINO/Qwen/SAM from scratch.
     """
     active_labels = list(labels or DEFAULT_ANIMATION_LABELS)
     states = [_prepare_page_state(path, out_dir, config) for path in image_paths]
@@ -307,93 +327,147 @@ def run_pages(
 
     # -------------------------------------------------------------------------------------
     # Stage 1: grounding -- DINO processes every eligible panel of EVERY page, then releases.
+    # A completed grounding stage is restored from disk (no model load at all).
     # -------------------------------------------------------------------------------------
-    with ModelStage(grounding_client, name="grounding"):
-        for state in states:
-            for panel in state.panels:
-                panel_id = panel.panel_id
-                if panel.status in ("PASS", "STATIC"):
-                    continue  # resumed from an earlier manifest
-                state.panel_started_at[panel.panel_id] = time.perf_counter()
-                try:
-                    plans, grounded, dropped = _ground_labels(
-                        state.crops[panel_id],
-                        active_labels,
-                        grounding_client,
-                        panel_bbox_px=_crop_local_panel_bbox(state, panel),
-                    )
-                except PipelineStageError as exc:
-                    _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
-                    continue
-                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                    _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                    continue
-                state.candidates_by_panel[panel_id] = grounded
-                state.plan_by_object_by_panel[panel_id] = {p.object_id: p for p in plans}
-                state.dropped_by_panel[panel_id] = dropped
+    resume_grounding = [s for s in states if has_grounding(s.page_dir)]
+    for state in resume_grounding:
+        (
+            state.candidates_by_panel,
+            state.plan_by_object_by_panel,
+            state.dropped_by_panel,
+        ) = load_grounding(state.page_dir)
+        logger.info(
+            "grounding: restored %d panel(s) from %s (no DINO load)",
+            len(state.candidates_by_panel),
+            state.page_dir / "grounding.json",
+        )
+    pending_grounding = [s for s in states if not has_grounding(s.page_dir)]
+    if pending_grounding:
+        with ModelStage(grounding_client, name="grounding"):
+            for state in pending_grounding:
+                for panel in state.panels:
+                    panel_id = panel.panel_id
+                    if panel.status in ("PASS", "STATIC"):
+                        continue  # resumed from an earlier manifest
+                    state.panel_started_at[panel.panel_id] = time.perf_counter()
+                    try:
+                        plans, grounded, dropped = _ground_labels(
+                            state.crops[panel_id],
+                            active_labels,
+                            grounding_client,
+                            panel_bbox_px=_crop_local_panel_bbox(state, panel),
+                        )
+                    except PipelineStageError as exc:
+                        _finalize(
+                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+                        continue
+                    state.candidates_by_panel[panel_id] = grounded
+                    state.plan_by_object_by_panel[panel_id] = {p.object_id: p for p in plans}
+                    state.dropped_by_panel[panel_id] = dropped
+        for state in pending_grounding:
+            save_grounding(
+                state.page_dir,
+                state.candidates_by_panel,
+                state.plan_by_object_by_panel,
+                state.dropped_by_panel,
+            )
     _write_all_manifests(states)
 
     # -------------------------------------------------------------------------------------
     # Stage 2: object description -- THE single VLM stage. Qwen loads once and processes
     # every eligible panel's grounded candidates of EVERY page, then releases. Runs BEFORE
-    # segmentation (Phase 18.4 ordering: DINO -> Qwen -> SAM).
+    # segmentation (Phase 18.4 ordering: DINO -> Qwen -> SAM). A completed description stage
+    # is restored from disk (no Qwen load at all).
     # -------------------------------------------------------------------------------------
-    with ModelStage(vlm_client, name="object_description"):
-        for state in states:
-            for panel in state.panels:
-                panel_id = panel.panel_id
-                if panel_id not in state.candidates_by_panel:
-                    continue  # failed at grounding
-                try:
-                    desc, dropped = _describe_candidates(
-                        state.crops[panel_id],
-                        state.candidates_by_panel[panel_id],
-                        state.plan_by_object_by_panel[panel_id],
-                        vlm_client,
-                        config,
-                        panel_bbox_px=_crop_local_panel_bbox(state, panel),
-                    )
-                except PipelineStageError as exc:
-                    _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
-                    continue
-                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                    _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                    continue
-                state.descriptions_by_panel[panel_id] = desc
-                state.dropped_by_panel[panel_id].extend(dropped)
+    resume_descriptions = [s for s in states if has_descriptions(s.page_dir)]
+    for state in resume_descriptions:
+        state.descriptions_by_panel = load_descriptions(state.page_dir)
+        logger.info(
+            "object description: restored %d panel(s) from %s (no Qwen load)",
+            len(state.descriptions_by_panel),
+            state.page_dir / "descriptions.json",
+        )
+    pending_descriptions = [s for s in states if not has_descriptions(s.page_dir)]
+    if pending_descriptions:
+        with ModelStage(vlm_client, name="object_description"):
+            for state in pending_descriptions:
+                for panel in state.panels:
+                    panel_id = panel.panel_id
+                    if panel_id not in state.candidates_by_panel:
+                        continue  # failed at grounding
+                    try:
+                        desc, dropped = _describe_candidates(
+                            state.crops[panel_id],
+                            state.candidates_by_panel[panel_id],
+                            state.plan_by_object_by_panel[panel_id],
+                            vlm_client,
+                            config,
+                            panel_bbox_px=_crop_local_panel_bbox(state, panel),
+                        )
+                    except PipelineStageError as exc:
+                        _finalize(
+                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+                        continue
+                    state.descriptions_by_panel[panel_id] = desc
+                    state.dropped_by_panel[panel_id].extend(dropped)
+        for state in pending_descriptions:
+            save_descriptions(state.page_dir, state.descriptions_by_panel)
     _write_all_manifests(states)
 
     # -------------------------------------------------------------------------------------
     # Stage 3: segmentation -- SAM processes ONLY the accepted candidates of every eligible
-    # panel of EVERY page, then releases (Phase 18.4 ordering: DINO -> Qwen -> SAM).
+    # panel of EVERY page, then releases (Phase 18.4 ordering: DINO -> Qwen -> SAM). A
+    # completed segmentation stage is restored from disk (no SAM load at all).
     # -------------------------------------------------------------------------------------
-    with ModelStage(segmentation_client, name="segmentation"):
-        for state in states:
-            for panel in state.panels:
-                panel_id = panel.panel_id
-                if panel_id not in state.descriptions_by_panel:
-                    continue  # failed at grounding or object description
-                accepted_keys = {
-                    key
-                    for key, description in state.descriptions_by_panel[panel_id].items()
-                    if description.accepted
-                }
-                try:
-                    seg, dropped = _segment_candidates(
-                        state.crops[panel_id],
-                        state.candidates_by_panel[panel_id],
-                        state.plan_by_object_by_panel[panel_id],
-                        segmentation_client,
-                        accepted_keys=accepted_keys,
-                    )
-                except PipelineStageError as exc:
-                    _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
-                    continue
-                except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                    _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
-                    continue
-                state.segmentation_by_panel[panel_id] = seg
-                state.dropped_by_panel[panel_id].extend(dropped)
+    resume_segmentation = [s for s in states if has_segmentation(s.page_dir)]
+    for state in resume_segmentation:
+        state.segmentation_by_panel = load_segmentation(state.page_dir)
+        logger.info(
+            "segmentation: restored %d panel(s) from %s (no SAM load)",
+            len(state.segmentation_by_panel),
+            state.page_dir / "segmentation.json",
+        )
+    pending_segmentation = [s for s in states if not has_segmentation(s.page_dir)]
+    if pending_segmentation:
+        with ModelStage(segmentation_client, name="segmentation"):
+            for state in pending_segmentation:
+                for panel in state.panels:
+                    panel_id = panel.panel_id
+                    if panel_id not in state.descriptions_by_panel:
+                        continue  # failed at grounding or object description
+                    accepted_keys = {
+                        key
+                        for key, description in state.descriptions_by_panel[panel_id].items()
+                        if description.accepted
+                    }
+                    try:
+                        seg, dropped = _segment_candidates(
+                            state.crops[panel_id],
+                            state.candidates_by_panel[panel_id],
+                            state.plan_by_object_by_panel[panel_id],
+                            segmentation_client,
+                            accepted_keys=accepted_keys,
+                        )
+                    except PipelineStageError as exc:
+                        _finalize(
+                            state, panel, _failure_status(exc.stage), exc.stage, exc.detail
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure
+                        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+                        continue
+                    state.segmentation_by_panel[panel_id] = seg
+                    state.dropped_by_panel[panel_id].extend(dropped)
+        for state in pending_segmentation:
+            save_segmentation(state.page_dir, state.segmentation_by_panel)
     _write_all_manifests(states)
 
     # -------------------------------------------------------------------------------------
