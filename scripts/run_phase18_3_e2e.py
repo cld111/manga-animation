@@ -32,11 +32,30 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from manga_animation.analysis import Qwen25VLClient
+from manga_animation.analysis import Qwen25VLClient, VLMClient
 from manga_animation.core.config import load_config
+from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
 from manga_animation.pipeline.panels import run_page_panels
 from manga_animation.segmentation import Sam21Client
+
+
+class CountingVLMClient:
+    """Wraps the real Qwen client and counts every generate() call, so the report can prove
+    the Phase 18.3 contract: exactly one VLM call per panel (all its bboxes in one prompt)."""
+
+    def __init__(self, inner: VLMClient):
+        self._inner = inner
+        self.call_count = 0
+        self.boxes_per_call: list[int] = []
+
+    def generate(self, image, prompt: str) -> str:
+        self.call_count += 1
+        self.boxes_per_call.append(sum(1 for line in prompt.splitlines() if line.startswith("[")))
+        return self._inner.generate(image, prompt)
+
+    def unload(self) -> None:
+        self._inner.unload()
 
 
 def main() -> None:
@@ -66,7 +85,10 @@ def main() -> None:
     )
     assert config.enable_object_description_validation, "the Phase 18.3 stage must be enabled"
 
-    vlm_client = Qwen25VLClient(source=args.qwen, dtype="float16")
+    vlm_client = CountingVLMClient(
+        Qwen25VLClient(source=args.qwen, dtype="float16")
+    )
+    setup_logging("INFO")
     device = config.resolve_device()
     grounding_client = GroundingDinoClient(source=args.dino, device=device, dtype="float32")
     segmentation_client = Sam21Client(source=args.sam, device=device, dtype="float32")
@@ -124,8 +146,13 @@ def main() -> None:
                     pass
 
     report["elapsed_s"] = round(time.perf_counter() - started, 1)
+    report["vlm_calls"] = vlm_client.call_count
+    report["boxes_per_vlm_call"] = vlm_client.boxes_per_call
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"wrote {args.out}")
+    print(
+        f"VLM calls: {vlm_client.call_count}, boxes per call: {vlm_client.boxes_per_call}"
+    )
 
 
 if __name__ == "__main__":
