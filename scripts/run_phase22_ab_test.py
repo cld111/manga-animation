@@ -136,6 +136,7 @@ def _run_mode_b(
     started = time.perf_counter()
 
     state = _prepare_page_state(page_path, out_dir, config)
+    dino.load()  # run_pages unloaded DINO at the end of mode A (stage-owned, ADR 0023)
     _ground_and_checkpoint(state, labels, dino)
 
     # One candidate list for the whole page; bboxes translated to page coordinates.
