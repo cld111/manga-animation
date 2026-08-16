@@ -384,6 +384,86 @@ def test_run_pipeline_makes_exactly_one_vlm_call_for_all_candidates(
     assert listed_boxes == len(result.dropped_objects) + len(result.secondary_objects) + 1
 
 
+class CountingSegmentationClient:
+    """Fake SAM that counts every `segment()` call and remembers the boxes it was asked to
+    segment -- used to prove the Phase 18.4 contract: SAM runs ONLY on accepted bboxes."""
+
+    model_id = "fake-sam2.1"
+
+    def __init__(self):
+        self.calls: list[tuple[int, int, int, int]] = []
+
+    def load(self) -> None:
+        pass
+
+    def segment(self, image, box) -> list[MaskCandidate]:
+        self.calls.append((box.x0, box.y0, box.x1, box.y1))
+        mask = _region_mask(image.shape[0], image.shape[1], box)
+        return [MaskCandidate(mask=mask, iou_score=0.9)]
+
+    def unload(self) -> None:
+        pass
+
+
+@requires_ffmpeg
+def test_run_pipeline_sam_segments_only_accepted_bboxes(
+    page_path: Path, config, tmp_path: Path
+):
+    """Phase 18.4 ordering (DINO -> Qwen -> SAM): of two grounded bboxes, only the one with
+    an accepted action description is ever handed to SAM."""
+    sam = CountingSegmentationClient()
+    result = run_pipeline(
+        page_path,
+        config,
+        labels=["character", "flag_banner"],
+        vlm_client=RecordingVLMClient(
+            lambda image, prompt: _fake_batch_response(
+                sum(1 for line in prompt.splitlines() if line.startswith("[")),
+                accepted={0},
+                motion_kind="sway",
+            )
+        ),
+        grounding_client=FakeGroundingClient(boxes=[(10, 10, 60, 90), (30, 40, 80, 120)]),
+        segmentation_client=sam,
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    assert result.render.output_path.exists()
+    assert result.primary_object.semantic_label == "character"
+    # Exactly one SAM call, for the accepted bbox (the first grounded one).
+    assert sam.calls == [(10, 10, 60, 90)]
+
+
+@requires_ffmpeg
+def test_run_pipeline_rejected_candidate_never_reaches_sam_or_render(
+    page_path: Path, config, tmp_path: Path
+):
+    """A VLM-rejected bbox is never segmented and never animated: only the accepted
+    candidate's mask participates in the final plan."""
+    sam = CountingSegmentationClient()
+    result = run_pipeline(
+        page_path,
+        config,
+        labels=["character", "flag_banner"],
+        vlm_client=RecordingVLMClient(
+            lambda image, prompt: _fake_batch_response(
+                sum(1 for line in prompt.splitlines() if line.startswith("[")),
+                accepted={1},
+                motion_kind="flow",
+            )
+        ),
+        grounding_client=FakeGroundingClient(boxes=[(10, 10, 60, 90), (30, 40, 80, 120)]),
+        segmentation_client=sam,
+        reconstruction_client=FakeReconstructionClient(),
+        out_dir=tmp_path / "out",
+    )
+    assert sam.calls == [(30, 40, 80, 120)]  # only the accepted bbox was segmented
+    assert result.primary_object.semantic_label == "character"
+    # 2 labels x 2 boxes = 4 candidates in the batch; 1 accepted, 3 rejected at description.
+    assert len(result.dropped_objects) == 3
+    assert all(d.failing_stage == "object_description" for d in result.dropped_objects)
+
+
 @requires_ffmpeg
 def test_run_pipeline_batches_multiple_candidates_of_one_image_in_one_call(
     page_path: Path, config, tmp_path: Path

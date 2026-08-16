@@ -139,11 +139,12 @@ def run_page_panels(
     """Detect and process every panel independently on its scene-crop canvas.
 
     Stage-level model lifecycle (ADR 0020): each model-backed stage loads its client once,
-    processes every eligible panel, then deterministically releases it. In the Phase 18.3
+    processes every eligible panel, then deterministically releases it. In the Phase 18.4
     architecture the VLM is loaded exactly ONCE for the whole page -- in the object-
-    description stage -- and no analysis stage exists at all. A panel failure is recorded and
-    processing continues; the manifest is written after each stage so completed PASS/STATIC
-    panels are reusable on a later invocation.
+    description stage, which runs BEFORE segmentation (DINO -> Qwen -> SAM): SAM segments
+    only the bboxes that earned an action description -- and no analysis stage exists at
+    all. A panel failure is recorded and processing continues; the manifest is written
+    after each stage so completed PASS/STATIC panels are reusable on a later invocation.
     """
     image_path = image_path.resolve()
     page_id = image_path.stem
@@ -263,47 +264,22 @@ def run_page_panels(
     write_manifest()
 
     # -------------------------------------------------------------------------------------
-    # Stage 2: segmentation -- SAM processes every eligible panel, then releases.
-    # -------------------------------------------------------------------------------------
-    segmentation_by_panel: dict[str, dict[tuple[str, int], SegmentationResult]] = {}
-    with ModelStage(segmentation_client, name="segmentation"):
-        for panel in panels:
-            panel_id = panel.panel_id
-            if panel_id not in candidates_by_panel:
-                continue  # failed at grounding
-            try:
-                seg, dropped = _segment_candidates(
-                    crops[panel_id],
-                    candidates_by_panel[panel_id],
-                    plan_by_object_by_panel[panel_id],
-                    segmentation_client,
-                )
-            except PipelineStageError as exc:
-                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
-                continue
-            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
-                finalize(panel, "ERROR", type(exc).__name__, str(exc))
-                continue
-            segmentation_by_panel[panel_id] = seg
-            dropped_by_panel[panel_id].extend(dropped)
-    write_manifest()
-
-    # -------------------------------------------------------------------------------------
-    # Stage 3: object description -- THE page's single VLM stage. Qwen loads once and
-    # processes every eligible panel's candidates, then releases.
+    # Stage 2: object description -- THE page's single VLM stage. Qwen loads once and
+    # processes every eligible panel's grounded candidates (ONE call per panel with the
+    # crop + ALL its bboxes), then releases. Runs BEFORE segmentation (Phase 18.4
+    # ordering: DINO -> Qwen -> SAM).
     # -------------------------------------------------------------------------------------
     descriptions_by_panel: dict[str, dict[tuple[str, int], ObjectDescriptionResult]] = {}
     with ModelStage(vlm_client, name="object_description"):
         for panel in panels:
             panel_id = panel.panel_id
-            if panel_id not in segmentation_by_panel:
-                continue  # failed at grounding or segmentation
+            if panel_id not in candidates_by_panel:
+                continue  # failed at grounding
             try:
                 desc, dropped = _describe_candidates(
                     crops[panel_id],
                     candidates_by_panel[panel_id],
                     plan_by_object_by_panel[panel_id],
-                    segmentation_by_panel[panel_id],
                     vlm_client,
                     config,
                     panel_bbox_px=crop_local_panel_bbox(panel, crops[panel_id]),
@@ -315,6 +291,39 @@ def run_page_panels(
                 finalize(panel, "ERROR", type(exc).__name__, str(exc))
                 continue
             descriptions_by_panel[panel_id] = desc
+            dropped_by_panel[panel_id].extend(dropped)
+    write_manifest()
+
+    # -------------------------------------------------------------------------------------
+    # Stage 3: segmentation -- SAM processes ONLY the accepted candidates of every
+    # eligible panel, then releases (Phase 18.4 ordering: DINO -> Qwen -> SAM).
+    # -------------------------------------------------------------------------------------
+    segmentation_by_panel: dict[str, dict[tuple[str, int], SegmentationResult]] = {}
+    with ModelStage(segmentation_client, name="segmentation"):
+        for panel in panels:
+            panel_id = panel.panel_id
+            if panel_id not in descriptions_by_panel:
+                continue  # failed at grounding or object description
+            accepted_keys = {
+                key
+                for key, description in descriptions_by_panel[panel_id].items()
+                if description.accepted
+            }
+            try:
+                seg, dropped = _segment_candidates(
+                    crops[panel_id],
+                    candidates_by_panel[panel_id],
+                    plan_by_object_by_panel[panel_id],
+                    segmentation_client,
+                    accepted_keys=accepted_keys,
+                )
+            except PipelineStageError as exc:
+                finalize(panel, _failure_status(exc.stage), exc.stage, exc.detail)
+                continue
+            except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+                finalize(panel, "ERROR", type(exc).__name__, str(exc))
+                continue
+            segmentation_by_panel[panel_id] = seg
             dropped_by_panel[panel_id].extend(dropped)
     write_manifest()
 
@@ -335,6 +344,8 @@ def run_page_panels(
                 for (object_id, rank), description in descriptions_by_panel[panel_id].items():
                     if not description.accepted:
                         continue
+                    if (object_id, rank) not in segmentation_by_panel[panel_id]:
+                        continue  # accepted by the VLM but dropped at segmentation
                     accepted.append(
                         (
                             object_id,

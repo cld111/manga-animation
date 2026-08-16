@@ -7,8 +7,10 @@ evidence remain in `docs/phase*-results.md`; decision rationale remains in `docs
 ## Status
 
 The deterministic pipeline and local test/evaluation infrastructure are implemented through
-Phase 13's panel-first orchestration, hardened by Phase 14's stage-level model lifecycle and
-validated across multiple real pages and repeated GPU runs in Phase 15. Real model execution
+Phase 13's panel-first orchestration, hardened by Phase 14's stage-level model lifecycle,
+reordered by Phase 18.3 (single VLM object-description stage) and Phase 18.4 (VLM before
+segmentation: SAM segments only bboxes with an accepted action description), and validated
+across multiple real pages and repeated GPU runs. Real model execution
 remains a remote-GPU operation. The project is an engineering prototype with real end-to-end
 evidence and known real-world visual limitations, not a production animation service.
 
@@ -18,7 +20,8 @@ The implemented order is:
 
 ```text
 page -> deterministic panel detection -> bounded scene crops
-  -> grounding -> segmentation -> object_description -> animation
+  -> grounding (DINO) -> object_description (Qwen, ONE call with ALL bboxes)
+  -> segmentation (SAM, only for accepted bboxes) -> animation
   -> reconstruction -> compositing -> rendering
 ```
 
@@ -33,9 +36,6 @@ page -> deterministic panel detection -> bounded scene crops
   before segmentation.
 - `segmentation` produces a full-source-image `uint8` mask and applies coverage and asymmetric
   edge-touch safety checks.
-- `mask_semantics` checks the real segmented mask's content with a VLM, independently of the
-  pre-segmentation bbox check. It returns `ACCEPT`, `REJECT`, or `ABSTAIN` and is enabled by
-  default.
 - `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen2.5-VL sees the FULL
   image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
   crop, never the mask), reads the ACTION happening in the scene, judges each candidate
@@ -46,6 +46,10 @@ page -> deterministic panel detection -> bounded scene crops
   candidate is REJECTED. The architecture has no analysis stage, no crop-based VLM validation
   and no mask-semantics stage; candidate labels come from the caller
   (`DEFAULT_ANIMATION_LABELS`). See docs/phase18.3-results.md.
+- Segmentation runs AFTER object description (Phase 18.4 ordering: DINO -> Qwen -> SAM): SAM2
+  segments ONLY the bboxes that earned an accepted action description, so it never spends an
+  inference on a rejected candidate. A VLM-accepted bbox whose mask then fails the
+  post-segmentation shape checks is still dropped (fail closed).
 - Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
   z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
@@ -70,8 +74,8 @@ The baseline in `configs/default.yaml` is:
 | Grounding/segmentation dtype | verified `float32` |
 | Loop | 4.0s at 24 FPS |
 | Codec | H.264 only |
-| Semantic mask validation | enabled |
-| Per-candidate VLM object description | enabled (Phase 18.3) |
+| Semantic mask validation stage | not part of the 18.3/18.4 runtime (flag retained for legacy evaluation) |
+| Per-candidate VLM object description | enabled (Phase 18.3, runs before segmentation since Phase 18.4) |
 
 These are preliminary operational selections, not an exhaustive cross-candidate benchmark
 conclusion. Candidates without implemented adapters remain research entries.
@@ -85,12 +89,13 @@ conclusion. Candidates without implemented adapters remain research entries.
   failure is isolated and drops only that object.
 - Masks are full-source-image, 2D `uint8` arrays. Cross-object overlap can drop a secondary
   object rather than render a duplicate silhouette.
-- Transform-aware validation is intentionally pre-segmentation because it validates a bbox;
-  semantic mask validation is post-segmentation because it needs the real mask.
+- Transform-aware validation runs inside the object-description stage, before segmentation,
+  because it validates a bbox against a transform kind; mask-level shape checks are
+  post-segmentation because they need the real mask.
 - `parent_id`/`children_ids` are structurally validated, but parent transforms are not
   inherited automatically; each animated object needs its own motion spec.
-- Model-backed stages release their clients after the stage, including analysis, target
-  validation, semantic mask validation, grounding, segmentation, and reconstruction.
+- Model-backed stages release their clients after the stage, including grounding, the VLM
+  object-description stage, segmentation, and reconstruction.
 - GPU model lifecycle is stage-level (Phase 14, ADR 0020): each model-backed stage loads its
   client once, processes every eligible panel, then deterministically releases it before the
   next stage loads its own model. Models never co-reside, and a failed panel can no longer

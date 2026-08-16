@@ -1,14 +1,16 @@
-"""End-to-end pipeline orchestration (Phase 18.3 architecture): real manga page -> seamless MP4.
+"""End-to-end pipeline orchestration (Phase 18.4 architecture): real manga page -> seamless MP4.
 
-The Phase 18.3 architecture calls the VLM EXACTLY ONCE in the whole pipeline -- at the
-per-candidate object-description stage. There is no analysis stage (no Qwen-driven
-AnimationPlan up front), no crop-based VLM validation, and no mask-semantics VLM gate:
+The Phase 18.4 architecture calls the VLM EXACTLY ONCE in the whole pipeline -- at the
+per-candidate object-description stage, which now runs BEFORE segmentation. There is no
+analysis stage (no Qwen-driven AnimationPlan up front), no crop-based VLM validation, and
+no mask-semantics VLM gate:
 
-    grounding (DINO, labels from the caller) -> segmentation (SAM2, masks kept for
-    animation) -> object_description (Qwen2.5-VL: FULL image + bbox pixel coordinates ->
-    structured description; fail-closed) -> animation planning (deterministic ranking and
-    MotionSpec mapping + transform-geometry gate) -> animation (SAM mask + MotionSpec) ->
-    reconstruction (LaMa) -> compositing -> rendering (H.264 + loop metrics)
+    grounding (DINO, labels from the caller) -> object_description (Qwen2.5-VL: FULL image
+    + bbox pixel coordinates -> structured description; fail-closed) -> segmentation (SAM2,
+    ONLY for accepted bboxes, masks kept for animation) -> animation planning
+    (deterministic ranking and MotionSpec mapping + transform-geometry gate) -> animation
+    (SAM mask + MotionSpec) -> reconstruction (LaMa) -> compositing -> rendering (H.264 +
+    loop metrics)
 
 Candidate labels are supplied by the caller (or the documented default list): the pipeline
 no longer invents them with a VLM. Every model family is loaded once per stage
@@ -375,20 +377,27 @@ def _segment_candidates(
     candidates_by_object: dict[str, list[GroundingResult]],
     plan_by_object: dict[str, ObjectPlan],
     segmentation_client: SegmentationClient,
+    *,
+    accepted_keys: set[tuple[str, int]],
 ) -> tuple[dict[tuple[str, int], SegmentationResult], list[DroppedObjectResult]]:
-    """Segment every grounded candidate. A candidate whose mask fails the shape/coverage
-    checks is dropped (fail closed); the object's other candidates are unaffected."""
+    """Segment ONLY the candidates the object-description stage accepted (Phase 18.4
+    ordering: DINO -> Qwen -> SAM, so SAM never runs on a bbox without an action
+    description). A candidate whose mask fails the shape/coverage checks is dropped
+    (fail closed); the object's other accepted candidates are unaffected."""
     segmentation_by_candidate: dict[tuple[str, int], SegmentationResult] = {}
     dropped_objects: list[DroppedObjectResult] = []
     for object_id, candidates in candidates_by_object.items():
         for rank, candidate in enumerate(candidates):
+            if (object_id, rank) not in accepted_keys:
+                continue  # rejected (or unparseable) at object description -- no SAM call
             try:
                 segmentation_by_candidate[(object_id, rank)] = segment_object(
                     image, candidate, segmentation_client
                 )
             except PipelineStageError as exc:
                 logger.warning(
-                    "segmentation failed for candidate object_id=%s rank=%d -- dropping it: %s",
+                    "segmentation failed for accepted candidate object_id=%s rank=%d -- "
+                    "dropping it: %s",
                     object_id,
                     rank,
                     exc.detail,
@@ -407,7 +416,6 @@ def _describe_candidates(
     image: np.ndarray,
     candidates_by_object: dict[str, list[GroundingResult]],
     plan_by_object: dict[str, ObjectPlan],
-    segmentation_by_candidate: dict[tuple[str, int], SegmentationResult],
     vlm_client: VLMClient,
     config: PipelineConfig,
     *,
@@ -417,17 +425,16 @@ def _describe_candidates(
     list[DroppedObjectResult],
 ]:
     """THE pipeline's single VLM stage: ONE call per image with the image and ALL of its
-    segmented candidates' bboxes as pixel coordinates (the model sees every candidate at
-    once, never one crop per candidate). Accepted descriptions additionally pass the
-    deterministic transform-geometry gate (a semantically-good box can still be
+    grounded candidates' bboxes as pixel coordinates (the model sees every candidate at
+    once, never one crop per candidate). Runs BEFORE segmentation (Phase 18.4 ordering:
+    DINO -> Qwen -> SAM); masks play no role here. Accepted descriptions additionally pass
+    the deterministic transform-geometry gate (a semantically-good box can still be
     geometrically unsafe for its mapped motion kind). Fail-closed per candidate."""
 
     batch: list[CandidateBox] = []
     batch_keys: list[tuple[str, int]] = []
     for object_id, candidates in candidates_by_object.items():
         for rank, candidate in enumerate(candidates):
-            if (object_id, rank) not in segmentation_by_candidate:
-                continue  # already dropped at segmentation
             batch.append(
                 CandidateBox(
                     object_id=object_id,
@@ -753,9 +760,9 @@ def run_pipeline(
     video_filename: str = "output.mp4",
     frames_dir: Path | None = None,
 ) -> PipelineRunResult:
-    """Run the Phase 18.3 pipeline on one image: grounding -> segmentation -> the pipeline's
-    single VLM stage (object description) -> animation planning -> animation -> reconstruction
-    -> compositing -> rendering.
+    """Run the Phase 18.4 pipeline on one image: grounding -> object description -> the
+    pipeline's single VLM stage -> segmentation (only accepted bboxes) -> animation
+    planning -> animation -> reconstruction -> compositing -> rendering.
 
     `labels`: the candidate semantic labels to ground (DINO prompts). Defaults to
     `DEFAULT_ANIMATION_LABELS`. The pipeline never invents labels with a VLM.
@@ -784,21 +791,10 @@ def run_pipeline(
     plan_by_object = {plan.object_id: plan for plan in plans_by_object}
     dropped_objects: list[DroppedObjectResult] = list(dropped)
 
-    # Stage 2: segmentation -- SAM2 once for every grounded candidate, then released. Masks
-    # are kept for the animation stage; they are never an input to the VLM.
-    with (
-        ModelStage(segmentation_client, name="segmentation"),
-        StageTimer(
-            "segmentation", logger, device=device, model=config.model_variants.get("segmentation")
-        ),
-    ):
-        segmentation_by_candidate, dropped = _segment_candidates(
-            image, candidates_by_object, plan_by_object, segmentation_client
-        )
-    dropped_objects.extend(dropped)
-
-    # Stage 3: object description -- THE pipeline's single VLM stage. Qwen loads once,
-    # processes every segmented candidate of this canvas, then is released.
+    # Stage 2: object description -- THE pipeline's single VLM stage. Qwen loads once,
+    # processes every grounded candidate of this canvas (ONE call with the image + ALL its
+    # bboxes), then is released. Runs BEFORE segmentation (Phase 18.4 ordering: DINO ->
+    # Qwen -> SAM): SAM only sees bboxes that earned an action description.
     with (
         ModelStage(vlm_client, name="object_description"),
         StageTimer(
@@ -812,10 +808,30 @@ def run_pipeline(
             image,
             candidates_by_object,
             plan_by_object,
-            segmentation_by_candidate,
             vlm_client,
             config,
             panel_bbox_px=panel_bbox_px,
+        )
+    dropped_objects.extend(dropped)
+
+    # Stage 3: segmentation -- SAM2 once, ONLY for candidates accepted at object
+    # description, then released. Masks are kept for the animation stage; they were never
+    # an input to the VLM.
+    accepted_keys = {
+        key for key, description in descriptions_by_candidate.items() if description.accepted
+    }
+    with (
+        ModelStage(segmentation_client, name="segmentation"),
+        StageTimer(
+            "segmentation", logger, device=device, model=config.model_variants.get("segmentation")
+        ),
+    ):
+        segmentation_by_candidate, dropped = _segment_candidates(
+            image,
+            candidates_by_object,
+            plan_by_object,
+            segmentation_client,
+            accepted_keys=accepted_keys,
         )
     dropped_objects.extend(dropped)
 
@@ -827,6 +843,8 @@ def run_pipeline(
     for (object_id, rank), description in descriptions_by_candidate.items():
         if not description.accepted:
             continue
+        if (object_id, rank) not in segmentation_by_candidate:
+            continue  # accepted by the VLM but dropped at segmentation (mask shape gate)
         accepted.append(
             (
                 object_id,
