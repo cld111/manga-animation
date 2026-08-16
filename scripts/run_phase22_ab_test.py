@@ -125,6 +125,7 @@ def _run_mode_b(
     qwen: Qwen3VLClient,
     dino: GroundingDinoClient,
     sam_source: str,
+    aux_device: str,
     out_dir: Path,
     max_long_edge: int,
     max_new_tokens: int,
@@ -185,9 +186,9 @@ def _run_mode_b(
         vlm_client=CountingVLM(qwen),
         grounding_client=dino,
         segmentation_client=Sam21Client(
-            source=sam_source, device=config.resolve_device(), dtype="float32"
+            source=sam_source, device=aux_device, dtype="float32"
         ),
-        reconstruction_client=LamaClient(device=config.resolve_device(), model_id="lama-large"),
+        reconstruction_client=LamaClient(device=aux_device, model_id="lama-large"),
         out_dir=out_dir,
         labels=labels,
     )[0]
@@ -209,6 +210,7 @@ def _run_mode_a(
     qwen: Qwen3VLClient,
     dino: GroundingDinoClient,
     sam_source: str,
+    aux_device: str,
     out_dir: Path,
 ) -> dict:
     """Panel mode: the production `run_pages` path, one Qwen call per panel."""
@@ -220,9 +222,9 @@ def _run_mode_a(
         vlm_client=counting,
         grounding_client=dino,
         segmentation_client=Sam21Client(
-            source=sam_source, device=config.resolve_device(), dtype="float32"
+            source=sam_source, device=aux_device, dtype="float32"
         ),
-        reconstruction_client=LamaClient(device=config.resolve_device(), model_id="lama-large"),
+        reconstruction_client=LamaClient(device=aux_device, model_id="lama-large"),
         out_dir=out_dir,
         labels=labels,
     )[0]
@@ -296,9 +298,12 @@ def main() -> None:
     out_dir = Path(args.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = config.resolve_device()
+    # The auxiliary models (DINO/SAM/LaMa) must live on the SECOND GPU while the Qwen VLM
+    # (device_map="auto", ~8.5 GiB fp16) occupies the first: on a single T4, Qwen + SAM +
+    # LaMa + render buffers OOM'd together (real run, Phase 22 A/B).
+    aux_device = "cuda:1"
     qwen = Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096)
-    dino = GroundingDinoClient(source=args.dino, device=device, dtype="float32")
+    dino = GroundingDinoClient(source=args.dino, device=aux_device, dtype="float32")
 
     report: dict = {
         "phase": "22-ab-test",
@@ -318,6 +323,7 @@ def main() -> None:
                 qwen=qwen,
                 dino=dino,
                 sam_source=args.sam,
+                aux_device=aux_device,
                 out_dir=out_dir / "mode_a",
             )
             report["modes"]["A"] = mode_a
@@ -330,6 +336,7 @@ def main() -> None:
                 qwen=qwen,
                 dino=dino,
                 sam_source=args.sam,
+                aux_device=aux_device,
                 out_dir=out_dir / "mode_b",
                 max_long_edge=args.resolution_b,
                 max_new_tokens=args.max_new_tokens_b,
