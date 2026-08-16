@@ -129,6 +129,29 @@ def _draw_character(
     _fill(page, (cx - head_r, cy - head_r, cx + head_r, cy - head_r + hair_h), hair)
 
 
+def _add_motion_lines(page: np.ndarray, box: tuple[int, int, int, int]) -> None:
+    """Short diagonal speed lines fanning out from the top-right of `box` -- the manga
+    convention for an active/dynamic subject, so the VLM reads the scene as in motion."""
+    from PIL import ImageDraw
+
+    x0, y0, x1, y1 = box
+    rng = np.random.default_rng(11)
+    img = Image.fromarray(page)
+    draw = ImageDraw.Draw(img)
+    for _ in range(14):
+        start_x = int(rng.integers(x1 - 40, x1 + 30))
+        start_y = int(rng.integers(y0 - 30, y0 + 40))
+        length = int(rng.integers(14, 34))
+        dx = int(rng.integers(2, 8))
+        dy = -int(rng.integers(2, 8))
+        draw.line(
+            [start_x, start_y, start_x + dx * length, start_y + dy * length],
+            fill=(40, 40, 45),
+            width=3,
+        )
+    page[...] = np.asarray(img)
+
+
 def _build_scenario_pages() -> list[CuratedCase]:
     """Deterministic synthetic pages for every required scenario. Each case's bbox is the
     *candidate* the pipeline asks the VLM about -- some intentionally bad (that is the point
@@ -139,15 +162,18 @@ def _build_scenario_pages() -> list[CuratedCase]:
     def new_page() -> np.ndarray:
         return np.full((H, W, 3), (245, 244, 238), dtype=np.uint8)
 
-    # 1. Single unambiguous object: one character in the middle of a plain page.
+    # 1. Single unambiguous object: one character in the middle of a plain page, with speed
+    #    lines so the scene reads as in motion.
     page = new_page()
     _draw_character(page, (360, 200), 90, (180, 60, 60))
+    _add_motion_lines(page, (300, 160, 420, 400))
     cases.append(CuratedCase("single_object", "character", page, (300, 160, 420, 400)))
 
     # 2. Several objects near each other: two characters, candidate box around the left one.
     page = new_page()
     _draw_character(page, (280, 200), 90, (180, 60, 60))
     _draw_character(page, (470, 220), 70, (60, 60, 180))
+    _add_motion_lines(page, (210, 150, 350, 420))
     cases.append(CuratedCase("several_nearby", "character", page, (210, 150, 350, 420)))
 
     # 3. A bbox that CONTAINS several objects: box spanning both characters.
@@ -163,12 +189,14 @@ def _build_scenario_pages() -> list[CuratedCase]:
     # 5. Occluded object: a character half-covered by a large foreground box.
     page = new_page()
     _draw_character(page, (360, 220), 90, (180, 60, 60))
+    _add_motion_lines(page, (300, 160, 420, 430))
     _fill(page, (260, 260, 460, 420), (90, 90, 100))  # occluding slab
     cases.append(CuratedCase("occluded_object", "character", page, (300, 160, 420, 430)))
 
     # 6. Small object: tiny character on a large page.
     page = new_page()
     _draw_character(page, (360, 300), 26, (180, 60, 60))
+    _add_motion_lines(page, (345, 285, 375, 360))
     cases.append(CuratedCase("small_object", "character", page, (345, 285, 375, 360)))
 
     # 7. Complex background: character over dense noise/pattern.
@@ -176,6 +204,7 @@ def _build_scenario_pages() -> list[CuratedCase]:
     rng = np.random.default_rng(7)
     page[:] = rng.integers(150, 245, size=(H, W, 3), dtype=np.uint8)
     _draw_character(page, (360, 250), 90, (180, 60, 60))
+    _add_motion_lines(page, (300, 190, 420, 440))
     cases.append(CuratedCase("complex_background", "character", page, (300, 190, 420, 440)))
 
     # 8. Several visually similar objects: three same-colored characters; box around one.
@@ -201,6 +230,7 @@ def _build_scenario_pages() -> list[CuratedCase]:
     #     body is fused into a static wall -- the VLM should report the constraint.
     page = new_page()
     _draw_character(page, (360, 250), 90, (180, 60, 60))
+    _add_motion_lines(page, (300, 190, 420, 440))
     _fill(page, (280, 380, 440, 460), (120, 110, 100))  # wall fused with the lower body
     cases.append(
         CuratedCase(

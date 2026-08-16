@@ -63,7 +63,8 @@ Return ONLY the corrected JSON object, in exactly this shape:
 {{"bbox_assessment": one of "pass" | "ambiguous" | "partial" | "reject" | "not_animatable" \
 (only these five, exactly), "object_identity": "short snake_case name", \
 "matches_semantic_label": true or false, "animatable": true or false, "movable_parts": [...], \
-"static_parts": [...], "motion_kind": null or one of "sway"|"flow"|"drift"|"rotate"|"pulse"|"breathe"|"flicker", \
+"static_parts": [...], "motion_kind": null or one of "sway"|"flow"|"drift"|"rotate"|"pulse"|\
+"breathe"|"flicker", \
 "direction": null or one of "up"|"down"|"left"|"right"|"up_left"|"up_right"|"down_left"|"down_right", \
 "amplitude_band": "subtle"|"moderate"|"pronounced", "speed_band": "slow"|"normal"|"fast", \
 "pivot_hint": "top"|"center"|"bottom", "constraints": [...], "neighbor_conflicts": [...], \

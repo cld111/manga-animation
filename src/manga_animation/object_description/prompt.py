@@ -125,6 +125,14 @@ panel borders, and occlusions. The intended animation target is: "{semantic_labe
 Grounding models often propose a box that is technically a detection but a bad animation \
 candidate; your job is to catch that.
 
+CONTEXT: the pipeline has already decided this object is an intended animation target. A \
+still manga drawing of a person, animal, weapon, flag, hair or cloth is NORMAL and remains \
+perfectly animatable -- subtle life (hair swaying, cloth moving, a weapon glinting) is the \
+pipeline's whole purpose, and it does not require visible motion lines. "animatable": false \
+is reserved for content that CANNOT be moved safely: lettering/text, rigid background \
+structures, heavily occluded or cut-off regions, or objects whose motion would collide with \
+neighboring content.
+
 STEP 1 - assess the candidate region itself. Answer exactly one of:
 - "pass": the box contains EXACTLY ONE coherent instance of the intended object, well \
 represented as a single object candidate (a character alone, a single flag, one weapon).
@@ -162,7 +170,9 @@ Rules (violating any of these is a wrong answer):
 more characters, or a character plus a weapon/prop, or several visually similar instances, is \
 "ambiguous" -- never "pass". When genuinely uncertain between "pass" and a stricter verdict, \
 choose the stricter one: this pipeline prefers a clean rejection over animating the wrong \
-region.
+region. But do NOT reject an ordinary, well-isolated object just because the drawing is \
+stylized or blocky -- "matches_semantic_label" means "the box contains the same KIND of \
+object as the label" (a stylized person is still a character), not a literal name match.
 3. Lettering is NEVER animatable, no matter what the semantic_label says (even if the label \
 literally names it, e.g. "text_banner"): speech bubbles, dialogue, sound effects, captions, \
 banners of text -- any box whose content is text-like must be assessed "not_animatable" (or \
