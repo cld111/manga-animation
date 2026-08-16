@@ -46,10 +46,10 @@ page -> deterministic panel detection -> bounded scene crops
   before segmentation.
 - `segmentation` produces a full-source-image `uint8` mask and applies coverage and asymmetric
   edge-touch safety checks.
-- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen3-VL-8B int8
-  (Phase 22: one pre-quantized bitsandbytes int8 instance PER GPU, ADR 0023, replacing the
-  Phase 20 fp16 sharded Qwen3-VL) sees the FULL
-  image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
+- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. A per-panel Qwen call
+  (one call per panel with all its grounded candidates' bboxes in crop-local coordinates) is
+  the production path: Qwen3-VL-4B fp16 (Phase 22 A/B, see `phase22-ab-test.md`) sees the FULL
+  panel plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
   crop, never the mask), reads the ACTION happening in the scene, judges each candidate
   (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
   description whose deterministically-mapped `MotionSpec` drives the animation stage (with the
@@ -77,7 +77,7 @@ The baseline in `configs/default.yaml` is:
 | Setting | Current value |
 |---|---|
 | Analysis mode default | `run_pipeline(..., analysis_mode="panel")` |
-| VLM | `qwen3-vl-8b-int8` (one int8 instance per GPU, worker pool) |
+| VLM | `qwen3-vl-8b-int8` (one int8 instance per GPU, worker pool); Qwen3-VL-4B fp16 validated as faster per-panel alternative (Phase 22 A/B) |
 | Grounding | `grounding-dino-swin-l` |
 | Segmentation | `sam2.1-hiera-base` |
 | Inpainting | `lama-large` |
@@ -199,6 +199,13 @@ conclusion. Candidates without implemented adapters remain research entries.
   Case A (candidate exists, ranking is the problem): next step is candidate selection /
   reranking (Phase 18.2), not candidate generation; the 7 category-C targets are the
   grounding-scale floor, not fixable by a selector.
+- Phase 20-22 VLM migration and the Phase 22 A/B test (docs/phase22-ab-test.md):
+  Qwen3-VL-8B fp16 sharded (Phase 20/21, ADR 0021/0022) and per-GPU int8 (Phase 22,
+  ADR 0023) both ran on `wind_breaker_sprint` (1222s and 1818s respectively). The A/B test on
+  Qwen3-VL-4B fp16 measured panel-mode (A) at 1015.7s with 3/4 PASS panels vs. full-page
+  single-call mode (B) at 1581.8s with 4/4 REJECTED (the model's single JSON covered only 10
+  of 52 boxes -> unparseable -> fail-closed). Conclusion: per-panel VLM calls remain the
+  production default; full-page single-call description is not viable at 52 candidates on a T4.
 
 ## Known Limitations and Technical Debt
 
@@ -367,4 +374,5 @@ changes move between local and remote only through git.
   description) evidence in [`phase18.3-results.md`](phase18.3-results.md) and the full work
   report in [`phase18.3-report.md`](phase18.3-report.md). Phase 18.4 (batch ordering
   DINO -> Qwen -> SAM, per-stage disk persistence, GPU/CPU profiling) in
-  [`phase18.4-results.md`](phase18.4-results.md).
+  [`phase18.4-results.md`](phase18.4-results.md). Phase 22 A/B (panel vs. full-page VLM
+  description) in [`phase22-ab-test.md`](phase22-ab-test.md).
