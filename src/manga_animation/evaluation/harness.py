@@ -44,17 +44,20 @@ from manga_animation.evaluation.nondeterminism import (
 )
 from manga_animation.evaluation.schemas import (
     LoopMetricsOutcome,
-    MaskSemanticOutcome,
     ObjectAttemptOutcome,
+    ObjectDescriptionOutcome,
     PageRunOutcome,
     RenderSummary,
-    ValidationAttemptOutcome,
 )
 from manga_animation.pipeline.orchestrator import run_pipeline
-from manga_animation.pipeline.types import MaskSemanticResult, PipelineStageError, RenderResult
+from manga_animation.pipeline.types import (
+    ObjectDescriptionResult,
+    PipelineStageError,
+    RenderResult,
+)
 from manga_animation.schemas.animation_plan import MotionType
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 """The `PageRunOutcome.schema_version` every producer using this harness writes -- see that
 
 field's own docstring for what each version number means. Named here (not just inlined as a
@@ -136,26 +139,28 @@ def _decode_frames(video_path: Path) -> list[np.ndarray]:
     return frames
 
 
-def mask_semantics_outcome_from_result(
-    result: MaskSemanticResult | None,
-) -> MaskSemanticOutcome | None:
-    """`pipeline.types.MaskSemanticResult` -> `evaluation.schemas.MaskSemanticOutcome` -- `None`
-
-    in, `None` out (the gate didn't run for this object, or was disabled entirely), same
-    convention `render_summary_from_result` has no equivalent for since `RenderResult` always
-    exists on a completed run.
-    """
+def object_description_outcome_from_result(
+    result: ObjectDescriptionResult | None,
+) -> ObjectDescriptionOutcome | None:
+    """`pipeline.types.ObjectDescriptionResult` -> `evaluation.schemas.ObjectDescriptionOutcome`
+    -- `None` in, `None` out (the stage didn't run for this object, or was disabled)."""
     if result is None:
         return None
-    return MaskSemanticOutcome(
-        verdict=result.verdict,
-        vlm_matches=result.vlm_matches,
-        vlm_confidence=result.vlm_confidence,
-        reason=result.reason,
+    return ObjectDescriptionOutcome(
+        accepted=result.accepted,
+        assessment=result.assessment,
+        matches_semantic_label=result.matches_semantic_label,
+        animatable=result.animatable,
+        object_identity=result.object_identity,
+        motion=result.motion_spec.model_dump() if result.motion_spec is not None else None,
+        movable_parts=list(result.movable_parts),
+        static_parts=list(result.static_parts),
+        constraints=list(result.constraints),
+        neighbor_conflicts=list(result.neighbor_conflicts),
+        confidence=result.confidence,
+        rejection_reason=result.rejection_reason,
         model_id=result.model_id,
         method=result.method,
-        unexpected_content=list(result.unexpected_content),
-        geometric_signals=dict(result.geometric_signals),
     )
 
 
@@ -218,13 +223,11 @@ def run_one_sample(
             segmentation_client=segmentation_client,
             reconstruction_client=reconstruction_client,
             out_dir=out_dir,
-            analysis_mode=mode,
         )
     except PipelineStageError as exc:
         # No PipelineRunResult exists on this path (run_pipeline raised before returning), so
-        # there is no visibility into which SECONDARY/MICRO objects might have been attempted
-        # -- object_outcomes/render_summary stay empty/None here, same as any other
-        # schema_version=3 page that genuinely had none/nothing rendered.
+        # there is no visibility into which candidates might have been attempted --
+        # object_outcomes/render_summary stay empty/None here.
         return PageRunOutcome(
             sample_id=sample.sample_id,
             analysis_mode=mode,
@@ -233,7 +236,9 @@ def run_one_sample(
             failure_detail=exc.detail,
             panel_count=panel_count,
             panel_sources=panel_sources,
-            primary_mask_semantics=mask_semantics_outcome_from_result(exc.mask_semantics),
+            primary_object_description=object_description_outcome_from_result(
+                exc.object_description
+            ),
             schema_version=CURRENT_SCHEMA_VERSION,
         )
     except Exception as exc:  # noqa: BLE001 -- one sample's unexpected crash must not stop
@@ -256,16 +261,7 @@ def run_one_sample(
             semantic_label=obj.object_plan.semantic_label,
             motion_type=object_outcome_motion_type(obj.object_plan.motion_type),
             status="rendered",
-            validation_attempts=[
-                ValidationAttemptOutcome(
-                    candidate_rank=v.candidate_rank,
-                    accepted=v.accepted,
-                    grounding_score=v.grounding_score,
-                    reason=v.reason,
-                )
-                for v in obj.validation_attempts
-            ],
-            mask_semantics=mask_semantics_outcome_from_result(obj.mask_semantics),
+            object_description=object_description_outcome_from_result(obj.object_description),
             failing_stage=None,
             failure_reason=None,
         )
@@ -278,33 +274,6 @@ def run_one_sample(
             status="dropped",
             failing_stage=dropped.failing_stage,
             failure_reason=dropped.reason,
-            # DroppedObjectResult.reason already carries a real, human-readable summary of why
-            # this object was dropped -- surfacing it here means the saved JSON alone explains a
-            # drop, for the two stages whose drop reason is validation-attempt-shaped prose
-            # ("validation" always was; "mask_semantics" too, Phase 12 -- orchestrator.py formats
-            # `DroppedObjectResult(failing_stage="mask_semantics", reason=f"{verdict.upper()}:
-            # {vlm_reason}")`, so this is real, human-readable evidence, not invented). A
-            # grounding-stage or segmentation-stage drop's own reason is shaped differently (a
-            # bbox/mask-geometry sentence, not a candidate-attempt one) and is intentionally left
-            # unsurfaced here rather than force-fit into `ValidationAttemptOutcome`'s fields --
-            # still a real, disclosed gap for those two stages (docs/phase12-results.md section
-            # 10), just not the one this fix closes. No structured `MaskSemanticResult` is
-            # retained for a dropped object (only kept/rendered objects carry the real result
-            # object this far) -- `mask_semantics=None` stays correct; only the free-text reason
-            # is recovered here.
-            validation_attempts=(
-                [
-                    ValidationAttemptOutcome(
-                        candidate_rank=-1,
-                        accepted=False,
-                        grounding_score=None,
-                        reason=dropped.reason,
-                    )
-                ]
-                if dropped.failing_stage == "validation"
-                else []
-            ),
-            mask_semantics=mask_semantics_outcome_from_result(dropped.mask_semantics),
         )
         for dropped in result.dropped_objects
     ]
@@ -317,16 +286,9 @@ def run_one_sample(
         panel_sources=panel_sources,
         primary_semantic_label=result.primary_object.semantic_label,
         primary_motion_type=result.primary_object.motion_type.value,
-        validation_attempts=[
-            ValidationAttemptOutcome(
-                candidate_rank=v.candidate_rank,
-                accepted=v.accepted,
-                grounding_score=v.grounding_score,
-                reason=v.reason,
-            )
-            for v in result.validation_attempts
-        ],
-        primary_mask_semantics=mask_semantics_outcome_from_result(result.mask_semantics),
+        primary_object_description=object_description_outcome_from_result(
+            result.object_description
+        ),
         object_outcomes=object_outcomes,
         render_summary=render_summary_from_result(
             result.render, seam_artifact_suspected=_seam_artifact_suspected(result.render)

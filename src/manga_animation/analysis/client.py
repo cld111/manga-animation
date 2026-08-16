@@ -32,7 +32,7 @@ class Qwen25VLClient:
     `scripts/phase2_kaggle_benchmark.py`'s `Qwen25VLAdapter`.
     """
 
-    def __init__(self, source: str, dtype: str, max_new_tokens: int = 512) -> None:
+    def __init__(self, source: str, dtype: str, max_new_tokens: int = 4096) -> None:
         self.source = source
         self.dtype = dtype
         self.max_new_tokens = max_new_tokens

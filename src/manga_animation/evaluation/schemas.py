@@ -65,6 +65,29 @@ class MaskSemanticOutcome(BaseModel):
     geometric_signals: dict[str, float] = {}
 
 
+class ObjectDescriptionOutcome(BaseModel):
+    """Mirrors `pipeline.types.ObjectDescriptionResult` for JSON round-tripping (Phase 18.3) --
+    same rationale as `MaskSemanticOutcome` mirroring `MaskSemanticResult`. `None` when the
+    stage is disabled or did not run for this object."""
+
+    accepted: bool
+    assessment: str | None
+    matches_semantic_label: bool | None
+    animatable: bool | None
+    object_identity: str | None
+    motion: dict | None
+    """The mapped `MotionSpec` (if accepted) as a plain dict so the report can show what the
+    animation stage actually applied."""
+    movable_parts: list[str] = []
+    static_parts: list[str] = []
+    constraints: list[str] = []
+    neighbor_conflicts: list[str] = []
+    confidence: float | None = None
+    rejection_reason: str | None = None
+    model_id: str = "unknown"
+    method: str = "vlm_full_image_bbox_v1"
+
+
 ObjectOutcomeStatus = Literal["rendered", "dropped"]
 ObjectOutcomeMotionType = Literal["secondary", "micro"]
 
@@ -95,6 +118,7 @@ class ObjectAttemptOutcome(BaseModel):
     of `PipelineRunResult.dropped_objects`) -- this does NOT mean the whole page run failed."""
     validation_attempts: list[ValidationAttemptOutcome] = []
     mask_semantics: MaskSemanticOutcome | None = None
+    object_description: ObjectDescriptionOutcome | None = None
     failing_stage: FailingStage | None = None
     failure_reason: str | None = None
     """Phase 12: structured result when the gate ran for this object. A semantic-mask drop
@@ -182,6 +206,12 @@ class PageRunOutcome(BaseModel):
     this populated when the gate ran, since a PRIMARY REJECT/ABSTAIN fails the whole run before
     a `PageRunOutcome` with `status="completed"` can ever be constructed -- see
     `docs/decisions/0018-semantic-mask-validation.md`."""
+    primary_object_description: ObjectDescriptionOutcome | None = None
+    """Phase 18.3: the PRIMARY object's per-candidate VLM object description (mirrors
+    `PipelineRunResult.object_description`) -- `None` when the stage is disabled or for every
+    outcome recorded before this field existed (`schema_version < 7`). A `status="completed"`
+    outcome always has this populated when the stage ran, since a PRIMARY rejection fails the
+    whole run first (fail-closed, see `pipeline.types.ObjectDescriptionResult`)."""
     schema_version: int = Field(
         default=1,
         ge=1,
@@ -197,7 +227,9 @@ class PageRunOutcome(BaseModel):
             "onward: a producer that also populates primary_mask_semantics and "
             "object_outcomes[].mask_semantics when the semantic mask validation gate ran. This "
             "also retains structured semantic failures and explicit dropped-stage metadata. 6 = "
-            "the same Phase 12 fields plus model provenance for mask verdicts. This "
+            "the same Phase 12 fields plus model provenance for mask verdicts. 7 = Phase 18.3 "
+            "onward: a producer that also populates primary_object_description and "
+            "object_outcomes[].object_description when the object-description stage ran. This "
             "is a PREDICTION-schema version a producer sets when it constructs a record -- "
             "unlike EvalSample.annotation_version (ADR 0009), which is a ground-truth-revision "
             "signal "

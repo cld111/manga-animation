@@ -17,16 +17,10 @@ import pytest
 import manga_animation.evaluation.harness as harness
 from manga_animation.evaluation.dataset import EvalSample
 from manga_animation.evaluation.harness import (
-    mask_semantics_outcome_from_result,
     object_outcome_motion_type,
     render_summary_from_result,
 )
-from manga_animation.pipeline.types import (
-    LoopMetrics,
-    MaskSemanticResult,
-    PipelineStageError,
-    RenderResult,
-)
+from manga_animation.pipeline.types import LoopMetrics, PipelineStageError, RenderResult
 from manga_animation.schemas.animation_plan import MotionType
 
 
@@ -124,74 +118,76 @@ def test_object_outcome_motion_type_rejects_primary_and_static():
         object_outcome_motion_type(MotionType.STATIC)
 
 
-def test_mask_semantics_outcome_from_result_returns_none_for_none():
-    """The gate didn't run for this object (disabled, or a stage before it dropped the
-
-    object) -- `None` in, `None` out, not a fabricated outcome.
-    """
-    assert mask_semantics_outcome_from_result(None) is None
+def test_object_description_outcome_from_result_returns_none_for_none():
+    """The description stage didn't run for this object -- `None` in, `None` out."""
+    assert harness.object_description_outcome_from_result(None) is None
 
 
-def test_mask_semantics_outcome_from_result_mirrors_the_real_result():
-    result = MaskSemanticResult(
+def test_object_description_outcome_from_result_mirrors_the_real_result():
+    from manga_animation.pipeline.types import ObjectDescriptionResult
+    from manga_animation.schemas.animation_plan import (
+        MotionSpec,
+        TransformKind,
+        Vector2,
+    )
+
+    result = ObjectDescriptionResult(
         object_id="obj_1",
-        verdict="reject",
-        vlm_matches=False,
-        vlm_confidence=0.82,
-        reason="mask also covers a speech bubble",
+        accepted=True,
+        assessment="pass",
+        matches_semantic_label=True,
+        animatable=True,
+        object_identity="character_hair",
+        motion_spec=MotionSpec(
+            transform_kind=TransformKind.TRANSLATE,
+            direction=Vector2(x=1.0, y=0.0),
+            amplitude=0.03,
+            speed=1.0,
+        ),
+        movable_parts=("hair",),
+        static_parts=("face",),
+        constraints=("keep the face static",),
+        neighbor_conflicts=(),
+        confidence=0.9,
+        reason="hair sways in the sprint",
+        rejection_reason=None,
         model_id="fake-qwen",
-        method="vlm_mask_crop_v1",
-        unexpected_content=("speech bubble", "hand"),
-        geometric_signals={"bbox_density": 0.9},
+        raw_responses=('{"bbox_assessment": "pass"}',),
     )
-    outcome = mask_semantics_outcome_from_result(result)
+    outcome = harness.object_description_outcome_from_result(result)
     assert outcome is not None
-    assert outcome.verdict == "reject"
-    assert outcome.vlm_confidence == pytest.approx(0.82)
-    assert outcome.model_id == "fake-qwen"
-    assert outcome.unexpected_content == ["speech bubble", "hand"]
-    assert outcome.geometric_signals == {"bbox_density": 0.9}
+    assert outcome.accepted is True
+    assert outcome.assessment == "pass"
+    assert outcome.object_identity == "character_hair"
+    assert outcome.motion is not None
+    assert outcome.motion["transform_kind"] == "translate"
+    assert outcome.confidence == pytest.approx(0.9)
+    assert outcome.rejection_reason is None
 
 
-def test_mask_semantics_outcome_from_result_mirrors_an_abstain_verdict():
-    """Reject and abstain must stay distinguishable through the mapper too -- both are
+def test_run_one_sample_preserves_primary_object_description_on_failure(monkeypatch, tmp_path):
+    from manga_animation.pipeline.types import ObjectDescriptionResult
 
-    "not accepted" but mean different things (a confident negative vs. insufficient evidence,
-    see docs/decisions/0018-semantic-mask-validation.md) -- independent adversarial QA review
-    finding: only the reject case had a direct test before this.
-    """
-    result = MaskSemanticResult(
-        object_id="obj_2",
-        verdict="abstain",
-        vlm_matches=True,
-        vlm_confidence=0.5,
-        reason="near-coin-flip confidence",
-        model_id="fake-qwen",
-        method="vlm_mask_crop_v1",
-    )
-    outcome = mask_semantics_outcome_from_result(result)
-    assert outcome is not None
-    assert outcome.verdict == "abstain"
-    assert outcome.vlm_confidence == pytest.approx(0.5)
-
-
-def test_run_one_sample_preserves_primary_mask_semantics_on_failure(monkeypatch, tmp_path):
-    result = MaskSemanticResult(
+    description = ObjectDescriptionResult(
         object_id="primary",
-        verdict="reject",
-        vlm_matches=False,
-        vlm_confidence=0.9,
-        reason="wrong content",
+        accepted=False,
+        assessment="ambiguous",
+        matches_semantic_label=None,
+        animatable=None,
+        object_identity=None,
+        motion_spec=None,
+        reason="two characters in the box",
+        rejection_reason="bbox_assessment=ambiguous",
         model_id="fake-qwen",
-        method="vlm_mask_crop_v1",
+        raw_responses=("{}",),
     )
 
     def fail(*args, **kwargs):
         raise PipelineStageError(
-            stage="mask_semantics",
+            stage="object_description",
             input_ref="primary",
             detail="semantic rejection",
-            mask_semantics=result,
+            object_description=description,
         )
 
     monkeypatch.setattr(harness, "run_pipeline", fail)
@@ -212,6 +208,6 @@ def test_run_one_sample_preserves_primary_mask_semantics_on_failure(monkeypatch,
         panel_sources=["fallback_full_page"],
     )
     assert outcome.status == "failed"
-    assert outcome.primary_mask_semantics is not None
-    assert outcome.primary_mask_semantics.verdict == "reject"
-    assert outcome.primary_mask_semantics.model_id == "fake-qwen"
+    assert outcome.failing_stage == "object_description"
+    assert outcome.primary_object_description is not None
+    assert outcome.primary_object_description.assessment == "ambiguous"

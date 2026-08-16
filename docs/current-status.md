@@ -18,8 +18,8 @@ The implemented order is:
 
 ```text
 page -> deterministic panel detection -> bounded scene crops
-  -> independent analysis -> grounding -> validation -> segmentation -> mask_semantics
-  -> animation -> reconstruction -> compositing -> rendering
+  -> grounding -> segmentation -> object_description -> animation
+  -> reconstruction -> compositing -> rendering
 ```
 
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
@@ -36,6 +36,16 @@ page -> deterministic panel detection -> bounded scene crops
 - `mask_semantics` checks the real segmented mask's content with a VLM, independently of the
   pre-segmentation bbox check. It returns `ACCEPT`, `REJECT`, or `ABSTAIN` and is enabled by
   default.
+- `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. Qwen2.5-VL sees the FULL
+  image plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
+  crop, never the mask), reads the ACTION happening in the scene, judges each candidate
+  (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
+  description whose deterministically-mapped `MotionSpec` drives the animation stage (with the
+  SAM mask). Fail-closed: candidates with a non-pass read, an identity-conflict (text/bubble/
+  background), or a geometrically unsafe bbox+transform are dropped; a panel with no accepted
+  candidate is REJECTED. The architecture has no analysis stage, no crop-based VLM validation
+  and no mask-semantics stage; candidate labels come from the caller
+  (`DEFAULT_ANIMATION_LABELS`). See docs/phase18.3-results.md.
 - Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
   z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
@@ -61,6 +71,7 @@ The baseline in `configs/default.yaml` is:
 | Loop | 4.0s at 24 FPS |
 | Codec | H.264 only |
 | Semantic mask validation | enabled |
+| Per-candidate VLM object description | enabled (Phase 18.3) |
 
 These are preliminary operational selections, not an exhaustive cross-candidate benchmark
 conclusion. Candidates without implemented adapters remain research entries.
@@ -330,4 +341,6 @@ changes move between local and remote only through git.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
   Phase 17 (object-segmentation diagnostic benchmark) lives in
   [`phase17-results.md`](phase17-results.md); Phase 18.1 (DINO candidate recall) in
-  [`phase18.1-results.md`](phase18.1-results.md).
+  [`phase18.1-results.md`](phase18.1-results.md). Phase 18.3 (per-candidate VLM object
+  description) evidence in [`phase18.3-results.md`](phase18.3-results.md) and the full work
+  report in [`phase18.3-report.md`](phase18.3-report.md).

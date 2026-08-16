@@ -20,3 +20,4 @@ duration_s: 4.0 # ~3-5s seamless loop, per the project goal
 output_codec: h264
 seed: 42
 enable_semantic_mask_validation: true
+enable_object_description_validation: true
