@@ -25,6 +25,7 @@ from PIL import Image
 from manga_animation.core.config import PipelineConfig
 from manga_animation.grounding.client import Detection
 from manga_animation.pipeline.lifecycle import ModelStage
+from manga_animation.pipeline.orchestrator import DEFAULT_ANIMATION_LABELS
 from manga_animation.pipeline.panels import run_page_panels
 from manga_animation.segmentation.client import MaskCandidate
 
@@ -35,7 +36,7 @@ pytestmark = pytest.mark.filterwarnings("ignore")
 # tests/test_pipeline.py).
 _VALIDATION_PROMPT_MARKER = "Does the image above show"
 _MASK_SEMANTICS_PROMPT_MARKER = "Does the bright region show"
-_OBJECT_DESCRIPTION_PROMPT_MARKER = "evaluating ONE proposed animation candidate"
+_OBJECT_DESCRIPTION_PROMPT_MARKER = "proposed animation candidate"
 
 
 def _fake_object_description_response() -> str:
@@ -270,38 +271,41 @@ class CountingReconstructionClient:
 
 
 class StageLevelVLMClient:
-    """Returns an animated PRIMARY decision for analysis, ACCEPTs validation and
-    mask_semantics prompts, and counts unloads (its real shape: no load())."""
+    """Answers ONLY the object-description batch prompt (the pipeline's single VLM stage in
+    the Phase 18.3 architecture) with one pass description per candidate box, and counts
+    unloads (its real shape: no load())."""
 
-    def __init__(self, mask_semantics_matches: bool = True):
+    def __init__(self):
         self.unload_calls = 0
-        self._mask_semantics_matches = mask_semantics_matches
 
     def generate(self, image, prompt: str) -> str:
-        if _MASK_SEMANTICS_PROMPT_MARKER in prompt:
-            return json.dumps(
-                {
-                    "mask_matches_object": self._mask_semantics_matches,
-                    "confidence": 0.9 if self._mask_semantics_matches else 0.1,
-                    "unexpected_content": [] if self._mask_semantics_matches else ["fake content"],
-                    "reason": "fake mask semantics response",
-                }
+        if _OBJECT_DESCRIPTION_PROMPT_MARKER not in prompt:
+            raise AssertionError(
+                "the Phase 18.3 pipeline must call the VLM ONLY at the object-description "
+                "stage -- unexpected prompt: " + prompt[:80]
             )
-        if _OBJECT_DESCRIPTION_PROMPT_MARKER in prompt:
-            return _fake_object_description_response()
-        if _VALIDATION_PROMPT_MARKER in prompt:
-            return json.dumps(
-                {"matches": True, "confidence": 0.9, "reason": "fake validation response"}
-            )
+        n_boxes = sum(1 for line in prompt.splitlines() if line.startswith("["))
         return json.dumps(
             [
                 {
-                    "semantic_label": "hanging_banner",
-                    "motion_type": "primary",
+                    "box_index": i,
+                    "bbox_assessment": "pass",
+                    "object_identity": "character",
+                    "matches_semantic_label": True,
+                    "animatable": True,
+                    "movable_parts": ["hair"],
+                    "static_parts": ["face"],
+                    "motion_kind": "sway",
+                    "direction": None,
+                    "amplitude_band": "moderate",
+                    "speed_band": "slow",
+                    "pivot_hint": "center",
+                    "constraints": ["keep the face static"],
+                    "neighbor_conflicts": [],
                     "confidence": 0.9,
-                    "reason": "test fixture",
-                    "motion_description": "sways left and right",
+                    "reason": "fake object description response",
                 }
+                for i in range(n_boxes)
             ]
         )
 
@@ -367,20 +371,21 @@ def test_run_page_panels_loads_each_model_once_for_the_whole_page(
     assert segmentation.unload_calls == 1
     assert reconstruction.load_calls == 1
     assert reconstruction.unload_calls == 1
-    # VLM: four stages (analysis, validation, semantic-mask, object-description), each
-    # releasing once -- not four times per panel as the per-panel path did.
-    assert vlm.unload_calls == 4
+    # VLM: exactly ONE stage in the Phase 18.3 architecture (object description), releasing
+    # once -- not per panel and not for any analysis/validation/mask_semantics stage.
+    assert vlm.unload_calls == 1
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
 def test_run_page_panels_early_panel_failure_does_not_poison_later_panels_or_cleanup(
     two_panel_page_path: Path, config: PipelineConfig, tmp_path: Path
 ):
-    """Phase 14 acceptance criterion 4: a panel failing in an early stage (panel 1's grounding
-    detects nothing) must not prevent panel 2 from processing, and the stage's model must still
-    be released exactly once.
+    """Phase 14 acceptance criterion 4 (Phase 18.3 flow): a panel whose grounding detects
+    nothing for EVERY candidate label must not prevent panel 2 from processing, and the
+    stage's model must still be released exactly once.
     """
-    grounding = CountingGroundingClient(fail_first_n=1)
+    n_labels = len(DEFAULT_ANIMATION_LABELS)
+    grounding = CountingGroundingClient(fail_first_n=n_labels)
     result = run_page_panels(
         two_panel_page_path,
         config,
@@ -392,24 +397,53 @@ def test_run_page_panels_early_panel_failure_does_not_poison_later_panels_or_cle
     )
 
     assert [panel.status for panel in result.panels] == ["REJECTED", "PASS"]
-    assert result.panels[0].failure_stage == "grounding"
-    assert grounding.detect_calls == 2  # panel 2 still got grounded
+    assert result.panels[0].failure_stage == "object_description"
+    assert grounding.detect_calls == 2 * n_labels  # panel 2 still got grounded for every label
     assert grounding.load_calls == 1
     assert grounding.unload_calls == 1
 
 
 @pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
-def test_run_page_panels_primary_mask_semantics_rejection_stays_rejected(
+def test_run_page_panels_object_description_rejection_keeps_panels_rejected(
     two_panel_page_path: Path, config: PipelineConfig, tmp_path: Path
 ):
-    """A PRIMARY object that fails the Phase 12 semantic mask gate must keep the panel REJECTED
-    and must NOT be rendered into a PASS by the later animation/render stage. This is the
-    fail-closed PRIMARY policy, which the stage-level restructure must not bypass.
+    """When the pipeline's single semantic stage (object description) rejects every
+    candidate, each panel must stay REJECTED -- never rendered into a PASS by a later
+    stage. This is the fail-closed policy of the Phase 18.3 flow.
     """
+    vlm = StageLevelVLMClient()
+
+    class RejectingVLM(StageLevelVLMClient):
+        def generate(self, image, prompt: str) -> str:
+            n_boxes = sum(1 for line in prompt.splitlines() if line.startswith("["))
+            return json.dumps(
+                [
+                    {
+                        "box_index": i,
+                        "bbox_assessment": "ambiguous",
+                        "object_identity": "character",
+                        "matches_semantic_label": True,
+                        "animatable": False,
+                        "movable_parts": [],
+                        "static_parts": [],
+                        "motion_kind": None,
+                        "direction": None,
+                        "amplitude_band": None,
+                        "speed_band": None,
+                        "pivot_hint": None,
+                        "constraints": [],
+                        "neighbor_conflicts": ["two characters in the box"],
+                        "confidence": 0.7,
+                        "reason": "fake rejection",
+                    }
+                    for i in range(n_boxes)
+                ]
+            )
+
     result = run_page_panels(
         two_panel_page_path,
         config,
-        vlm_client=StageLevelVLMClient(mask_semantics_matches=False),
+        vlm_client=RejectingVLM(),
         grounding_client=CountingGroundingClient(),
         segmentation_client=CountingSegmentationClient(),
         reconstruction_client=CountingReconstructionClient(),
@@ -417,7 +451,7 @@ def test_run_page_panels_primary_mask_semantics_rejection_stays_rejected(
     )
 
     assert [panel.status for panel in result.panels] == ["REJECTED", "REJECTED"]
-    assert all(panel.failure_stage == "mask_semantics" for panel in result.panels)
+    assert all(panel.failure_stage == "object_description" for panel in result.panels)
     manifest = json.loads(result.manifest_path.read_text())
     for item in manifest["panels"]:
         assert item["status"] == "REJECTED"
@@ -445,6 +479,8 @@ def test_run_page_panels_unexpected_stage_exception_isolates_to_that_panel(
 
     assert [panel.status for panel in result.panels] == ["ERROR", "PASS"]
     assert result.panels[0].failure_stage == "RuntimeError"
-    assert grounding.detect_calls == 2
+    # Panel 1 raised on its first label's detect call and stopped (ERROR); panel 2's labels
+    # were still grounded.
+    assert grounding.detect_calls == 1 + len(DEFAULT_ANIMATION_LABELS)
     assert grounding.load_calls == 1
     assert grounding.unload_calls == 1

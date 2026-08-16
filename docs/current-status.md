@@ -19,7 +19,7 @@ The implemented order is:
 ```text
 page -> deterministic panel detection -> bounded scene crops
   -> independent analysis -> grounding -> validation -> segmentation -> mask_semantics
-  -> animation -> reconstruction -> compositing -> rendering
+  -> object_description -> animation -> reconstruction -> compositing -> rendering
 ```
 
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
@@ -36,6 +36,14 @@ page -> deterministic panel detection -> bounded scene crops
 - `mask_semantics` checks the real segmented mask's content with a VLM, independently of the
   pre-segmentation bbox check. It returns `ACCEPT`, `REJECT`, or `ABSTAIN` and is enabled by
   default.
+- `object_description` (Phase 18.3) is the per-candidate VLM stage between `mask_semantics`
+  and `animation`: Qwen2.5-VL sees the FULL pipeline image plus the accepted grounding bbox
+  as pixel coordinates (never a crop, never the mask), judges the candidate itself
+  (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
+  description whose deterministically-mapped `MotionSpec` drives the animation stage. It is
+  fail-closed: a non-accepted PRIMARY candidate rejects the run, a SECONDARY/MICRO one is
+  dropped; raw responses are logged and kept in the result. Enabled by default
+  (`enable_object_description_validation`). See docs/phase18.3-results.md.
 - Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
   z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
@@ -61,6 +69,7 @@ The baseline in `configs/default.yaml` is:
 | Loop | 4.0s at 24 FPS |
 | Codec | H.264 only |
 | Semantic mask validation | enabled |
+| Per-candidate VLM object description | enabled (Phase 18.3) |
 
 These are preliminary operational selections, not an exhaustive cross-candidate benchmark
 conclusion. Candidates without implemented adapters remain research entries.

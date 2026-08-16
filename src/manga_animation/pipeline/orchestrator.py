@@ -1,43 +1,33 @@
-"""End-to-end pipeline orchestration: real manga page -> playable seamless-loop MP4.
+"""End-to-end pipeline orchestration (Phase 18.3 architecture): real manga page -> seamless MP4.
 
-Wires the stage packages together in this actual order (pre-existing doc/code drift fixed
-here: `docs/pipeline.md`'s diagram lists reconstruction before animation, but reconstruction
-needs animation's transformed masks to know what a motion reveals, so it has always run after):
+The Phase 18.3 architecture calls the VLM EXACTLY ONCE in the whole pipeline -- at the
+per-candidate object-description stage. There is no analysis stage (no Qwen-driven
+AnimationPlan up front), no crop-based VLM validation, and no mask-semantics VLM gate:
 
-    analysis -> grounding -> validation -> segmentation -> mask_semantics -> animation
-    -> reconstruction -> compositing -> rendering
+    grounding (DINO, labels from the caller) -> segmentation (SAM2, masks kept for
+    animation) -> object_description (Qwen2.5-VL: FULL image + bbox pixel coordinates ->
+    structured description; fail-closed) -> animation planning (deterministic ranking and
+    MotionSpec mapping + transform-geometry gate) -> animation (SAM mask + MotionSpec) ->
+    reconstruction (LaMa) -> compositing -> rendering (H.264 + loop metrics)
 
-`validation` (Phase 3.2, `src/manga_animation/validation`) sits between grounding and
-segmentation: a grounding candidate that clears the grounding model's own detection threshold
-is not automatically trusted as semantically correct — see
-`docs/decisions/0006-grounding-target-validation.md`. If every ranked grounding candidate for
-the plan's object fails validation, the run fails outright (`PipelineStageError`, stage=
-`"validation"`) rather than animating an unvalidated best guess. `mask_semantics` (Phase 12,
-`validation.mask_semantics`) sits between segmentation and animation: a segmented mask that
-passes every existing geometric check is not automatically trusted as semantically correct
-either — see `docs/decisions/0018-semantic-mask-validation.md`. The two "validation" stages are
-deliberately distinct: `validation` operates on a grounding bbox before any mask exists;
-`mask_semantics` operates on the real, segmented mask's own pixel content.
+Candidate labels are supplied by the caller (or the documented default list): the pipeline
+no longer invents them with a VLM. Every model family is loaded once per stage
+(`ModelStage`, ADR 0020); Qwen is resident during ONE stage (object_description) and
+processes every candidate of every panel there -- never again.
 
-This orchestrates the plan's PRIMARY object end to end, plus (Phase 4, see
-docs/decisions/0010-multi-object-layer-decomposition.md) any SECONDARY/MICRO objects the VLM
-also proposed real motion for — `STATIC` objects the analysis stage identified are recorded in
-the plan but never grounded, segmented, or animated (see
-`.claude/agents/segmentation-agent.md`: "STATIC objects generally don't need
-grounding/segmentation at all"). Every stage function this module calls already raises
-`PipelineStageError` on failure; this module does not swallow or convert those into a false
-success for the PRIMARY object — a failed run surfaces exactly which stage failed and why (see
-the Phase 3.1 brief's "Failure policy", preserved unchanged in Phase 3.2). A SECONDARY/MICRO
-object failing at grounding/validation/segmentation/mask_semantics does NOT fail the run — it is
-dropped from the render (logged) while the PRIMARY object's own success/failure policy is
-unaffected; see `_Z_ORDER_BY_MOTION_TYPE` and `ObjectRunResult` below.
+A candidate that fails a deterministic or model gate is dropped (logged); if NO candidate is
+accepted, the run fails with stage="object_description" (fail closed, never an unvalidated
+animation). Accepted candidates are ranked deterministically: highest description confidence
+becomes PRIMARY, the rest SECONDARY.
 
-This is orchestration code, not a stage itself — it owns none of the stages' internal
+This is orchestration code, not a stage itself -- it owns none of the stages' internal
 decisions, only the wiring between their already-defined public entry points.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -45,7 +35,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from manga_animation.analysis import Qwen25VLClient, VLMClient, analyze_page, analyze_page_panels
+from manga_animation.analysis import Qwen25VLClient, VLMClient
 from manga_animation.animation import generate_transformed_layer
 from manga_animation.benchmarking.registry import load_candidates
 from manga_animation.compositing import composite_frame_stack
@@ -57,7 +47,7 @@ from manga_animation.grounding import (
     GroundingDinoClient,
     ground_object_candidates,
 )
-from manga_animation.object_description import describe_object
+from manga_animation.object_description import CandidateBox, describe_objects
 from manga_animation.pipeline.lifecycle import ModelStage
 from manga_animation.pipeline.types import (
     BBoxPx,
@@ -65,14 +55,11 @@ from manga_animation.pipeline.types import (
     GroundingResult,
     Layer,
     MaskArray,
-    MaskSemanticResult,
     ObjectDescriptionResult,
     PipelineStageError,
     ReconstructionResult,
     RenderResult,
     SegmentationResult,
-    ValidationResult,
-    normalized_bbox_to_px,
 )
 from manga_animation.reconstruction import (
     LamaClient,
@@ -82,43 +69,47 @@ from manga_animation.reconstruction import (
 from manga_animation.rendering import render
 from manga_animation.schemas.animation_plan import (
     AnimationPlan,
+    BBox,
+    LoopSpec,
     MotionType,
     ObjectPlan,
-    TransformKind,
+    PanelPlan,
+    SourceImage,
 )
 from manga_animation.segmentation import Sam21Client, SegmentationClient, segment_object
-from manga_animation.segmentation.segment import _MAX_EFFECT_MASK_DENSITY
-from manga_animation.validation import validate_target, verify_mask_semantics
+from manga_animation.validation.transform_geometry import check_transform_geometry
 
 logger = get_logger(__name__)
 
-# Phase 4 (docs/decisions/0010-multi-object-layer-decomposition.md): compositing z-order by
-# MotionType -- higher composites on top. PRIMARY stays the reader's unoccluded focus (per the
-# analysis prompt's own definition of "primary"); this project has no real per-object depth
-# evidence to base an ordering on instead.
+# Compositing z-order by MotionType -- higher composites on top. PRIMARY stays the reader's
+# unoccluded focus; no real per-object depth evidence exists to base an ordering on instead.
 _Z_ORDER_BY_MOTION_TYPE: dict[MotionType, int] = {
     MotionType.MICRO: 0,
     MotionType.SECONDARY: 1,
     MotionType.PRIMARY: 2,
 }
 
-# Phase 8.3 (docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md, "Defect A" -- the real
-# "duplicate silhouette" ghost found in `verified_action_1`): `compositing.composite_frame_stack`
-# alpha-blends every animated layer independently, with no awareness of whether two layers'
-# masks represent the same physical region. Two independently-accepted SECONDARY/MICRO objects
-# (e.g. two separate `character_hair` grounding candidates) whose masks substantially overlap,
-# each animated with its own MotionSpec, are invisible at rest (an untransformed layer's pixels
-# are bit-identical to the plate, so mask shape/overlap cannot matter there) but visibly
-# double-expose once their motions diverge -- reproduced deterministically against this exact
-# production code (generate_transformed_layer + composite_frame_stack) using real source-image
-# pixels, see the ADR for the repro script and evidence. `0.25` (a containment-style overlap
-# fraction: intersection / area of the SMALLER mask, not IoU, so a small object fully nested
-# inside a larger one's mask is still caught) is a documented, evidenced-but-not-statistically-
-# calibrated choice, same status as this codebase's other deterministic thresholds -- the real
-# defect's masks overlapped far above this (evidenced ~0.68 in the ADR's repro); genuinely
-# distinct, only lightly-touching objects (e.g. two hair locks meeting at the scalp) are not
-# expected to reach it.
+# Phase 8.3 (Defect A): two independently-accepted objects whose masks substantially overlap
+# each animated with its own MotionSpec visibly double-expose once their motions diverge
+# (reproduced deterministically against this exact production code, see
+# docs/decisions/0015-duplicate-silhouette-and-seam-fixes.md). `0.25` is a containment-style
+# overlap fraction (intersection / area of the SMALLER mask, not IoU), evidenced-but-not-
+# statistically-calibrated, same status as this codebase's other deterministic thresholds.
 _MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION = 0.25
+
+# The default candidate labels the pipeline grounds when the caller supplies none. The Phase
+# 18.3 architecture deliberately does NOT invent labels with a VLM; these cover the common
+# animatable categories and are overridable per call.
+DEFAULT_ANIMATION_LABELS: tuple[str, ...] = (
+    "character",
+    "character_hair",
+    "flag_banner",
+    "weapon",
+    "speed_lines",
+    "impact_burst",
+)
+
+_PANEL_ID = "panel_1"
 
 
 def _bbox_intersects(a: BBoxPx, b: BBoxPx) -> bool:
@@ -155,10 +146,7 @@ def _mask_overlap_fraction(
     mask_a: MaskArray, bbox_a: BBoxPx, mask_b: MaskArray, bbox_b: BBoxPx
 ) -> float:
     """`intersection(mask_a, mask_b) / min(area(mask_a), area(mask_b))` -- 0.0 when the two
-
-    masks' own tight bboxes don't even overlap (the common case for genuinely distinct objects,
-    cheap to reject before touching pixel data).
-    """
+    masks' own tight bboxes don't even overlap (the common case, cheap to reject first)."""
     if not _bbox_intersects(bbox_a, bbox_b):
         return 0.0
     x0, y0 = max(bbox_a.x0, bbox_b.x0), max(bbox_a.y0, bbox_b.y0)
@@ -172,40 +160,28 @@ def _mask_overlap_fraction(
 
 
 def _drop_overlapping_secondary_objects(
-    animated_objects: list[ObjectPlan],
-    segmentation_by_object: dict[str, SegmentationResult],
+    accepted: list[tuple[ObjectPlan, SegmentationResult]],
     primary_object_id: str,
-    dropped_objects: list[DroppedObjectResult],
-) -> tuple[list[ObjectPlan], dict[str, SegmentationResult]]:
-    """Drop any SECONDARY/MICRO object whose real segmentation mask overlaps an already-
-
-    accepted object's mask by more than `_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION` -- see this
-    module's Defect-A comment above `_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION` for why. Processes
-    `animated_objects` in its existing order (PRIMARY always first, per `objects_to_animate`'s
-    own construction) and keeps the FIRST of any conflicting pair -- deterministic, no ranking
-    signal beyond plan order exists at this point. PRIMARY is never a candidate for being
-    dropped here: it is always the first object considered, so it is trivially compared against
-    an empty `kept` list and always kept -- its deliberate top z-order (`_Z_ORDER_BY_MOTION_TYPE`)
-    is this codebase's existing, intentional way of letting a SECONDARY/MICRO object legitimately
-    sit under/behind PRIMARY, which this check must not interfere with.
-    """
-    kept: list[ObjectPlan] = []
-    kept_masks: list[MaskArray] = []
-    kept_bboxes: list[BBoxPx] = []
-    for obj in animated_objects:
-        seg = segmentation_by_object[obj.object_id]
+) -> list[tuple[ObjectPlan, SegmentationResult]]:
+    """Drop any non-PRIMARY candidate whose real segmentation mask overlaps an already-kept
+    candidate's mask by more than `_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION` -- the Phase 8.3
+    Defect-A guard (see the constant's comment). PRIMARY is never a drop candidate: it is
+    always considered first and kept."""
+    kept: list[tuple[ObjectPlan, SegmentationResult]] = []
+    for obj, seg in accepted:
         conflict_with: str | None = None
         max_overlap = 0.0
-        for other_obj, other_mask, other_bbox in zip(kept, kept_masks, kept_bboxes, strict=True):
-            overlap = _mask_overlap_fraction(seg.mask, seg.bbox, other_mask, other_bbox)
+        for other_obj, other_seg in kept:
+            overlap = _mask_overlap_fraction(
+                seg.mask, seg.bbox, other_seg.mask, other_seg.bbox
+            )
             if overlap > max_overlap:
                 max_overlap = overlap
                 conflict_with = other_obj.object_id
-        is_conflicting = (
+        if (
             obj.object_id != primary_object_id
             and max_overlap > _MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION
-        )
-        if is_conflicting:
+        ):
             logger.warning(
                 "segmentation: object_id=%s semantic_label=%s mask overlaps already-accepted "
                 "object_id=%s by %.1f%% of its own area (> %.0f%% bound) -- dropping it from "
@@ -217,123 +193,56 @@ def _drop_overlapping_secondary_objects(
                 max_overlap * 100,
                 _MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION * 100,
             )
-            dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj,
-                    failing_stage="segmentation",
-                    reason=(
-                        f"mask overlaps already-accepted object_id={conflict_with!r} by "
-                        f"{max_overlap:.1%} of its own area, exceeding the "
-                        f"{_MAX_CROSS_OBJECT_MASK_OVERLAP_FRACTION:.0%} bound -- animating both "
-                        "independently would risk a double-exposure ghost once their motions "
-                        "diverge"
-                    ),
-                )
-            )
             continue
-        kept.append(obj)
-        kept_masks.append(seg.mask)
-        kept_bboxes.append(seg.bbox)
-
-    kept_ids = {obj.object_id for obj in kept}
-    kept_segmentation = {
-        object_id: seg for object_id, seg in segmentation_by_object.items() if object_id in kept_ids
-    }
-    return kept, kept_segmentation
+        kept.append((obj, seg))
+    return kept
 
 
 @dataclass
 class DroppedObjectResult:
-    """A SECONDARY/MICRO object the plan proposed but that did not make it into the render
-    (Phase 7.2.1, closing an evaluation-visibility gap ADR 0010 explicitly deferred to Phase 7:
-    "extending evaluation to report on secondary/micro objects too is real future work").
-    ADR 0010's failure policy already drops these without failing the whole run (see
-    `run_pipeline`'s grounding/validation/segmentation stages below) -- this type is the
-    additive record of WHICH object was dropped, at which stage, and why, so a caller (e.g.
-    `evaluation/schemas.py::ObjectAttemptOutcome`) can see past `secondary_objects`, which only
-    ever contained the objects that succeeded. `failing_stage="segmentation"` (Phase 8.3) covers
-    two distinct real reasons: a genuine `PipelineStageError` from `segment_object` itself (e.g.
-    the mask-shape check `segmentation/segment.py::_validate_mask_shape` added), or a mask that
-    segmented successfully but conflicts with an already-accepted object's mask closely enough
-    to risk a double-exposure ghost if both were animated independently (see
-    `_drop_overlapping_secondary_objects` below) -- `reason` always distinguishes which.
-    `failing_stage="mask_semantics"` (Phase 12) is distinct from both: the mask passed every
-    geometric check but `validation.mask_semantics.verify_mask_semantics` REJECTed or ABSTAINed
-    on its actual pixel content -- see `docs/decisions/0018-semantic-mask-validation.md`.
-    """
+    """A candidate that did not make it into the render, with the stage and reason."""
 
     object_plan: ObjectPlan
-    failing_stage: Literal[
-        "grounding", "validation", "segmentation", "mask_semantics", "object_description"
-    ]
+    failing_stage: Literal["grounding", "segmentation", "object_description"]
     reason: str
-    mask_semantics: MaskSemanticResult | None = None
 
 
 @dataclass
 class ObjectRunResult:
-    """Everything produced for one non-PRIMARY animated object during a run (Phase 4) -- a
-
-    SECONDARY/MICRO object that was successfully grounded, validated, segmented, and passed
-    semantic mask validation, and is therefore part of the render. An object that failed at any
-    of those stages is simply absent from `PipelineRunResult.secondary_objects` (logged, not
-    silently invented as a result) -- see `docs/decisions/0010-multi-object-layer-decomposition.md`.
-    """
+    """Everything produced for one non-PRIMARY animated object during a run."""
 
     object_plan: ObjectPlan
     grounding: GroundingResult
-    validation_attempts: list[ValidationResult]
     segmentation: SegmentationResult
-    mask_semantics: MaskSemanticResult | None
-    """`None` only when `PipelineConfig.enable_semantic_mask_validation` is `False` -- the gate
-    never ran, not that it produced no opinion (see Phase 12's config toggle)."""
+    object_description: ObjectDescriptionResult
     reconstruction: ReconstructionResult | None
-    object_description: ObjectDescriptionResult | None
-    """Phase 18.3: the per-candidate VLM read on the grounded bbox against the full image
-    (see `pipeline.types.ObjectDescriptionResult`). `None` when the stage is disabled via
-    `PipelineConfig.enable_object_description_validation`."""
 
 
 @dataclass
 class PipelineRunResult:
-    """Everything the Phase 3.1 final report needs, from one real end-to-end run.
+    """Everything produced by one real end-to-end run.
 
-    `primary_object`/`grounding`/`validation_attempts`/`segmentation`/`reconstruction` describe
-    ONLY the PRIMARY object, exactly as every phase through 3.3.x already had them -- unchanged
-    in meaning, so no existing consumer of this type needs to change. `secondary_objects` is the
-    new, additive Phase 4 field: zero or more SECONDARY/MICRO objects that also made it into the
-    render, in the same order they appear in `plan.objects`.
+    `primary_object`/`grounding`/`segmentation`/`reconstruction`/`object_description` describe
+    the PRIMARY object (the highest-confidence accepted candidate). `secondary_objects` are
+    the other accepted candidates that also made it into the render, in plan order.
+    `dropped_objects` records every candidate rejected at some stage, with the reason.
     """
 
     image_path: Path
     plan: AnimationPlan
     primary_object: ObjectPlan
     grounding: GroundingResult
-    validation_attempts: list[ValidationResult]
     segmentation: SegmentationResult
-    mask_semantics: MaskSemanticResult | None
-    """Phase 12, PRIMARY object only -- see `ObjectRunResult.mask_semantics`'s docstring for the
-    `None` case."""
+    object_description: ObjectDescriptionResult
     reconstruction: ReconstructionResult | None
-    object_description: ObjectDescriptionResult | None
-    """Phase 18.3, PRIMARY object only -- see `ObjectRunResult.object_description`'s docstring
-    for the `None` case."""
     render: RenderResult
     secondary_objects: list[ObjectRunResult] = field(default_factory=list)
     dropped_objects: list[DroppedObjectResult] = field(default_factory=list)
-    """Phase 7.2.1: every SECONDARY/MICRO object the plan proposed that did NOT make it into
-    the render (grounding or validation failure) -- additive, does not change the meaning of
-    `secondary_objects` (still only the successful ones). Always empty for a single-object
-    plan or a plan whose non-PRIMARY objects all succeeded."""
 
 
 def _candidate_source(stage: str, config: PipelineConfig) -> str:
-    """Resolve a `PipelineConfig.model_variants[stage]` candidate id to its HF/GitHub source,
-
-    via the same shortlist `scripts/phase2_kaggle_benchmark.py` already validates against
-    (`configs/benchmark_candidates.yaml`) -- model identity is config-driven, never hardcoded
-    in stage code (see "Model Abstraction" in docs/architecture.md).
-    """
+    """Resolve a `PipelineConfig.model_variants[stage]` candidate id to its HF/GitHub source
+    via the benchmark candidate manifest -- model identity is config-driven, never hardcoded."""
     candidate_id = config.model_variants.get(stage)
     if candidate_id is None:
         raise PipelineStageError(
@@ -393,9 +302,8 @@ def build_default_clients(
 ) -> tuple[VLMClient, GroundingClient, SegmentationClient, ReconstructionClient]:
     """Construct the real (GPU-backed) clients for every model stage, from `config` alone.
 
-    Heavy imports (torch/transformers) only happen inside each client's `load()`/`generate()`/
-    `detect()`/`segment()`/`inpaint()` methods (see each client module) -- constructing them
-    here is cheap and safe even without the `ml` extra installed.
+    Heavy imports (torch/transformers) only happen inside each client's methods -- constructing
+    them here is cheap and safe even without the `ml` extra installed.
     """
     device = config.resolve_device()
     _, vlm_source = _runtime_candidate("vlm", config)
@@ -403,76 +311,42 @@ def build_default_clients(
     _, segmentation_source = _runtime_candidate("segmentation", config)
     inpainting_id, _ = _runtime_candidate("inpainting", config)
     vlm_client = Qwen25VLClient(source=vlm_source, dtype=config.dtype)
-    # Real finding (Phase 3.1's first Kaggle run): Grounding DINO's processor produces
-    # float32 pixel_values regardless of config.dtype, which raises "Input type (float) and
-    # bias type (c10::Half) should be the same" against a float16-loaded model on this
-    # transformers version. ADR 0005's actual successful benchmark runs for both Grounding
-    # DINO and SAM 2.1 (see docs/phase2-benchmark-results.md) used float32 explicitly, never
-    # float16 -- config.dtype's float16 default (configs/kaggle.yaml) was only ever proven
-    # for the VLM stage. Hardcoding float32 here for these two stages reflects that real,
-    # tested evidence rather than the single global config default; kaggle.yaml's own comment
-    # already flagged dtype as something to "revisit per-model in Phase 2 if quality suffers".
     grounding_client = GroundingDinoClient(source=grounding_source, device=device, dtype="float32")
     segmentation_client = Sam21Client(source=segmentation_source, device=device, dtype="float32")
     reconstruction_client = LamaClient(device=device, model_id=inpainting_id)
     return vlm_client, grounding_client, segmentation_client, reconstruction_client
 
 
-def _select_primary(plan: AnimationPlan, image_path: str) -> ObjectPlan:
-    primaries = [o for o in plan.objects if o.motion_type == MotionType.PRIMARY]
-    if not primaries:
-        # analyze_page() already guarantees exactly one PRIMARY object for a successfully
-        # built plan (see plan_builder._rank_candidates) -- reaching this means a plan was
-        # constructed by something else (e.g. a test fixture), not that analysis is buggy.
-        raise PipelineStageError(
-            stage="analysis",
-            input_ref=image_path,
-            detail="AnimationPlan has no PRIMARY object to animate",
-            architectural=False,
-            proposed_fix="Phase 3.1's pipeline requires a plan with exactly one PRIMARY object",
-        )
-    return primaries[0]
+def _slugify(label: str, index: int) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    return f"obj_{slug or 'object'}_{index}"
 
 
-def _panel_bbox_px(plan: AnimationPlan, panel_id: str, page_shape: tuple[int, int]) -> BBoxPx:
-    h, w = page_shape
-    panel = next(p for p in plan.panels if p.panel_id == panel_id)
-    return normalized_bbox_to_px(panel.bbox, page_width=w, page_height=h)
+def _candidate_plan(label: str, index: int) -> ObjectPlan:
+    """A placeholder `ObjectPlan` for grounding one label. STATIC with no motion -- only
+    `semantic_label` is read by grounding/description; the real motion and motion_type are
+    assigned later from the accepted description (the description is the source of truth)."""
+    return ObjectPlan(
+        object_id=_slugify(label, index),
+        panel_id=_PANEL_ID,
+        semantic_label=label,
+        confidence=1.0,
+        motion_type=MotionType.STATIC,
+        motion=None,
+    )
 
 
-def _select_objects(
-    plan: AnimationPlan, primary: ObjectPlan, page_shape: tuple[int, int]
-) -> tuple[list[ObjectPlan], dict[str, BBoxPx]]:
-    """Phase 4 (docs/decisions/0010-multi-object-layer-decomposition.md): animate every
-    non-STATIC object, not just the PRIMARY. `objects_to_animate` always starts with `primary`
-    so every "primary vs. the rest" ordering below stays deterministic and matches `plan.objects`'
-    own order for the rest. Also computes each animated object's real panel region (Phase 5.1,
-    panel-aware grounding; Phase 3.3.1 transform-geometry validation) in the given canvas shape.
-    """
-    objects_to_animate = [primary] + [
-        obj
-        for obj in plan.objects
-        if obj.motion_type != MotionType.STATIC and obj.object_id != primary.object_id
-    ]
-    panel_bbox_px_by_object = {
-        obj.object_id: _panel_bbox_px(plan, obj.panel_id, page_shape)
-        for obj in objects_to_animate
-    }
-    return objects_to_animate, panel_bbox_px_by_object
-
-
-def _ground_objects(
+def _ground_labels(
     image: np.ndarray,
-    objects: list[ObjectPlan],
+    labels: Sequence[str],
     grounding_client: GroundingClient,
-    panel_bbox_px_by_object: dict[str, BBoxPx],
-    primary_object_id: str,
-) -> tuple[dict[str, list[GroundingResult]], list[DroppedObjectResult]]:
-    """Ground every animated object on this crop. Assumes `grounding_client` is already loaded
-    (the caller owns its residency via `ModelStage`). PRIMARY grounding failure raises (fails
-    the crop); a SECONDARY/MICRO failure drops only that object -- see the module docstring's
-    failure policy and ADR 0010.
-    """
+    *,
+    panel_bbox_px: BBoxPx | None,
+    max_candidates: int = 3,
+) -> tuple[list[ObjectPlan], dict[str, list[GroundingResult]], list[DroppedObjectResult]]:
+    """Ground every label on this crop. A label with no detection above threshold is dropped
+    (a normal, expected outcome -- not every label exists on every page)."""
+    objects = [_candidate_plan(label, index) for index, label in enumerate(labels)]
     candidates_by_object: dict[str, list[GroundingResult]] = {}
     dropped_objects: list[DroppedObjectResult] = []
     for obj in objects:
@@ -481,411 +355,285 @@ def _ground_objects(
                 image,
                 obj,
                 grounding_client,
-                panel_bbox_px=panel_bbox_px_by_object[obj.object_id],
+                max_candidates=max_candidates,
+                panel_bbox_px=panel_bbox_px,
             )
         except PipelineStageError as exc:
-            if obj.object_id == primary_object_id:
-                raise
             logger.warning(
-                "grounding found nothing for %s object_id=%s semantic_label=%s -- "
-                "dropping it from this render (PRIMARY is unaffected)",
-                obj.motion_type.value,
-                obj.object_id,
-                obj.semantic_label,
-            )
-            dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj, failing_stage="grounding", reason=exc.detail
-                )
-            )
-    return candidates_by_object, dropped_objects
-
-
-def _validate_objects(
-    image: np.ndarray,
-    objects: list[ObjectPlan],
-    candidates_by_object: dict[str, list[GroundingResult]],
-    vlm_client: VLMClient,
-    panel_bbox_px_by_object: dict[str, BBoxPx],
-    primary_object_id: str,
-    *,
-    logical_panel_bbox_px: BBoxPx | None = None,
-    neighboring_panel_bboxes: tuple[BBoxPx, ...] = (),
-    global_origin: tuple[int, int] = (0, 0),
-) -> tuple[
-    dict[str, list[ValidationResult]],
-    dict[str, GroundingResult],
-    list[DroppedObjectResult],
-]:
-    """Target-validation gate between grounding and segmentation (Phase 3.2 / ADR 0006), with
-    the Phase 13 cross-panel ambiguity rejection. Assumes `vlm_client` is already loaded. A
-    PRIMARY candidate that fails every ranked validation attempt raises; SECONDARY/MICRO objects
-    drop out instead (ADR 0010).
-    """
-    validation_attempts_by_object: dict[str, list[ValidationResult]] = {}
-    accepted_by_object: dict[str, GroundingResult] = {}
-    dropped_objects: list[DroppedObjectResult] = []
-    for obj in objects:
-        if obj.object_id not in candidates_by_object:
-            continue  # already dropped at grounding
-        attempts: list[ValidationResult] = []
-        accepted: GroundingResult | None = None
-        for rank, candidate in enumerate(candidates_by_object[obj.object_id]):
-            result = validate_target(
-                image,
-                obj,
-                candidate,
-                vlm_client,
-                candidate_rank=rank,
-                panel_bbox_px=panel_bbox_px_by_object[obj.object_id],
-            )
-            attempts.append(result)
-            if result.accepted:
-                accepted = candidate
-                break
-        validation_attempts_by_object[obj.object_id] = attempts
-
-        if accepted is not None:
-            if logical_panel_bbox_px is not None:
-                ox, oy = global_origin
-                local_bbox = accepted.bbox
-                global_bbox = BBoxPx(
-                    x0=local_bbox.x0 + ox,
-                    y0=local_bbox.y0 + oy,
-                    x1=local_bbox.x1 + ox,
-                    y1=local_bbox.y1 + oy,
-                    score=local_bbox.score,
-                )
-                conflict = _cross_panel_conflict(
-                    global_bbox,
-                    logical_panel_bbox_px,
-                    neighboring_panel_bboxes,
-                )
-                if conflict is not None:
-                    reason = (
-                        f"grounded bbox {global_bbox.as_xyxy()} materially crosses logical "
-                        f"neighbor panel {conflict.as_xyxy()}; ambiguous cross-panel object "
-                        "animation is rejected conservatively"
-                    )
-                    if obj.object_id == primary_object_id:
-                        raise PipelineStageError(
-                            stage="validation",
-                            input_ref=obj.object_id,
-                            detail=reason,
-                            root_cause=(
-                                "object ownership cannot be safely attributed to one panel"
-                            ),
-                            architectural=False,
-                            proposed_fix=(
-                                "leave the object static or provide a panel-local target"
-                            ),
-                        )
-                    dropped_objects.append(
-                        DroppedObjectResult(
-                            object_plan=obj,
-                            failing_stage="validation",
-                            reason=reason,
-                        )
-                    )
-                    continue
-            accepted_by_object[obj.object_id] = accepted
-        elif obj.object_id == primary_object_id:
-            # Per the Phase 3.2 failure policy: a candidate that clears grounding's own
-            # detection threshold is NOT the same as one that's semantically correct (see
-            # docs/decisions/0006-grounding-target-validation.md) -- every ranked grounding
-            # candidate was tried and none was accepted, so this run fails outright rather
-            # than silently animating the best-scoring-but-unvalidated one.
-            raise PipelineStageError(
-                stage="validation",
-                input_ref=obj.object_id,
-                detail=(
-                    f"all {len(attempts)} grounding candidate(s) for "
-                    f"semantic_label={obj.semantic_label!r} failed target validation: "
-                    + "; ".join(f"rank={r.candidate_rank} {r.reason}" for r in attempts)
-                ),
-                root_cause=(
-                    "no grounding candidate plausibly matched the intended semantic "
-                    "target -- a technically valid detection is not the same as a "
-                    "correct one"
-                ),
-                architectural=False,
-                proposed_fix=(
-                    "retry with a different page/object, or supply a controlled-fallback "
-                    "AnimationPlan (run_pipeline(..., plan=...)) for a human-verified target"
-                ),
-            )
-        else:
-            logger.warning(
-                "every grounding candidate for %s object_id=%s semantic_label=%s failed "
-                "validation -- dropping it from this render (PRIMARY is unaffected)",
-                obj.motion_type.value,
-                obj.object_id,
-                obj.semantic_label,
-            )
-            dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj,
-                    failing_stage="validation",
-                    reason="all "
-                    + str(len(attempts))
-                    + " grounding candidate(s) failed target validation: "
-                    + "; ".join(f"rank={r.candidate_rank} {r.reason}" for r in attempts),
-                )
-            )
-    return validation_attempts_by_object, accepted_by_object, dropped_objects
-
-
-def _segment_objects(
-    image: np.ndarray,
-    objects: list[ObjectPlan],
-    accepted_by_object: dict[str, GroundingResult],
-    segmentation_client: SegmentationClient,
-    primary_object_id: str,
-) -> tuple[list[ObjectPlan], dict[str, SegmentationResult], list[DroppedObjectResult]]:
-    """Segment every accepted object on this crop and apply Phase 8.3's cross-object mask
-    overlap protection. Assumes `segmentation_client` is already loaded. PRIMARY segmentation
-    failure raises; SECONDARY/MICRO failures drop only that object (Phase 8.3 fix).
-    """
-    segmentation_by_object: dict[str, SegmentationResult] = {}
-    dropped_objects: list[DroppedObjectResult] = []
-    for obj in objects:
-        if obj.object_id not in accepted_by_object:
-            continue  # already dropped at grounding or validation
-        try:
-            segmentation_by_object[obj.object_id] = segment_object(
-                image,
-                accepted_by_object[obj.object_id],
-                segmentation_client,
-                max_mask_density=(
-                    _MAX_EFFECT_MASK_DENSITY
-                    if obj.motion is not None
-                    and obj.motion.transform_kind == TransformKind.RADIAL_EXPAND
-                    else None
-                ),
-            )
-        except PipelineStageError as exc:
-            if obj.object_id == primary_object_id:
-                raise
-            logger.warning(
-                "segmentation failed for %s object_id=%s semantic_label=%s -- dropping "
-                "it from this render (PRIMARY is unaffected): %s",
-                obj.motion_type.value,
-                obj.object_id,
+                "grounding found nothing for semantic_label=%s -- dropping it: %s",
                 obj.semantic_label,
                 exc.detail,
             )
             dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj, failing_stage="segmentation", reason=exc.detail
+                DroppedObjectResult(object_plan=obj, failing_stage="grounding", reason=exc.detail)
+            )
+    return objects, candidates_by_object, dropped_objects
+
+
+def _segment_candidates(
+    image: np.ndarray,
+    candidates_by_object: dict[str, list[GroundingResult]],
+    plan_by_object: dict[str, ObjectPlan],
+    segmentation_client: SegmentationClient,
+) -> tuple[dict[tuple[str, int], SegmentationResult], list[DroppedObjectResult]]:
+    """Segment every grounded candidate. A candidate whose mask fails the shape/coverage
+    checks is dropped (fail closed); the object's other candidates are unaffected."""
+    segmentation_by_candidate: dict[tuple[str, int], SegmentationResult] = {}
+    dropped_objects: list[DroppedObjectResult] = []
+    for object_id, candidates in candidates_by_object.items():
+        for rank, candidate in enumerate(candidates):
+            try:
+                segmentation_by_candidate[(object_id, rank)] = segment_object(
+                    image, candidate, segmentation_client
+                )
+            except PipelineStageError as exc:
+                logger.warning(
+                    "segmentation failed for candidate object_id=%s rank=%d -- dropping it: %s",
+                    object_id,
+                    rank,
+                    exc.detail,
+                )
+                dropped_objects.append(
+                    DroppedObjectResult(
+                        object_plan=plan_by_object[object_id],
+                        failing_stage="segmentation",
+                        reason=exc.detail,
+                    )
+                )
+    return segmentation_by_candidate, dropped_objects
+
+
+def _describe_candidates(
+    image: np.ndarray,
+    candidates_by_object: dict[str, list[GroundingResult]],
+    plan_by_object: dict[str, ObjectPlan],
+    segmentation_by_candidate: dict[tuple[str, int], SegmentationResult],
+    vlm_client: VLMClient,
+    config: PipelineConfig,
+    *,
+    panel_bbox_px: BBoxPx | None,
+) -> tuple[
+    dict[tuple[str, int], ObjectDescriptionResult],
+    list[DroppedObjectResult],
+]:
+    """THE pipeline's single VLM stage: ONE call per image with the image and ALL of its
+    segmented candidates' bboxes as pixel coordinates (the model sees every candidate at
+    once, never one crop per candidate). Accepted descriptions additionally pass the
+    deterministic transform-geometry gate (a semantically-good box can still be
+    geometrically unsafe for its mapped motion kind). Fail-closed per candidate."""
+
+    batch: list[CandidateBox] = []
+    batch_keys: list[tuple[str, int]] = []
+    for object_id, candidates in candidates_by_object.items():
+        for rank, candidate in enumerate(candidates):
+            if (object_id, rank) not in segmentation_by_candidate:
+                continue  # already dropped at segmentation
+            batch.append(
+                CandidateBox(
+                    object_id=object_id,
+                    semantic_label=plan_by_object[object_id].semantic_label,
+                    bbox=candidate.bbox,
                 )
             )
-    animated_objects = [obj for obj in objects if obj.object_id in segmentation_by_object]
-    # Phase 8.3 (Defect A): drop any SECONDARY/MICRO object whose real mask overlaps an
-    # already-accepted object's mask enough to risk a double-exposure ghost once both are
-    # animated independently.
-    animated_objects, segmentation_by_object = _drop_overlapping_secondary_objects(
-        animated_objects, segmentation_by_object, primary_object_id, dropped_objects
+            batch_keys.append((object_id, rank))
+
+    descriptions_by_candidate: dict[tuple[str, int], ObjectDescriptionResult] = {}
+    dropped_objects: list[DroppedObjectResult] = []
+    if not batch:
+        return descriptions_by_candidate, dropped_objects
+
+    try:
+        results = describe_objects(
+            image, batch, vlm_client, max_long_edge=config.resolution
+        )
+    except Exception as exc:  # noqa: BLE001 -- a failed batch call drops every candidate
+        logger.warning(
+            "object description batch call failed (%s) -- dropping %d candidate(s)",
+            exc,
+            len(batch),
+        )
+        for (object_id, _rank), _box in zip(batch_keys, batch, strict=True):
+            dropped_objects.append(
+                DroppedObjectResult(
+                    object_plan=plan_by_object[object_id],
+                    failing_stage="object_description",
+                    reason=f"VLM call failed: {type(exc).__name__}: {exc}",
+                )
+            )
+        return descriptions_by_candidate, dropped_objects
+
+    for (object_id, rank), description in zip(batch_keys, results, strict=True):
+        descriptions_by_candidate[(object_id, rank)] = description
+        if not description.accepted:
+            logger.info(
+                "object description REJECT for object_id=%s rank=%d "
+                "(rejection_reason=%s): %s",
+                object_id,
+                rank,
+                description.rejection_reason,
+                description.reason,
+            )
+            dropped_objects.append(
+                DroppedObjectResult(
+                    object_plan=plan_by_object[object_id],
+                    failing_stage="object_description",
+                    reason=(
+                        f"{description.rejection_reason or 'unparseable'}: "
+                        f"{description.reason}"
+                    ),
+                )
+            )
+            continue
+        # Deterministic transform-geometry gate (no VLM): the mapped MotionSpec must be
+        # geometrically safe for this bbox (the Phase 3.3.1 protection, kept from the old
+        # validation stage).
+        assert description.motion_spec is not None
+        candidate = candidates_by_object[object_id][rank]
+        compatible, geometry_reason = check_transform_geometry(
+            candidate.bbox,
+            description.motion_spec.transform_kind,
+            panel_bbox_px=panel_bbox_px,
+            image_shape=(image.shape[0], image.shape[1]),
+        )
+        if not compatible:
+            logger.info(
+                "object description ACCEPT but geometry REJECT for object_id=%s rank=%d: %s",
+                object_id,
+                rank,
+                geometry_reason,
+            )
+            dropped_objects.append(
+                DroppedObjectResult(
+                    object_plan=plan_by_object[object_id],
+                    failing_stage="object_description",
+                    reason=geometry_reason,
+                )
+            )
+            continue
+        logger.info(
+            "object description ACCEPT for object_id=%s rank=%d confidence=%.2f "
+            "motion_kind=%s",
+            object_id,
+            rank,
+            description.confidence or 0.0,
+            description.motion_spec.transform_kind.value,
+        )
+    return descriptions_by_candidate, dropped_objects
+
+
+def _build_plan(
+    image_path: Path,
+    image_size: tuple[int, int],
+    config: PipelineConfig,
+    *,
+    accepted: list[tuple[str, int, ObjectPlan, GroundingResult, SegmentationResult,
+                         ObjectDescriptionResult]],
+    global_origin: tuple[int, int] = (0, 0),
+    logical_panel_bbox_px: BBoxPx | None = None,
+    neighboring_panel_bboxes: tuple[BBoxPx, ...] = (),
+) -> tuple[AnimationPlan, ObjectPlan, list[tuple[ObjectPlan, GroundingResult, SegmentationResult,
+                                                 ObjectDescriptionResult]]]:
+    """Assemble the final `AnimationPlan` from accepted descriptions and rank them:
+    highest description confidence -> PRIMARY, the rest SECONDARY (deterministic tiebreak by
+    object_id). Applies the cross-panel ambiguity rejection to each accepted bbox.
+
+    Raises `PipelineStageError` (stage="object_description") when no candidate was accepted --
+    the fail-closed outcome of the pipeline's only semantic stage.
+    """
+    if not accepted:
+        raise PipelineStageError(
+            stage="object_description",
+            input_ref=str(image_path),
+            detail="no grounded candidate was accepted by the object-description stage",
+            root_cause=(
+                "every candidate failed the VLM's bbox assessment, was unparseable, or failed "
+                "the deterministic transform-geometry gate"
+            ),
+            architectural=False,
+            proposed_fix=(
+                "choose labels that actually appear on the page, or accept a REJECTED/STATIC "
+                "outcome as the honest result"
+            ),
+        )
+
+    # Cross-panel ambiguity rejection (the old validation stage's geometric guard, now applied
+    # to accepted candidates): a bbox materially crossing a neighboring logical panel is a
+    # conservative reject.
+    kept: list[tuple[str, int, ObjectPlan, GroundingResult, SegmentationResult,
+                     ObjectDescriptionResult]] = []
+    for object_id, rank, obj, grounding, seg, description in accepted:
+        if logical_panel_bbox_px is not None:
+            ox, oy = global_origin
+            global_bbox = BBoxPx(
+                x0=grounding.bbox.x0 + ox,
+                y0=grounding.bbox.y0 + oy,
+                x1=grounding.bbox.x1 + ox,
+                y1=grounding.bbox.y1 + oy,
+            )
+            conflict = _cross_panel_conflict(
+                global_bbox, logical_panel_bbox_px, neighboring_panel_bboxes
+            )
+            if conflict is not None:
+                logger.warning(
+                    "grounded bbox %s materially crosses logical neighbor panel %s -- "
+                    "rejecting this candidate conservatively",
+                    global_bbox.as_xyxy(),
+                    conflict.as_xyxy(),
+                )
+                continue
+        kept.append((object_id, rank, obj, grounding, seg, description))
+
+    if not kept:
+        raise PipelineStageError(
+            stage="object_description",
+            input_ref=str(image_path),
+            detail="every accepted candidate crossed a neighboring logical panel",
+            root_cause="object ownership cannot be safely attributed to one panel",
+            architectural=False,
+            proposed_fix="leave the object static or provide a panel-local target",
+        )
+
+    kept.sort(
+        key=lambda item: (item[5].confidence or 0.0, item[0]), reverse=True
     )
-    return animated_objects, segmentation_by_object, dropped_objects
+    primary_description = kept[0][5]
 
+    width, height = image_size
+    source = SourceImage(path=str(image_path), width=width, height=height)
+    panel = PanelPlan(panel_id=_PANEL_ID, bbox=BBox(x=0.0, y=0.0, width=1.0, height=1.0))
+    loop = LoopSpec(duration_s=config.duration_s, fps=config.fps, seamless=True)
 
-def _mask_semantics_objects(
-    image: np.ndarray,
-    animated_objects: list[ObjectPlan],
-    segmentation_by_object: dict[str, SegmentationResult],
-    vlm_client: VLMClient,
-    config: PipelineConfig,
-    primary_object_id: str,
-) -> tuple[
-    list[ObjectPlan],
-    dict[str, SegmentationResult],
-    dict[str, MaskSemanticResult],
-    list[DroppedObjectResult],
-]:
-    """Phase 12 post-segmentation semantic mask gate (ADR 0018). Assumes `vlm_client` is
-    already loaded. PRIMARY REJECT/ABSTAIN fails the crop; SECONDARY/MICRO REJECT/ABSTAIN drops
-    the object. Returns the filtered object/mask collections plus the recorded verdicts.
-    """
-    mask_semantics_by_object: dict[str, MaskSemanticResult] = {}
-    dropped_objects: list[DroppedObjectResult] = []
-    kept: list[ObjectPlan] = []
-    for obj in animated_objects:
-        seg = segmentation_by_object[obj.object_id]
-        try:
-            mask_result = verify_mask_semantics(image, obj, seg.mask, seg.bbox, vlm_client)
-        except Exception as exc:  # noqa: BLE001 -- apply stage failure policy below
-            reason = f"semantic mask VLM call failed: {type(exc).__name__}: {exc}"
-            if obj.object_id == primary_object_id:
-                raise PipelineStageError(
-                    stage="mask_semantics",
-                    input_ref=obj.object_id,
-                    detail=reason,
-                    root_cause="the semantic mask validation model could not complete",
-                    architectural=False,
-                    proposed_fix="retry the VLM call or inspect GPU/model resources",
-                ) from exc
-            dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj,
-                    failing_stage="mask_semantics",
-                    reason=reason,
-                )
-            )
-            continue
-        mask_semantics_by_object[obj.object_id] = mask_result
-        if mask_result.accepted:
-            kept.append(obj)
-            continue
-        if obj.object_id == primary_object_id:
-            raise PipelineStageError(
-                stage="mask_semantics",
-                input_ref=obj.object_id,
-                detail=(
-                    f"semantic mask validation {mask_result.verdict.upper()} for "
-                    f"semantic_label={obj.semantic_label!r}: {mask_result.reason}"
-                ),
-                root_cause=(
-                    "the segmented mask passed every geometric check but its actual "
-                    "pixel content does not match the intended semantic target (or the "
-                    "evidence was too weak to tell) -- see "
-                    "docs/decisions/0018-semantic-mask-validation.md"
-                ),
-                architectural=False,
-                proposed_fix=(
-                    "retry with a different page/object, or supply a "
-                    "controlled-fallback AnimationPlan for a human-verified target"
-                ),
-                mask_semantics=mask_result,
-            )
-        logger.warning(
-            "semantic mask validation %s for %s object_id=%s semantic_label=%s -- "
-            "dropping it from this render (PRIMARY is unaffected): %s",
-            mask_result.verdict.upper(),
-            obj.motion_type.value,
-            obj.object_id,
-            obj.semantic_label,
-            mask_result.reason,
+    # Rebuild each accepted item with the final ObjectPlan carrying the description's motion
+    # and the PRIMARY/SECONDARY motion_type. object_id is unique per (label, rank) so several
+    # accepted candidates of one label coexist in the plan.
+    finalized: list[tuple[ObjectPlan, GroundingResult, SegmentationResult,
+                          ObjectDescriptionResult]] = []
+    for index, (object_id, rank, obj, grounding, seg, description) in enumerate(kept):
+        assert description.motion_spec is not None
+        final_plan = ObjectPlan(
+            object_id=f"{object_id}_{rank}",
+            panel_id=_PANEL_ID,
+            semantic_label=obj.semantic_label,
+            confidence=description.confidence or 0.0,
+            motion_type=MotionType.PRIMARY if index == 0 else MotionType.SECONDARY,
+            motion=description.motion_spec,
         )
-        dropped_objects.append(
-            DroppedObjectResult(
-                object_plan=obj,
-                failing_stage="mask_semantics",
-                reason=f"{mask_result.verdict.upper()}: {mask_result.reason}",
-                mask_semantics=mask_result,
-            )
-        )
-    kept_ids = {obj.object_id for obj in kept}
-    kept_segmentation = {
-        oid: seg for oid, seg in segmentation_by_object.items() if oid in kept_ids
-    }
-    return kept, kept_segmentation, mask_semantics_by_object, dropped_objects
+        finalized.append((final_plan, grounding, seg, description))
 
-
-def _describe_objects(
-    image: np.ndarray,
-    animated_objects: list[ObjectPlan],
-    accepted_by_object: dict[str, GroundingResult],
-    vlm_client: VLMClient,
-    config: PipelineConfig,
-    primary_object_id: str,
-) -> tuple[
-    list[ObjectPlan],
-    dict[str, ObjectDescriptionResult],
-    list[DroppedObjectResult],
-]:
-    """Phase 18.3: per-candidate VLM object description / semantic bbox validation.
-
-    Runs after mask_semantics, before animation. For every animated object the VLM sees the
-    FULL pipeline image plus the accepted grounding candidate's bbox as pixel coordinates and
-    produces a structured animation description (object_description.describe_object). The
-    description's deterministically-mapped `MotionSpec` REPLACES the plan's heuristic motion
-    for the object (the VLM judged the actual candidate region, not a label keyword), and the
-    animation stage applies it. A non-accepted read is fail-closed: PRIMARY rejects the run,
-    SECONDARY/MICRO drops the object (see `ObjectDescriptionResult` for the acceptance rule).
-    The SAM mask is not an input here -- it stays for the stages that consume it.
-    """
-    descriptions_by_object: dict[str, ObjectDescriptionResult] = {}
-    dropped_objects: list[DroppedObjectResult] = []
-    kept: list[ObjectPlan] = []
-    for obj in animated_objects:
-        grounding = accepted_by_object[obj.object_id]
-        try:
-            description = describe_object(
-                image,
-                grounding.bbox,
-                obj,
-                vlm_client,
-                max_long_edge=config.resolution,
-            )
-        except Exception as exc:  # noqa: BLE001 -- apply stage failure policy below
-            reason = f"object description VLM call failed: {type(exc).__name__}: {exc}"
-            if obj.object_id == primary_object_id:
-                raise PipelineStageError(
-                    stage="object_description",
-                    input_ref=obj.object_id,
-                    detail=reason,
-                    root_cause="the object description model could not complete",
-                    architectural=False,
-                    proposed_fix="retry the VLM call or inspect GPU/model resources",
-                ) from exc
-            dropped_objects.append(
-                DroppedObjectResult(
-                    object_plan=obj, failing_stage="object_description", reason=reason
-                )
-            )
-            continue
-        descriptions_by_object[obj.object_id] = description
-        if description.accepted:
-            assert description.motion_spec is not None
-            kept.append(
-                obj.model_copy(
-                    update={
-                        "motion": description.motion_spec,
-                        "confidence": description.confidence or obj.confidence,
-                    }
-                )
-            )
-            continue
-        if obj.object_id == primary_object_id:
-            raise PipelineStageError(
-                stage="object_description",
-                input_ref=obj.object_id,
-                detail=(
-                    f"object description rejected the PRIMARY candidate for "
-                    f"semantic_label={obj.semantic_label!r} (rejection_reason="
-                    f"{description.rejection_reason!r}): {description.reason}"
-                ),
-                root_cause=(
-                    "the VLM judged the grounded bbox against the full image as not a "
-                    "good single animatable object (see ObjectDescriptionResult.accepted)"
-                ),
-                architectural=False,
-                proposed_fix=(
-                    "retry with a different page/object, or supply a controlled-fallback "
-                    "AnimationPlan for a human-verified target"
-                ),
-                object_description=description,
-            )
-        logger.warning(
-            "object description %s for %s object_id=%s semantic_label=%s "
-            "(rejection_reason=%s) -- dropping it from this render (PRIMARY is unaffected): %s",
-            "REJECT" if description.assessment is not None else "UNPARSEABLE",
-            obj.motion_type.value,
-            obj.object_id,
-            obj.semantic_label,
-            description.rejection_reason,
-            description.reason,
-        )
-        dropped_objects.append(
-            DroppedObjectResult(
-                object_plan=obj,
-                failing_stage="object_description",
-                reason=(
-                    f"{description.rejection_reason or 'unparseable'}: {description.reason}"
-                ),
-            )
-        )
-    return kept, descriptions_by_object, dropped_objects
+    plan = AnimationPlan(
+        source=source,
+        panels=[panel],
+        objects=[item[0] for item in finalized],
+        loop=loop,
+    )
+    primary_obj = finalized[0][0]
+    logger.info(
+        "animation planning: PRIMARY=%s (confidence=%.2f), %d secondary accepted",
+        primary_obj.semantic_label,
+        primary_description.confidence or 0.0,
+        len(finalized) - 1,
+    )
+    return plan, primary_obj, finalized
 
 
 def _animate_objects(
@@ -896,12 +644,11 @@ def _animate_objects(
     plan: AnimationPlan,
 ) -> tuple[list[Layer], dict[str, Layer]]:
     """Deterministic per-object frame generation (CPU). Returns the `Layer` list (compositing
-    z-order contract, `_Z_ORDER_BY_MOTION_TYPE`) and the object-id -> Layer map.
-    """
+    z-order contract, `_Z_ORDER_BY_MOTION_TYPE`) and the object-id -> Layer map."""
     frame_count = plan.loop.frame_count
     layers: list[Layer] = []
     for obj in animated_objects:
-        assert obj.motion is not None  # schema guarantees this for a non-STATIC ObjectPlan
+        assert obj.motion is not None  # plan construction guarantees a spec for non-STATIC
         seg = segmentation_by_object[obj.object_id]
         transformed = tuple(
             generate_transformed_layer(
@@ -934,11 +681,9 @@ def _reconstruct_objects(
     reconstruction_client: ReconstructionClient,
     config: PipelineConfig,
 ) -> dict[str, ReconstructionResult]:
-    """Fill every object's motion-revealed hole, or `None` for objects that never reveal one
-    (no LaMa call). Assumes `reconstruction_client` is already loaded and passes
-    `managed_loaded=True` so a whole reconstruction stage can keep LaMa resident once (Phase 14
-    stage-level lifecycle) instead of reloading it per object.
-    """
+    """Fill every object's motion-revealed hole (no LaMa call for objects that never reveal
+    one). Assumes `reconstruction_client` is already loaded and passes `managed_loaded=True`
+    so the whole reconstruction stage keeps LaMa resident once (Phase 14 stage-level lifecycle)."""
     reconstructions: dict[str, ReconstructionResult] = {}
     for obj in animated_objects:
         seg = segmentation_by_object[obj.object_id]
@@ -1000,185 +745,120 @@ def run_pipeline(
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient,
     out_dir: Path,
-    plan: AnimationPlan | None = None,
-    analysis_mode: Literal["page", "panel"] = "panel",
+    labels: Sequence[str] | None = None,
+    panel_bbox_px: BBoxPx | None = None,
     global_origin: tuple[int, int] = (0, 0),
     logical_panel_bbox_px: BBoxPx | None = None,
     neighboring_panel_bboxes: tuple[BBoxPx, ...] = (),
     video_filename: str = "output.mp4",
     frames_dir: Path | None = None,
 ) -> PipelineRunResult:
-    """Run the complete pipeline (analysis through rendering, with Phase 3.2's grounding-
-    validation gate) on one real manga page.
+    """Run the Phase 18.3 pipeline on one image: grounding -> segmentation -> the pipeline's
+    single VLM stage (object description) -> animation planning -> animation -> reconstruction
+    -> compositing -> rendering.
 
-    Raises `PipelineStageError` (never a silent partial/false success) the moment any stage
-    fails. `out_dir` receives the rendered MP4 and the intermediate frame sequence (kept, per
-    the Phase 3.1 brief's "keep the frame sequence available as an ignored output artifact for
-    debugging") -- both are generated, git-ignored artifacts (see ADR 0002), not canonical.
+    `labels`: the candidate semantic labels to ground (DINO prompts). Defaults to
+    `DEFAULT_ANIMATION_LABELS`. The pipeline never invents labels with a VLM.
 
-    `plan`: the controlled-fallback escape hatch the Phase 3.1 brief explicitly allows ("If
-    the VLM produces an unusable or ambiguous plan: ... use a controlled fallback/test fixture
-    if necessary; clearly distinguish the fallback from fully automatic operation"). Leave this
-    `None` for real automatic operation (the default, and what every real run should use first).
-    Pass a pre-built `AnimationPlan` ONLY when `analyze_page` has already been run for real and
-    genuinely returned an unusable result (e.g. a defensible all-STATIC read on every candidate
-    object) -- this skips the analysis stage's VLM call entirely, so the caller is responsible
-    for recording that substitution honestly wherever this run's results are reported.
-
-    `analysis_mode`: `"panel"` (default since Phase 10, see
-    docs/decisions/0017-phase10-meshwarp-direction-default-and-panel-default.md -- deterministic
-    panel detection followed by one VLM call per detected panel, `analyze_page_panels`; see
-    docs/decisions/0007-panel-aware-analysis.md) or `"page"` (one whole-page VLM call,
-    `analyze_page` -- the default through Phase 9). Real Phase 9 evidence
-    (docs/phase9-results.md section 5.3) found panel mode dramatically more reliable on a
-    10-sample real-world set (`end_to_end_completion_rate` 20%->60%, `grounding_success_rate`
-    50%->100%, ERROR-classified outcomes 5->0) and, per Phase 10's own forensics
-    (docs/phase10-results.md), page mode's single whole-page VLM call was the proximate cause of
-    a real mid-cycle visual defect (`realworld_marika_love_meter`) that panel mode's independent,
-    per-panel grounding correctly rejected instead of silently rendering. Ignored when `plan` is
-    already supplied (there is no analysis stage to mode-switch on the controlled-fallback path).
-    Everything downstream of analysis (grounding, validation, segmentation, animation,
-    compositing, rendering) is identical either way -- this switch only changes how the
-    `AnimationPlan` was produced, per ADR 0007's explicit decoupling from
-    grounding/segmentation/animation. Pass `analysis_mode="page"` explicitly for the old default.
+    Raises `PipelineStageError` (never a silent partial/false success) the moment a stage
+    fails. `out_dir` receives the rendered MP4 and the intermediate frame sequence -- both
+    git-ignored artifacts (ADR 0002).
     """
     set_global_seed(config.seed)
     device = config.resolve_device()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if plan is None:
-        with (
-            ModelStage(vlm_client, name="analysis"),
-            StageTimer("analysis", logger, device=device, model=config.model_variants.get("vlm")),
-        ):
-            plan = (
-                analyze_page_panels(image_path, vlm_client, config=config)
-                if analysis_mode == "panel"
-                else analyze_page(image_path, vlm_client, config=config)
-            )
-    else:
-        logger.warning(
-            "run_pipeline: using an externally supplied AnimationPlan -- the analysis stage's "
-            "VLM call did NOT run for this invocation (controlled-fallback path, see the "
-            "Phase 3.1 brief's failure policy)"
-        )
-    primary = _select_primary(plan, str(image_path))
-    logger.info(
-        "analysis selected PRIMARY object object_id=%s semantic_label=%s transform_kind=%s",
-        primary.object_id,
-        primary.semantic_label,
-        primary.motion.transform_kind if primary.motion else None,
-    )
-
     image = np.asarray(Image.open(image_path).convert("RGB"))
-    page_shape = (image.shape[0], image.shape[1])
-    objects_to_animate, panel_bbox_px_by_object = _select_objects(plan, primary, page_shape)
+    active_labels = list(labels or DEFAULT_ANIMATION_LABELS)
 
-    def _is_primary(object_id: str) -> bool:
-        return object_id == primary.object_id
-
-    dropped_objects: list[DroppedObjectResult] = []
-
+    # Stage 1: grounding -- DINO once for every label on this canvas, then released.
     with (
         ModelStage(grounding_client, name="grounding"),
         StageTimer(
             "grounding", logger, device=device, model=config.model_variants.get("grounding")
         ),
     ):
-        candidates_by_object, dropped = _ground_objects(
-            image,
-            objects_to_animate,
-            grounding_client,
-            panel_bbox_px_by_object,
-            primary.object_id,
+        plans_by_object, candidates_by_object, dropped = _ground_labels(
+            image, active_labels, grounding_client, panel_bbox_px=panel_bbox_px
         )
-        dropped_objects.extend(dropped)
+    plan_by_object = {plan.object_id: plan for plan in plans_by_object}
+    dropped_objects: list[DroppedObjectResult] = list(dropped)
 
-    with (
-        ModelStage(vlm_client, name="validation"),
-        StageTimer("validation", logger, device=device, model=config.model_variants.get("vlm")),
-    ):
-        validation_attempts_by_object, accepted_by_object, dropped = _validate_objects(
-            image,
-            objects_to_animate,
-            candidates_by_object,
-            vlm_client,
-            panel_bbox_px_by_object,
-            primary.object_id,
-            logical_panel_bbox_px=logical_panel_bbox_px,
-            neighboring_panel_bboxes=neighboring_panel_bboxes,
-            global_origin=global_origin,
-        )
-        dropped_objects.extend(dropped)
-
+    # Stage 2: segmentation -- SAM2 once for every grounded candidate, then released. Masks
+    # are kept for the animation stage; they are never an input to the VLM.
     with (
         ModelStage(segmentation_client, name="segmentation"),
         StageTimer(
             "segmentation", logger, device=device, model=config.model_variants.get("segmentation")
         ),
     ):
-        animated_objects, segmentation_by_object, dropped = _segment_objects(
+        segmentation_by_candidate, dropped = _segment_candidates(
+            image, candidates_by_object, plan_by_object, segmentation_client
+        )
+    dropped_objects.extend(dropped)
+
+    # Stage 3: object description -- THE pipeline's single VLM stage. Qwen loads once,
+    # processes every segmented candidate of this canvas, then is released.
+    with (
+        ModelStage(vlm_client, name="object_description"),
+        StageTimer(
+            "object_description",
+            logger,
+            device=device,
+            model=config.model_variants.get("vlm"),
+        ),
+    ):
+        descriptions_by_candidate, dropped = _describe_candidates(
             image,
-            objects_to_animate,
-            accepted_by_object,
-            segmentation_client,
-            primary.object_id,
+            candidates_by_object,
+            plan_by_object,
+            segmentation_by_candidate,
+            vlm_client,
+            config,
+            panel_bbox_px=panel_bbox_px,
         )
-        dropped_objects.extend(dropped)
+    dropped_objects.extend(dropped)
 
-    mask_semantics_by_object: dict[str, MaskSemanticResult] = {}
-    if config.enable_semantic_mask_validation:
-        with (
-            ModelStage(vlm_client, name="mask_semantics"),
-            StageTimer(
-                "mask_semantics", logger, device=device, model=config.model_variants.get("vlm")
-            ),
-        ):
+    # Stage 4: animation planning (deterministic, no model) -- rank accepted candidates,
+    # build the schema-valid AnimationPlan with the description-mapped MotionSpecs.
+    accepted: list[
+        tuple[str, int, ObjectPlan, GroundingResult, SegmentationResult, ObjectDescriptionResult]
+    ] = []
+    for (object_id, rank), description in descriptions_by_candidate.items():
+        if not description.accepted:
+            continue
+        accepted.append(
             (
-                animated_objects,
-                segmentation_by_object,
-                mask_semantics_by_object,
-                dropped,
-            ) = _mask_semantics_objects(
-                image,
-                animated_objects,
-                segmentation_by_object,
-                vlm_client,
-                config,
-                primary.object_id,
+                object_id,
+                rank,
+                plan_by_object[object_id],
+                candidates_by_object[object_id][rank],
+                segmentation_by_candidate[(object_id, rank)],
+                description,
             )
-            dropped_objects.extend(dropped)
-
-    descriptions_by_object: dict[str, ObjectDescriptionResult] = {}
-    if config.enable_object_description_validation:
-        with (
-            ModelStage(vlm_client, name="object_description"),
-            StageTimer(
-                "object_description",
-                logger,
-                device=device,
-                model=config.model_variants.get("vlm"),
-            ),
-        ):
-            (
-                animated_objects,
-                descriptions_by_object,
-                dropped,
-            ) = _describe_objects(
-                image,
-                animated_objects,
-                accepted_by_object,
-                vlm_client,
-                config,
-                primary.object_id,
-            )
-            dropped_objects.extend(dropped)
-        # The description stage replaces the PRIMARY's heuristic MotionSpec with the
-        # per-candidate VLM-mapped one -- point `primary` at the updated object so
-        # PipelineRunResult.primary_object (and its motion) reflect what actually animates.
-        primary = next(
-            obj for obj in animated_objects if obj.object_id == primary.object_id
         )
+    plan, primary, kept = _build_plan(
+        image_path,
+        (image.shape[0], image.shape[1]),
+        config,
+        accepted=accepted,
+        global_origin=global_origin,
+        logical_panel_bbox_px=logical_panel_bbox_px,
+        neighboring_panel_bboxes=neighboring_panel_bboxes,
+    )
+
+    animated_objects = [item[0] for item in kept]
+    segmentation_by_object = {
+        item[0].object_id: item[2] for item in kept
+    }
+    descriptions_by_object = {
+        item[0].object_id: item[3] for item in kept
+    }
+    grounding_by_object = {item[0].object_id: item[1] for item in kept}
+    panel_bbox_px_by_object = {
+        obj.object_id: (panel_bbox_px or BBoxPx(x0=0, y0=0, x1=image.shape[1], y1=image.shape[0]))
+        for obj in animated_objects
+    }
 
     with StageTimer("animation", logger, device="cpu", model=None):
         layers, layers_by_object = _animate_objects(
@@ -1215,30 +895,29 @@ def run_pipeline(
         frames_dir=frames_dir or out_dir / "frames",
     )
 
+    primary_grounding = grounding_by_object[primary.object_id]
+    primary_segmentation = segmentation_by_object[primary.object_id]
+    primary_description = descriptions_by_object[primary.object_id]
     secondary_results = [
         ObjectRunResult(
             object_plan=obj,
-            grounding=accepted_by_object[obj.object_id],
-            validation_attempts=validation_attempts_by_object[obj.object_id],
+            grounding=grounding_by_object[obj.object_id],
             segmentation=segmentation_by_object[obj.object_id],
-            mask_semantics=mask_semantics_by_object.get(obj.object_id),
+            object_description=descriptions_by_object[obj.object_id],
             reconstruction=reconstructions.get(obj.object_id),
-            object_description=descriptions_by_object.get(obj.object_id),
         )
         for obj in animated_objects
-        if not _is_primary(obj.object_id)
+        if obj.object_id != primary.object_id
     ]
 
     return PipelineRunResult(
         image_path=image_path,
         plan=plan,
         primary_object=primary,
-        grounding=accepted_by_object[primary.object_id],
-        validation_attempts=validation_attempts_by_object[primary.object_id],
-        segmentation=segmentation_by_object[primary.object_id],
-        mask_semantics=mask_semantics_by_object.get(primary.object_id),
+        grounding=primary_grounding,
+        segmentation=primary_segmentation,
+        object_description=primary_description,
         reconstruction=reconstructions.get(primary.object_id),
-        object_description=descriptions_by_object.get(primary.object_id),
         render=render_result,
         secondary_objects=secondary_results,
         dropped_objects=dropped_objects,

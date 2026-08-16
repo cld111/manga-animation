@@ -63,6 +63,7 @@ def _object_plan(label: str = "character_hair") -> ObjectPlan:
 
 def _valid_response(**overrides) -> str:
     payload = {
+        "box_index": 0,
         "bbox_assessment": "pass",
         "object_identity": "character_hair",
         "matches_semantic_label": True,
@@ -83,8 +84,16 @@ def _valid_response(**overrides) -> str:
     return json.dumps(payload)
 
 
+def _valid_batch_response(n_boxes: int = 1, **overrides) -> str:
+    """A batch answer (JSON array, one entry per box_index) for the describe_object(s) path."""
+    return json.dumps([json.loads(_valid_response(box_index=i, **overrides)) for i in range(n_boxes)])
+
+
 class RecordingVLMClient:
-    """Records every (image, prompt) call and answers with a scripted sequence of responses."""
+    """Records every (image, prompt) call and answers with a scripted sequence of responses.
+
+    The describe_object path sends a BATCH prompt (one entry per candidate box), so scripted
+    responses are expected as JSON arrays with box_index entries."""
 
     def __init__(self, responses: list[str]):
         self.responses = list(responses)
@@ -160,7 +169,7 @@ class TestCoordinateContract:
         image = np.full((900, 1600, 3), 245, dtype=np.uint8)
         image[300:600, 400:700] = (200, 30, 30)
         bbox = BBoxPx(x0=400, y0=300, x1=700, y1=600, score=0.9)
-        client = RecordingVLMClient([_valid_response()])
+        client = RecordingVLMClient([_valid_batch_response()])
         describe_object(image, bbox, _object_plan(), client, max_long_edge=1536)
 
         sent_image, prompt = client.calls[0]
@@ -170,7 +179,7 @@ class TestCoordinateContract:
         assert sent_image.size == prepared.image.size
         assert PROMPT_MARKER in prompt
         # The prompt states the image's real dimensions and the bbox in ITS pixel space.
-        assert f"{sent_image.width}x{sent_image.height}" in prompt
+        assert f"({sent_image.width}x{sent_image.height} px)" in prompt
         for coord in (prepared.bbox_px.x0, prepared.bbox_px.y0, prepared.bbox_px.x1,
                       prepared.bbox_px.y1):
             assert str(coord) in prompt
@@ -198,7 +207,7 @@ class TestFailClosed:
 
     def test_pass_description_is_accepted_and_maps_to_a_motion_spec(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        client = RecordingVLMClient([_valid_response()])
+        client = RecordingVLMClient([_valid_batch_response()])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.accepted is True
@@ -225,7 +234,7 @@ class TestFailClosed:
     )
     def test_every_non_pass_assessment_is_fail_closed(self, assessment, expected_reason):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        client = RecordingVLMClient([_valid_response(bbox_assessment=assessment)])
+        client = RecordingVLMClient([_valid_batch_response(1, bbox_assessment=assessment)])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.accepted is False
@@ -236,7 +245,13 @@ class TestFailClosed:
     def test_semantic_label_mismatch_is_fail_closed(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
         client = RecordingVLMClient(
-            [_valid_response(object_identity="flag_banner", matches_semantic_label=False)]
+            [
+                _valid_batch_response(
+                    1,
+                    object_identity="flag_banner",
+                    matches_semantic_label=False,
+                )
+            ]
         )
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
@@ -245,7 +260,7 @@ class TestFailClosed:
 
     def test_not_animatable_is_fail_closed(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        client = RecordingVLMClient([_valid_response(animatable=False, motion_kind=None)])
+        client = RecordingVLMClient([_valid_batch_response(1, animatable=False, motion_kind=None)])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.accepted is False
@@ -259,7 +274,8 @@ class TestFailClosed:
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
         client = RecordingVLMClient(
             [
-                _valid_response(
+                _valid_batch_response(
+                    1,
                     object_identity="speech_bubble",
                     matches_semantic_label=True,
                     animatable=True,
@@ -278,7 +294,8 @@ class TestFailClosed:
             image = np.full((200, 220, 3), 245, dtype=np.uint8)
             client = RecordingVLMClient(
                 [
-                    _valid_response(
+                    _valid_batch_response(
+                        1,
                         object_identity=identity,
                         matches_semantic_label=True,
                         animatable=True,
@@ -293,7 +310,7 @@ class TestFailClosed:
 
     def test_malformed_json_then_valid_gets_one_recovery_attempt(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        client = RecordingVLMClient(["not json at all", _valid_response()])
+        client = RecordingVLMClient(["not json at all", _valid_batch_response()])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.accepted is True
@@ -314,8 +331,8 @@ class TestFailClosed:
     def test_schema_invalid_response_is_fail_closed(self):
         # Valid JSON but schema-invalid: animatable=true without motion_kind.
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        bad = _valid_response(motion_kind=None)
-        client = RecordingVLMClient([bad, _valid_response()])
+        bad = _valid_batch_response(1, motion_kind=None)
+        client = RecordingVLMClient([bad, _valid_batch_response()])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.accepted is True  # recovery produced a valid response
@@ -323,7 +340,7 @@ class TestFailClosed:
 
     def test_result_carries_the_audit_trail(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
-        client = RecordingVLMClient(["first raw", _valid_response()])
+        client = RecordingVLMClient(["first raw", _valid_batch_response()])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
                                  max_long_edge=1536)
         assert result.raw_responses == tuple(client.replies)

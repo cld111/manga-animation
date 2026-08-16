@@ -132,6 +132,13 @@ class ObjectDescriptionResponse(BaseModel):
     - `reason` -- one-sentence justification.
     """
 
+    box_index: int = Field(
+        ge=0,
+        description=(
+            "The index of the candidate box this description refers to (the boxes are "
+            "listed in the prompt as 0, 1, 2, ...)."
+        ),
+    )
     bbox_assessment: BBoxAssessment
     object_identity: str | None = None
     matches_semantic_label: bool
@@ -189,3 +196,8 @@ MOTION_KIND_DESCRIPTIONS: dict[MotionKind, str] = {
 PIVOT_RELEVANT_KINDS: frozenset[TransformKind] = frozenset(
     {TransformKind.ROTATE, TransformKind.MESH_WARP}
 )
+
+# A batch answer: one description per candidate box, in any order, each carrying its
+# `box_index` (the index assigned in the prompt). Every input box must appear exactly once;
+# missing/duplicate indices make the affected candidates fail closed.
+ObjectDescriptionBatch = list[ObjectDescriptionResponse]

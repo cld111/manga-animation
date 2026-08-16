@@ -48,6 +48,12 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--resolution", type=int, default=1536)
     parser.add_argument("--env", default="kaggle")
+    parser.add_argument(
+        "--labels",
+        nargs="+",
+        default=None,
+        help="candidate semantic labels to ground (default: the pipeline default list)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.env, overrides={"resolution": args.resolution})
@@ -90,6 +96,7 @@ def main() -> None:
                 segmentation_client=segmentation_client,
                 reconstruction_client=reconstruction_client,
                 out_dir=out_dir / "videos",
+                labels=args.labels,
             )
             page_entry = {
                 "page": page,
