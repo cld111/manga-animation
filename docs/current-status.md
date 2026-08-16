@@ -77,7 +77,7 @@ The baseline in `configs/default.yaml` is:
 | Setting | Current value |
 |---|---|
 | Analysis mode default | `run_pipeline(..., analysis_mode="panel")` |
-| VLM | `qwen3-vl-8b-int8` (one int8 instance per GPU, worker pool); `qwen3-vl-4b` fp16 per-GPU validated as faster alternative (Phase 22 A/B) |
+| VLM | `qwen3-vl-4b` fp16, one instance per GPU (worker pool, ADR 0023) |
 | Grounding | `grounding-dino-swin-l` |
 | Segmentation | `sam2.1-hiera-base` |
 | Inpainting | `lama-large` |
@@ -206,8 +206,10 @@ conclusion. Candidates without implemented adapters remain research entries.
   single-call mode (B) at 1581.8s with 4/4 REJECTED (the model's single JSON covered only 10
   of 52 boxes -> unparseable -> fail-closed). Conclusion: per-panel VLM calls remain the
   production default; full-page single-call description is not viable at 52 candidates on a T4.
-  The `qwen3-vl-4b` candidate (fp16, fits one T4) follows the same per-GPU scheme as int8
-  (ADR 0023): one `Qwen3VLClient` per CUDA device, no `device_map="auto"` sharding.
+  The runtime default is now `qwen3-vl-4b` fp16 (one instance per CUDA device, worker pool,
+  ADR 0023): a 2xT4 panel-mode run on `wind_breaker_sprint` finished in 601.6s with 3/4 PASS
+  panels -- ~1.7x faster than the single-instance A-mode and faster than 8B fp16 (1222s) or
+  int8 (1818s).
 
 ## Known Limitations and Technical Debt
 

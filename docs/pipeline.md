@@ -115,10 +115,10 @@ The VLM's `device_map="auto"` client specifically requires `gc.collect()` before
 `torch.cuda.empty_cache()`; without it the ~16 GiB model survives `unload()` inside cyclic
 Python references until an opportunistic GC, racing the next load into a CUDA OOM (see
 docs/phase14-results.md). Phase 22 (ADR 0023) builds the runtime VLM as ONE instance per
-GPU instead of one sharded model: `qwen3-vl-8b-int8` and `qwen3-vl-4b` each load with
-`device_map={"": "cuda:N"}` per card and the description stage runs them as a worker pool
-(panels split between the cards). The 8B fp16 sharded client (`qwen3-vl-8b`) remains for
-comparison.
+GPU instead of one sharded model: the default `qwen3-vl-4b` (fp16) and the int8
+`qwen3-vl-8b-int8` each load with `device_map={"": "cuda:N"}` per card and the description
+stage runs them as a worker pool (panels split between the cards). The 8B fp16 sharded
+client (`qwen3-vl-8b`) remains for comparison.
 
 The production client factory accepts only candidates with an implemented adapter. Entries
 in `configs/benchmark_candidates.yaml` without an adapter remain research candidates and
