@@ -26,7 +26,7 @@ from manga_animation.core.config import PipelineConfig
 from manga_animation.grounding.client import Detection
 from manga_animation.pipeline.lifecycle import ModelStage
 from manga_animation.pipeline.orchestrator import DEFAULT_ANIMATION_LABELS
-from manga_animation.pipeline.panels import run_page_panels
+from manga_animation.pipeline.panels import run_page_panels, run_pages
 from manga_animation.segmentation.client import MaskCandidate
 
 pytestmark = pytest.mark.filterwarnings("ignore")
@@ -480,5 +480,86 @@ def test_run_page_panels_unexpected_stage_exception_isolates_to_that_panel(
     # Panel 1 raised on its first label's detect call and stopped (ERROR); panel 2's labels
     # were still grounded.
     assert grounding.detect_calls == 1 + len(DEFAULT_ANIMATION_LABELS)
+    assert grounding.load_calls == 1
+    assert grounding.unload_calls == 1
+
+
+@pytest.fixture
+def two_panel_page_path_2(tmp_path: Path) -> Path:
+    page = np.full((900, 300, 3), 255, dtype=np.uint8)
+    page[0:300, 0:300] = _noise_block(300, 300, seed=31)
+    page[500:900, 0:300] = _noise_block(400, 300, seed=32)
+    path = tmp_path / "two_panel_page_2.png"
+    Image.fromarray(page).save(path)
+    return path
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_batch_loads_each_model_once_for_all_pages(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """Phase 18.4 batch residency: `run_pages` processes MANY pages with one model
+    residency across ALL of them -- grounding, then object description, then segmentation,
+    then reconstruction each load exactly ONCE, never once per page."""
+    grounding = CountingGroundingClient()
+    segmentation = CountingSegmentationClient()
+    reconstruction = CountingReconstructionClient()
+    vlm = StageLevelVLMClient()
+
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=vlm,
+        grounding_client=grounding,
+        segmentation_client=segmentation,
+        reconstruction_client=reconstruction,
+        out_dir=tmp_path / "videos",
+    )
+
+    assert len(results) == 2
+    for result in results:
+        assert all(panel.status == "PASS" for panel in result.panels)
+        assert result.manifest_path.exists()
+    # One load/unload per model for the WHOLE batch (stage-level residency across pages),
+    # not per page.
+    assert grounding.load_calls == 1
+    assert grounding.unload_calls == 1
+    assert segmentation.load_calls == 1
+    assert segmentation.unload_calls == 1
+    assert reconstruction.load_calls == 1
+    assert reconstruction.unload_calls == 1
+    # The VLM's one stage stays one residency too.
+    assert vlm.unload_calls == 1
+    # Every panel of every page was grounded (4 panels, 2 pages x 2).
+    assert grounding.detect_calls == 4 * len(DEFAULT_ANIMATION_LABELS)
+
+
+@pytest.mark.skipif(not _requires_ffmpeg(), reason="no ffmpeg binary resolvable")
+def test_run_pages_batch_isolates_a_failed_page_from_the_other_page(
+    two_panel_page_path: Path,
+    two_panel_page_path_2: Path,
+    config: PipelineConfig,
+    tmp_path: Path,
+):
+    """A page that detects nothing at grounding must fail only its own panels (REJECTED);
+    the other page still renders, and each model still loaded exactly once."""
+    n_labels = len(DEFAULT_ANIMATION_LABELS)
+    grounding = CountingGroundingClient(fail_first_n=2 * n_labels)
+    results = run_pages(
+        [two_panel_page_path, two_panel_page_path_2],
+        config,
+        vlm_client=StageLevelVLMClient(),
+        grounding_client=grounding,
+        segmentation_client=CountingSegmentationClient(),
+        reconstruction_client=CountingReconstructionClient(),
+        out_dir=tmp_path / "videos",
+    )
+
+    assert [panel.status for panel in results[0].panels] == ["REJECTED", "REJECTED"]
+    assert [panel.status for panel in results[1].panels] == ["PASS", "PASS"]
+    assert results[0].panels[0].failure_stage == "object_description"
     assert grounding.load_calls == 1
     assert grounding.unload_calls == 1

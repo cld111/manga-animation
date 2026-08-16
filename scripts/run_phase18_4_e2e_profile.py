@@ -1,9 +1,10 @@
 """Phase 18.4 end-to-end GPU validation WITH PROFILING: DINO -> Qwen -> SAM pipeline.
 
-Runs the production page entry point (`run_page_panels`) on REAL manga pages with the Phase
+Runs the production batch entry point (`run_pages`) on REAL manga pages with the Phase
 18.4 ordering (object description BEFORE segmentation: SAM segments only accepted bboxes)
-and collects a GPU profile alongside: an nvidia-smi sampler thread records per-GPU
-utilization and memory every `--sampler-interval-s` seconds for the whole run.
+and phase 18.4 batch residency (each model loads ONCE and processes ALL pages before being
+released) and collects a GPU profile alongside: an nvidia-smi sampler thread records
+per-GPU utilization and memory every `--sampler-interval-s` seconds for the whole run.
 
 **Run on the Kaggle/Jupyter GPU worker, never locally** (CLAUDE.md, ADR 0003).
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import threading
 import time
@@ -36,7 +38,7 @@ from manga_animation.analysis import Qwen25VLClient, VLMClient
 from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
-from manga_animation.pipeline.panels import run_page_panels
+from manga_animation.pipeline.panels import run_pages
 from manga_animation.segmentation import Sam21Client
 
 
@@ -60,13 +62,18 @@ class CountingVLMClient:
 
 
 class GpuSampler:
-    """Background nvidia-smi sampler: appends one dict per tick into `samples`."""
+    """Background nvidia-smi + /proc/stat sampler: appends one dict per tick into `samples`.
+
+    Each sample carries per-GPU utilization/memory/power and host CPU utilization (computed
+    from `/proc/stat` deltas, the standard Linux kernel counters -- no psutil dependency).
+    """
 
     def __init__(self, interval_s: float = 3.0):
         self._interval_s = interval_s
         self.samples: list[dict] = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
+        self._prev_cpu: tuple[int, int] | None = None
 
     def start(self) -> None:
         self._started_at = time.perf_counter()
@@ -76,9 +83,64 @@ class GpuSampler:
         self._stop.set()
         self._thread.join(timeout=self._interval_s + 2.0)
 
+    @staticmethod
+    def _cpu_usage(prev: tuple[int, int] | None) -> tuple[float | None, tuple[int, int]]:
+        """Read /proc/stat aggregate (jiffies), return (busy_pct_since_prev, new_counts)."""
+        try:
+            with open("/proc/stat", encoding="utf-8") as fh:
+                parts = fh.readline().split()
+            if not parts or parts[0] != "cpu":
+                return None, (0, 0)
+            vals = [int(v) for v in parts[1:9]]
+            total = sum(vals)
+            idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+            if prev is None or total <= prev[0]:
+                return None, (total, idle)
+            dt_total = total - prev[0]
+            dt_idle = idle - prev[1]
+            pct = 100.0 * (1.0 - dt_idle / dt_total) if dt_total > 0 else 0.0
+            return round(pct, 1), (total, idle)
+        except (OSError, ValueError, IndexError):
+            return None, (0, 0)
+
+    @staticmethod
+    def _ram_usage() -> dict | None:
+        """Host RAM from /proc/meminfo (MemTotal/MemAvailable), in MiB."""
+        try:
+            fields: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="utf-8") as fh:
+                for line in fh:
+                    key, _, rest = line.partition(":")
+                    if key in ("MemTotal", "MemAvailable", "MemFree"):
+                        fields[key] = int(rest.strip().split()[0]) // 1024
+            if not fields:
+                return None
+            available = fields.get("MemAvailable", fields.get("MemFree", 0))
+            return {
+                "ram_used_mib": fields.get("MemTotal", 0) - available,
+                "ram_total_mib": fields.get("MemTotal", 0),
+            }
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _disk_usage() -> dict | None:
+        """Working-dir disk usage from `shutil.disk_usage`, in MiB."""
+        try:
+            total, used, free = shutil.disk_usage("/kaggle")
+            return {
+                "disk_used_mib": used // 1048576,
+                "disk_total_mib": total // 1048576,
+                "disk_free_mib": free // 1048576,
+            }
+        except OSError:
+            return None
+
     def _run(self) -> None:
         while not self._stop.is_set():
-            tick = {"t_s": round(time.perf_counter() - self._started_at, 2)}
+            tick: dict[str, object] = {
+                "t_s": round(time.perf_counter() - self._started_at, 2)
+            }
             try:
                 out = subprocess.run(
                     [
@@ -104,9 +166,58 @@ class GpuSampler:
                         )
                 tick["gpus"] = gpus
             except Exception as exc:  # noqa: BLE001 -- a missed sample must not kill the run
-                tick["error"] = f"{type(exc).__name__}: {exc}"
+                tick["gpu_error"] = f"{type(exc).__name__}: {exc}"
+            cpu_pct, self._prev_cpu = self._cpu_usage(self._prev_cpu)
+            if cpu_pct is not None:
+                tick["cpu_util_pct"] = cpu_pct
+            ram = self._ram_usage()
+            if ram is not None:
+                tick.update(ram)
+            disk = self._disk_usage()
+            if disk is not None:
+                tick.update(disk)
             self.samples.append(tick)
             self._stop.wait(self._interval_s)
+
+
+class StageMarker:
+    """Records the wall-clock boundaries of each model stage (via client load/unload) and
+    VLM calls, so the profile trace can be annotated with per-stage GPU/CPU load."""
+
+    def __init__(self, sampler_started_at: float):
+        self._t0 = sampler_started_at
+        self.stage_events: list[dict] = []
+        self.vlm_calls: list[dict] = []
+
+    def _now(self) -> float:
+        return round(time.perf_counter() - self._t0, 2)
+
+    def wrap(self, client, *, name: str, is_vlm: bool = False):
+        class Wrapper:
+            def __init__(self, inner, marker, stage_name: str, vlm: bool):
+                self._inner = inner
+                self._marker = marker
+                self._stage_name = stage_name
+                self._vlm = vlm
+
+            def load(self) -> None:
+                if hasattr(self._inner, "load"):
+                    self._inner.load()
+                self._marker.stage_events.append(
+                    {"t_s": self._marker._now(), "stage": self._stage_name, "event": "load"}
+                )
+
+            def unload(self) -> None:
+                self._marker.stage_events.append(
+                    {"t_s": self._marker._now(), "stage": self._stage_name, "event": "unload"}
+                )
+                if hasattr(self._inner, "unload"):
+                    self._inner.unload()
+
+            def __getattr__(self, attr):
+                return getattr(self._inner, attr)
+
+        return Wrapper(client, self, name, is_vlm)
 
 
 def main() -> None:
@@ -139,15 +250,6 @@ def main() -> None:
         "the object-description stage must be enabled"
     )
 
-    vlm_client = CountingVLMClient(Qwen25VLClient(source=args.qwen, dtype="float16"))
-    setup_logging("INFO")
-    device = config.resolve_device()
-    grounding_client = GroundingDinoClient(source=args.dino, device=device, dtype="float32")
-    segmentation_client = Sam21Client(source=args.sam, device=device, dtype="float32")
-    from manga_animation.reconstruction import LamaClient
-
-    reconstruction_client = LamaClient(device=device, model_id="lama-large")
-
     out_dir = Path(args.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,7 +257,30 @@ def main() -> None:
     sampler.start()
     started = time.perf_counter()
 
-    stage_timings: list[dict] = []
+    marker = StageMarker(started)
+
+    def _wrap(client, name: str, *, is_vlm: bool = False):
+        if is_vlm:
+            client = CountingVLMClient(client)
+        return marker.wrap(client, name=name, is_vlm=is_vlm)
+
+    vlm_client = _wrap(
+        Qwen25VLClient(source=args.qwen, dtype="float16"), "object_description", is_vlm=True
+    )
+    setup_logging("INFO")
+    device = config.resolve_device()
+    grounding_client = _wrap(
+        GroundingDinoClient(source=args.dino, device=device, dtype="float32"), "grounding"
+    )
+    segmentation_client = _wrap(
+        Sam21Client(source=args.sam, device=device, dtype="float32"), "segmentation"
+    )
+    from manga_animation.reconstruction import LamaClient
+
+    reconstruction_client = _wrap(
+        LamaClient(device=device, model_id="lama-large"), "reconstruction"
+    )
+
     report: dict = {
         "phase": "18.4-e2e-profile",
         "ordering": "grounding(DINO) -> object_description(Qwen) -> "
@@ -164,21 +289,20 @@ def main() -> None:
         "pages": [],
     }
     try:
-        for page in args.pages:
-            page_started = time.perf_counter()
-            page_result = run_page_panels(
-                Path(page),
-                config,
-                vlm_client=vlm_client,
-                grounding_client=grounding_client,
-                segmentation_client=segmentation_client,
-                reconstruction_client=reconstruction_client,
-                out_dir=out_dir / "videos",
-                labels=args.labels,
-            )
+        page_results = run_pages(
+            [Path(page) for page in args.pages],
+            config,
+            vlm_client=vlm_client,
+            grounding_client=grounding_client,
+            segmentation_client=segmentation_client,
+            reconstruction_client=reconstruction_client,
+            out_dir=out_dir / "videos",
+            labels=args.labels,
+        )
+        for page_result in page_results:
             page_entry = {
-                "page": page,
-                "page_runtime_s": round(time.perf_counter() - page_started, 2),
+                "page": page_result.source_image.name,
+                "pages": len(page_results),
                 "panels": [
                     {
                         "panel_id": p.panel_id,
@@ -193,7 +317,11 @@ def main() -> None:
             }
             report["pages"].append(page_entry)
             print(json.dumps(page_entry, indent=1))
-            print(f"[profiler] page done in {page_entry['page_runtime_s']}s", flush=True)
+            print(
+                f"[profiler] page {page_result.source_image.name} "
+                f"runtime={page_result.panels[0].metrics.get('runtime_s', 0)}s",
+                flush=True,
+            )
     finally:
         sampler.stop()
         for client in (vlm_client, grounding_client, segmentation_client, reconstruction_client):
@@ -207,7 +335,7 @@ def main() -> None:
     report["elapsed_s"] = round(time.perf_counter() - started, 1)
     report["vlm_calls"] = vlm_client.call_count
     report["boxes_per_vlm_call"] = vlm_client.boxes_per_call
-    report["stage_timings"] = stage_timings
+    report["stage_events"] = marker.stage_events
     report["gpu_sampler_interval_s"] = args.sampler_interval_s
     report["gpu_samples"] = sampler.samples
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")

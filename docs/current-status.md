@@ -27,6 +27,10 @@ page -> deterministic panel detection -> bounded scene crops
 
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
   its own scene crop, independent stages, output video or explicit status, and a page manifest.
+  It is the single-page wrapper over the Phase 18.4 batch entry point `run_pages`, which
+  processes MANY pages with one model residency per stage ACROSS pages: each model loads ONCE,
+  processes every eligible panel of every page (saving results per page), then releases --
+  never a per-page load/unload cycle.
 - `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
   is bounded by page edges and nearby panel geometry.
 - Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result

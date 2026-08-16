@@ -57,6 +57,12 @@ panel. The scene crop, not the strict logical `panel_bbox`, is the source image 
 segmentation, CV transforms, reconstruction, compositing and video rendering. Page-space
 coordinates are recovered for cross-panel safety checks by adding the scene crop origin.
 
+`run_pages` is the batch entry point (Phase 18.4): it processes MANY pages with stage-level
+model residency ACROSS pages. Each model loads ONCE, processes every eligible panel of EVERY
+page (saving its outputs into that page's state), and only then is released and the next
+model loads -- never a per-page load/unload cycle. `run_page_panels` is the single-page
+convenience wrapper over the same code path.
+
 Each panel is recorded as `PASS`, `STATIC`, `REJECTED` or `ERROR`. A page manifest is written
 after every panel so successful outputs can be reused and a later panel failure cannot erase
 earlier results. A materially ambiguous grounded bbox crossing another logical panel is safely
@@ -85,12 +91,11 @@ Model residency is stage-level and explicitly owned (Phase 14, ADR 0020). Each m
 stage runs inside a `ModelStage` context manager (`src/manga_animation/pipeline/lifecycle.py`)
 that loads the client on entry and deterministically releases it on exit -- on success AND on
 exception -- by dropping references, collecting cyclic garbage, and flushing the CUDA caching
-allocator. `run_page_panels` processes panels stage-by-stage: grounding (DINO) for all
-eligible panels, then object description (VLM, the pipeline's single Qwen call), then
-segmentation (SAM, only for accepted bboxes), then
-animation/reconstruction/compositing/rendering (LaMa loaded once).
-One model family is resident at a time, never per-panel. A benchmark adapter is also unloaded
-after success or failure.
+allocator. `run_pages` (and the single-page wrapper `run_page_panels`) processes panels
+stage-by-stage: grounding (DINO) for all eligible panels of ALL pages, then object
+description (VLM, the pipeline's single Qwen call), then segmentation (SAM, only for
+accepted bboxes), then animation/reconstruction/compositing/rendering (LaMa loaded once).
+One model family is resident at a time, never per-panel and never per-page.
 
 The VLM's `device_map="auto"` client specifically requires `gc.collect()` before
 `torch.cuda.empty_cache()`; without it the ~16 GiB model survives `unload()` inside cyclic

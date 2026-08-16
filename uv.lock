@@ -657,6 +657,14 @@ video = [
     { name = "ffmpeg-python" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'ml'", specifier = ">=0.30" },
@@ -677,6 +685,14 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'ml'", specifier = ">=5.0" },
 ]
 provides-extras = ["cv", "video", "ml", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.10" },
+    { name = "pytest", specifier = ">=8.2" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "ruff", specifier = ">=0.5" },
+]
 
 [[package]]
 name = "markdown-it-py"
