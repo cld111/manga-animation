@@ -341,4 +341,6 @@ changes move between local and remote only through git.
 - `phase*-results.md`: immutable historical evidence records; they do not override this file.
   Phase 17 (object-segmentation diagnostic benchmark) lives in
   [`phase17-results.md`](phase17-results.md); Phase 18.1 (DINO candidate recall) in
-  [`phase18.1-results.md`](phase18.1-results.md).
+  [`phase18.1-results.md`](phase18.1-results.md). Phase 18.3 (per-candidate VLM object
+  description) evidence in [`phase18.3-results.md`](phase18.3-results.md) and the full work
+  report in [`phase18.3-report.md`](phase18.3-report.md).
