@@ -285,6 +285,13 @@ def main() -> None:
         }
     )
     setup_logging("INFO")
+    # Pre-load transformers modules in the main thread BEFORE the panel pipeline spawns
+    # worker threads: transformers 5.0.0 lazy-imports its submodules, and two workers
+    # importing concurrently (Qwen describe + SAM load) can race and surface a spurious
+    # "cannot import name 'Sam2Model' from 'transformers'" (observed on a real T4 run).
+    import transformers  # noqa: F401
+    from transformers import Sam2Model, Sam2Processor  # noqa: F401
+
     labels = list(args.labels or DEFAULT_ANIMATION_LABELS)
     out_dir = Path(args.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
