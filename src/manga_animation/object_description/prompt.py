@@ -126,10 +126,10 @@ Grounding models often propose a box that is technically a detection but a bad a
 candidate; your job is to catch that.
 
 STEP 1 - assess the candidate region itself. Answer exactly one of:
-- "pass": the box contains exactly ONE coherent instance of the intended object, well \
+- "pass": the box contains EXACTLY ONE coherent instance of the intended object, well \
 represented as a single object candidate (a character alone, a single flag, one weapon).
-- "ambiguous": the box contains SEVERAL objects, or several visually similar instances, or \
-the intended target is unclear (e.g. a character standing next to a weapon, a crowd).
+- "ambiguous": the box contains SEVERAL objects or SEVERAL instances -- even two identical \
+characters, even a character plus a nearby prop. One box = one object, never a group.
 - "partial": the box captures only PART of the object (a limb, a fragment, a cut-off figure).
 - "reject": the box is mostly background, or does not contain a coherent object at all.
 - "not_animatable": the box does contain an identifiable object, but animating it is not \
@@ -151,22 +151,31 @@ Answer with ONLY ONE JSON object, no prose, no markdown fences, in exactly this 
 "sway"|"flow"|"drift"|"rotate"|"pulse"|"breathe"|"flicker", "direction": null or one of \
 "up"|"down"|"left"|"right"|"up_left"|"up_right"|"down_left"|"down_right", "amplitude_band": \
 "subtle"|"moderate"|"pronounced", "speed_band": "slow"|"normal"|"fast", "pivot_hint": \
-"top"|"center"|"bottom", "constraints": ["must-not-violate rules"], "neighbor_conflicts": \
-["problems with neighbors/background/occlusion"], "confidence": a float 0-1, "reason": "one \
-short sentence grounded in what you actually see"}}
+"top"|"center"|"bottom", "constraints": ["real must-not-violate rules, or empty list"], \
+"neighbor_conflicts": ["real problems with neighbors/background/occlusion, or empty list"], \
+"confidence": a float 0-1, "reason": "one short sentence grounded in what you actually see"}}
 
-Rules: "bbox_assessment" must be EXACTLY one of the five values "pass", "ambiguous", \
-"partial", "reject", "not_animatable" -- never anything else. "motion_kind" is required iff \
-"animatable" is true; "direction" is required iff "motion_kind" is "drift" (the direction of \
-the steady movement); otherwise both are null. "amplitude_band", "speed_band" and \
-"pivot_hint" always carry one of their listed values -- never null, even when "animatable" \
-is false. "object_identity", "movable_parts", "static_parts", "constraints", \
-"neighbor_conflicts" are never null: use empty lists where nothing applies, and always name \
-the object you actually see inside the box. "confidence" must reflect genuine uncertainty -- \
-be conservative with low confidence and write the doubts into "neighbor_conflicts" or \
-"reason". Text, speech bubbles, lettering, rigid background and panel borders must never be \
-animated: if the box is such content, assess "not_animatable". If the box contains several \
-objects or the target is ambiguous, "bbox_assessment" must be "ambiguous", never "pass". """
+Rules (violating any of these is a wrong answer):
+1. "bbox_assessment" must be EXACTLY one of the five values "pass", "ambiguous", "partial", \
+"reject", "not_animatable" -- never anything else.
+2. "pass" requires EXACTLY ONE instance of the intended object in the box. A box with two or \
+more characters, or a character plus a weapon/prop, or several visually similar instances, is \
+"ambiguous" -- never "pass". When genuinely uncertain between "pass" and a stricter verdict, \
+choose the stricter one: this pipeline prefers a clean rejection over animating the wrong \
+region.
+3. Lettering is NEVER animatable, no matter what the semantic_label says (even if the label \
+literally names it, e.g. "text_banner"): speech bubbles, dialogue, sound effects, captions, \
+banners of text -- any box whose content is text-like must be assessed "not_animatable" (or \
+"reject" if the box is mostly background).
+4. "motion_kind" is required iff "animatable" is true; "direction" is required iff \
+"motion_kind" is "drift"; otherwise both are null. "amplitude_band", "speed_band" and \
+"pivot_hint" always carry one of their listed values -- never null. "object_identity", \
+"movable_parts", "static_parts", "constraints", "neighbor_conflicts" are never null and never \
+placeholder text: name what you actually see, use empty lists where nothing applies, and make \
+"constraints" list the specific rules that follow from THIS box (e.g. which part must stay \
+still, what must not be crossed).
+5. "confidence" must reflect genuine uncertainty -- write the doubts into \
+"neighbor_conflicts" or "reason". """
 
 # Unique marker the test fake clients use to dispatch this stage's prompt (same convention as
 # `_VALIDATION_PROMPT_MARKER`/`_MASK_SEMANTICS_PROMPT_MARKER` in tests/test_pipeline.py).
