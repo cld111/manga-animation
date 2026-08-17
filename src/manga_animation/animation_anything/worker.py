@@ -58,6 +58,14 @@ def _build_pipeline(pretrained_model_path: str, unet, text_encoder, vae):
     return pipeline
 
 
+def _set_scheduler_timesteps(pipeline, num_inference_steps: int, device) -> None:
+    """Initialize the scheduler's `timesteps`/`sigmas` before any add_noise call (mirrors
+    upstream `batch_eval`: `diffusion_scheduler.set_timesteps(num_inference_steps,
+    device=device)` runs BEFORE `eval`, and `DDPM_forward_timesteps` reads
+    `scheduler.timesteps` / `add_noise` needs `sigmas`)."""
+    pipeline.scheduler.set_timesteps(num_inference_steps, device=device)
+
+
 def _generate(
     pipeline,
     *,
@@ -211,6 +219,7 @@ def main() -> None:
 
     pipeline = _build_pipeline(spec["checkpoint_path"], unet, text_encoder, vae)
     pipeline = pipeline.to(device, dtype=torch.float16)
+    _set_scheduler_timesteps(pipeline, spec["num_inference_steps"], device)
 
     frames = _generate(
         pipeline,
