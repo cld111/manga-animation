@@ -41,6 +41,7 @@ class AnimateAnythingSpec(BaseModel):
     prompt: str = Field(min_length=1)
     output_dir: str = Field(min_length=1)
     checkpoint_path: str = Field(min_length=1)
+    device: str = Field(default="cuda", description="CUDA device the worker loads onto")
     num_frames: int = Field(gt=0, default=DEFAULT_NUM_FRAMES)
     fps: int = Field(gt=0, default=DEFAULT_FPS)
     num_inference_steps: int = Field(gt=0, default=DEFAULT_NUM_INFERENCE_STEPS)

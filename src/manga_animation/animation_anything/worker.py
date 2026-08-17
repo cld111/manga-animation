@@ -202,14 +202,15 @@ def main() -> None:
     import torch
 
     torch.set_grad_enabled(False)
+    device = torch.device(spec.get("device", "cuda"))
 
     tokenizer, text_encoder, vae, unet = _load_primary_models(spec["checkpoint_path"])
     for model in (text_encoder, unet, vae):
-        model.to(torch.device("cuda")).eval().to(torch.float16)
+        model.to(device).eval().to(torch.float16)
     vae.enable_slicing()
 
     pipeline = _build_pipeline(spec["checkpoint_path"], unet, text_encoder, vae)
-    pipeline = pipeline.to(torch.device("cuda"), dtype=torch.float16)
+    pipeline = pipeline.to(device, dtype=torch.float16)
 
     frames = _generate(
         pipeline,

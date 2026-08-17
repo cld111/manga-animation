@@ -113,6 +113,7 @@ class AnimateAnythingClient:
             prompt=prompt,
             output_dir=str(frames_dir),
             checkpoint_path=self.source,
+            device=self.device,
             num_frames=self.num_frames,
             fps=self.fps,
             num_inference_steps=self.num_inference_steps,
