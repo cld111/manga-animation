@@ -97,7 +97,7 @@ class AnimateAnythingClient:
         `out_dir`, runs the worker, reads the frame PNGs back. Raises
         `subprocess.CalledProcessError`/`FileNotFoundError` on worker failure (fail closed).
         """
-        out_dir = Path(out_dir)
+        out_dir = Path(out_dir).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         image_path = out_dir / "input_image.png"
         mask_path = out_dir / "motion_mask.png"

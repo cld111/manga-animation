@@ -87,7 +87,7 @@ def _generate(
     device = vae.device
     dtype = vae.dtype
 
-    pimg = Image.open(image_path).convert("RGB")
+    pimg = Image.open(str(Path(image_path).resolve())).convert("RGB")
     width, height = pimg.size
     # Aspect-preserving scale to roughly the validation area (512x512), rounded to /8 -- the
     # upstream eval computes exactly this.
@@ -102,7 +102,7 @@ def _generate(
     input_image = input_image.unsqueeze(0).to(dtype).to(device)
     input_image_latents = tensor_to_vae_latent(input_image, vae)
 
-    np_mask = np.array(Image.open(mask_path).resize((out_width, out_height)))
+    np_mask = np.array(Image.open(str(Path(mask_path).resolve())).resize((out_width, out_height)))
     np_mask[np_mask != 0] = 255
     if np_mask.sum() == 0:
         np_mask[:] = 255  # upstream app.py: an all-black mask defaults to full motion
@@ -150,7 +150,7 @@ def _generate(
 def _write_frames(frames: list, output_dir: str) -> None:
     from PIL import Image
 
-    out = Path(output_dir)
+    out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     for index, frame in enumerate(frames):
         Image.fromarray(frame).save(out / f"frame_{index:04d}.png")
