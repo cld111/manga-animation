@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 # CogVideoX-5B-I2V native output: 49 frames @ 8 fps = 6.12s at 720x480.
-DEFAULT_NUM_FRAMES = 49
+DEFAULT_NUM_FRAMES = 16
 DEFAULT_FPS = 8
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 6.0

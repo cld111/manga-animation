@@ -89,11 +89,13 @@ def _generate(
         torch_dtype=dtype,
     )
 
-    # Memory optimizations — do NOT call pipe.to(device) first, it OOMs on T4.
-    # enable_sequential_cpu_offload moves each module to GPU only when needed.
-    pipe.enable_sequential_cpu_offload()
+    # Memory optimizations — use model-level CPU offload (not sequential, which OOMs).
+    pipe.enable_model_cpu_offload()
     pipe.vae.enable_tiling()
     pipe.vae.enable_slicing()
+    # Also enable text encoder CPU offload to save GPU memory
+    if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+        pipe.text_encoder.enable_cpu_offload()
 
     # Set up generator for reproducibility (CPU — model uses CPU offload)
     generator = torch.Generator(device="cpu").manual_seed(seed)
