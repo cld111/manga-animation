@@ -12,21 +12,18 @@ model_variants:
   grounding: grounding-dino-swin-l
   segmentation: sam2.1-hiera-base
   inpainting: lama-large
-  animation: cogvideox-5b-i2v
+  animation: animegen-i2v
 
 resolution: 1536 # max VLM analysis long-edge resolution, px
 fps: 24
 duration_s: 4.0 # ~3-5s seamless loop, per the project goal
 
-# CogVideoX-5B-I2V generative animation engine (ADR 0024): the model's native output is a
-# 49-frame @ 8 fps clip (~6s) at 720x480, which the pipeline renders as-is.
-# `animation_*` are the hyper-parameters passed to the isolated worker;
-# `model_variants.animation` selects the engine (passing `CogVideoXClient`s to run_pages
-# activates it).
-animation_fps: 8
-animation_num_frames: 16
-animation_num_inference_steps: 50
-animation_guidance_scale: 6.0
+# AnimeGen-I2V generative animation engine (ADR 0024): the model's native output is a
+# 81-frame @ 16 fps clip (~5s) at 480x832, which the pipeline renders as-is.
+animation_fps: 16
+animation_num_frames: 81
+animation_num_inference_steps: 4
+animation_guidance_scale: 1.0
 
 output_codec: h264
 seed: 42

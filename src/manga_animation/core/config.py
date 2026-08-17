@@ -43,12 +43,12 @@ class PipelineConfig(BaseModel):
     fps: int = Field(gt=0, le=60, default=24)
     duration_s: float = Field(gt=0.0, le=30.0, default=4.0)
 
-    # CogVideoX-5B-I2V generative animation engine (ADR 0024). These are the hyper-parameters
-    # handed to the isolated worker for the model's native output (16 frames @ 8 fps = 2s).
-    animation_fps: int = Field(gt=0, le=60, default=8)
-    animation_num_frames: int = Field(gt=0, default=16)
-    animation_num_inference_steps: int = Field(gt=0, default=50)
-    animation_guidance_scale: float = Field(gt=0.0, default=6.0)
+    # AnimeGen-I2V generative animation engine (ADR 0024). These are the hyper-parameters
+    # handed to the isolated worker for the model's native output (81 frames @ 16 fps = 5s).
+    animation_fps: int = Field(gt=0, le=60, default=16)
+    animation_num_frames: int = Field(gt=0, default=81)
+    animation_num_inference_steps: int = Field(gt=0, default=4)
+    animation_guidance_scale: float = Field(gt=0.0, default=1.0)
 
     output_codec: Codec = "h264"
     seed: int = 42

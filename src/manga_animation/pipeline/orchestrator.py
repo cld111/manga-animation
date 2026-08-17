@@ -275,7 +275,7 @@ _RUNTIME_CANDIDATES: dict[str, set[str]] = {
     "grounding": {"grounding-dino-swin-l"},
     "segmentation": {"sam2.1-hiera-base"},
     "inpainting": {"lama-large"},
-    "animation": {"cogvideox-5b-i2v"},
+    "animation": {"animegen-i2v"},
 }
 
 

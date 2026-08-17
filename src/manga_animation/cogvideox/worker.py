@@ -1,15 +1,13 @@
-"""Isolated CogVideoX-5B-I2V inference entrypoint (runs OUTSIDE the main pipeline process).
+"""Isolated AnimeGen-I2V inference entrypoint (runs OUTSIDE the main pipeline process).
 
-This script is launched by `CogVideoXClient` with the worker's DEDICATED interpreter (the
-environment with diffusers main branch, torch>=2.4.0, etc.). It reads one `CogVideoXSpec` JSON,
-loads the CogVideoX-5B-I2V checkpoint, generates `num_frames` frames from (image, prompt),
-and writes `frame_%04d.png` files.
+This script is launched by `CogVideoXClient` (renamed from AnimateAnythingClient) with the
+worker's DEDICATED interpreter. It reads one `CogVideoXSpec` JSON, loads the AnimeGen-I2V
+checkpoint, generates `num_frames` frames from (image, prompt), and writes `frame_%04d.png`
+files.
 
-It deliberately does NOT import `manga_animation` (the isolated env may not install the
-project's `ml` extra): the inference code uses only diffusers and standard libraries.
-
-On 2x T4 GPUs, the model can be sharded with FSDP + DeepSpeed Ulysses via
-`--nproc_per_node=2 --dit_fsdp --t5_fsdp --ulysses_size 2`.
+AnimeGen-I2V is a Wan 2.2 I2V A14B fine-tuned for anime-style video generation.
+It uses two transformers (high_noise + low_noise) with FP8 layerwise casting and CPU offload
+to fit on consumer GPUs.
 """
 
 from __future__ import annotations
@@ -26,9 +24,8 @@ def _selfcheck(checkpoint_path: str) -> None:
 
     if not Path(checkpoint_path).exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
-    # Verify key subfolders exist
     ckpt_dir = Path(checkpoint_path)
-    required = ["transformer", "vae", "tokenizer", "text_encoder"]
+    required = ["transformer", "transformer_2", "model_index.json"]
     missing = [d for d in required if not (ckpt_dir / d).exists()]
     if missing:
         raise FileNotFoundError(
@@ -59,14 +56,21 @@ def _generate(
     guidance_scale: float,
     seed: int,
     negative_prompt: str,
+    height: int,
+    width: int,
 ) -> list:
-    """Generate video frames using CogVideoX-5B-I2V CogVideoXImageToVideoPipeline (I2V mode).
+    """Generate video frames using AnimeGen-I2V (Wan 2.2 I2V A14B anime-tuned).
 
     Returns the list of RGB uint8 numpy arrays.
     """
     import numpy as np
     import torch
-    from diffusers import CogVideoXImageToVideoPipeline
+    from diffusers import (
+        AutoencoderKLWan,
+        FlowMatchEulerDiscreteScheduler,
+        WanImageToVideoPipeline,
+        WanTransformer3DModel,
+    )
     from diffusers.utils import load_image
     from PIL import Image
 
@@ -76,35 +80,123 @@ def _generate(
     input_image = load_image(image_path)
     orig_w, orig_h = input_image.size
 
-    # Resize to target dimensions (must be divisible by 16)
-    target_h = (orig_h // 16) * 16
-    target_w = (orig_w // 16) * 16
+    # Resize to target dimensions (must be divisible by VAE spatial compression * patch_size)
+    # For Wan2.2: vae_scale_factor_spatial=8, patch_size=2 → mod=16
+    mod_value = 16
+    target_h = max(mod_value, (height // mod_value) * mod_value)
+    target_w = max(mod_value, (width // mod_value) * mod_value)
     input_image_resized = input_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # Load pipeline from checkpoint
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    pipe = CogVideoXImageToVideoPipeline.from_pretrained(
+    # Load scheduler
+    scheduler = FlowMatchEulerDiscreteScheduler(shift=3.0)
+
+    # Load transformers (high_noise + low_noise for MoE)
+    print("loading high_noise transformer...", flush=True)
+    transformer_high = WanTransformer3DModel.from_pretrained(
         checkpoint_path,
+        subfolder="transformer",
         torch_dtype=dtype,
     )
 
-    # Memory optimizations — use model-level CPU offload (not sequential, which OOMs).
-    pipe.enable_model_cpu_offload()
-    pipe.vae.enable_tiling()
-    pipe.vae.enable_slicing()
+    print("loading low_noise transformer...", flush=True)
+    transformer_low = WanTransformer3DModel.from_pretrained(
+        checkpoint_path,
+        subfolder="transformer_2",
+        torch_dtype=dtype,
+    )
 
-    # Set up generator for reproducibility (CPU — model uses CPU offload)
+    # Load VAE from base Wan2.2 model
+    # The AnimeGen-I2V model card says to use Wan-AI/Wan2.2-I2V-A14B-Diffusers for VAE
+    # But we might have it locally or need to download it
+    import os
+    local_vae_path = os.path.join(os.path.dirname(checkpoint_path), "Wan2.2-I2V-A14B-Diffusers")
+    if os.path.exists(local_vae_path):
+        vae_source = local_vae_path
+    else:
+        vae_source = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+    print(f"loading VAE from {vae_source}...", flush=True)
+    vae = AutoencoderKLWan.from_pretrained(
+        vae_source,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+    )
+
+    # Build pipeline
+    print("building pipeline...", flush=True)
+    pipe = WanImageToVideoPipeline.from_pretrained(
+        vae_source,
+        transformer=transformer_high,
+        transformer_2=transformer_low,
+        scheduler=scheduler,
+        vae=vae,
+        torch_dtype=dtype,
+    )
+
+    # Load Lightning LoRA (4-step inference)
+    lora_high = os.path.join(checkpoint_path, "high_noise.safetensors")
+    lora_low = os.path.join(checkpoint_path, "low_noise.safetensors")
+    if os.path.exists(lora_high) and os.path.exists(lora_low):
+        print("loading Lightning LoRA...", flush=True)
+        pipe.load_lora_weights(
+            checkpoint_path,
+            weight_name="high_noise.safetensors",
+            adapter_name="high",
+        )
+        pipe.load_lora_weights(
+            checkpoint_path,
+            weight_name="low_noise.safetensors",
+            adapter_name="low",
+            load_into_transformer_2=True,
+        )
+        pipe.set_adapters(["high", "low"], adapter_weights=[1.0, 1.0])
+        use_lora = True
+    else:
+        print("no LoRA found, using standard inference", flush=True)
+        use_lora = False
+
+    # Memory optimizations
+    try:
+        transformer_high.enable_layerwise_casting(
+            storage_dtype=torch.float8_e4m3fn, compute_dtype=dtype
+        )
+        transformer_low.enable_layerwise_casting(
+            storage_dtype=torch.float8_e4m3fn, compute_dtype=dtype
+        )
+        print("FP8 layerwise casting enabled", flush=True)
+    except Exception as e:
+        print(f"FP8 casting failed: {e}", flush=True)
+
+    pipe.enable_model_cpu_offload()
+
+    # Set up generator for reproducibility
     generator = torch.Generator(device="cpu").manual_seed(seed)
 
-    # Run inference in I2V mode
+    # Build prompt (prepend anime style)
+    full_prompt = "Japanese anime style, " + prompt
+    neg = negative_prompt or "3d, cg, photo, stop, wait"
+
+    # Determine inference steps (4 for Lightning LoRA, 30 otherwise)
+    steps = 4 if use_lora else min(num_inference_steps, 30)
+
+    print(
+        f"generating {num_frames} frames at {target_w}x{target_h}, {steps} steps...",
+        flush=True,
+    )
+
+    # Run inference
     with torch.no_grad():
         output = pipe(
-            prompt=prompt,
             image=input_image_resized,
+            prompt=full_prompt,
+            negative_prompt=neg,
+            height=target_h,
+            width=target_w,
             num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
+            num_inference_steps=steps,
             generator=generator,
         )
 
@@ -114,14 +206,14 @@ def _generate(
     for frame in video_frames:
         if isinstance(frame, Image.Image):
             frame = np.asarray(frame.convert("RGB"))
-        elif frame.dtype != np.uint8:
+        elif hasattr(frame, "dtype") and frame.dtype != np.uint8:
             frame = (frame * 255).round().astype(np.uint8)
         if frame.ndim == 3 and frame.shape[2] == 3:
             frames.append(frame)
         elif frame.ndim == 2:
             frames.append(np.repeat(frame[:, :, None], 3, axis=2))
         else:
-            raise ValueError(f"unexpected frame shape {frame.shape}")
+            raise ValueError(f"unexpected frame shape {str(frame.shape)}")
 
     # Clean up GPU memory
     del pipe
@@ -163,7 +255,9 @@ def main() -> None:
         num_inference_steps=spec["num_inference_steps"],
         guidance_scale=spec["guidance_scale"],
         seed=spec["seed"],
-        negative_prompt=spec.get("negative_prompt", "static, blurry, low quality"),
+        negative_prompt=spec.get("negative_prompt", "3d, cg, photo, stop, wait"),
+        height=spec.get("height", 480),
+        width=spec.get("width", 832),
     )
     _write_frames(frames, spec["output_dir"])
     print(

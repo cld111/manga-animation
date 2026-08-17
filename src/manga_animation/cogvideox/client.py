@@ -39,7 +39,7 @@ class CogVideoXClient:
     held here). Construction is cheap and safe without the `ml` extra installed.
     """
 
-    model_id = "cogvideox-5b-i2v"
+    model_id = "animegen-i2v"
 
     def __init__(
         self,
@@ -48,10 +48,10 @@ class CogVideoXClient:
         worker_script: str | Path,
         device: str = "cuda",
         *,
-        num_frames: int = 49,
+        num_frames: int = 81,
         fps: int = DEFAULT_FPS,
-        num_inference_steps: int = 50,
-        guidance_scale: float = 6.0,
+        num_inference_steps: int = 4,
+        guidance_scale: float = 1.0,
         seed: int = 42,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
     ) -> None:

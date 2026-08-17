@@ -84,23 +84,23 @@ def test_spec_round_trips_through_json(tmp_path: Path):
         prompt="the speed lines flowing",
         output_dir="/tmp/out",
         checkpoint_path="/tmp/ckpt",
-        num_frames=49,
-        fps=8,
+        num_frames=81,
+        fps=16,
         seed=7,
     )
     path = tmp_path / "spec.json"
     spec.to_json_file(path)
     loaded = CogVideoXSpec.from_json_file(path)
     assert loaded == spec
-    assert loaded.fps == 8
-    assert loaded.num_frames == 49
+    assert loaded.fps == 16
+    assert loaded.num_frames == 81
 
 
 def test_spec_defaults_match_the_models_native_output():
     spec = CogVideoXSpec(
         image_path="i", prompt="p", output_dir="o", checkpoint_path="c"
     )
-    assert (spec.num_frames, spec.fps) == (49, 8)  # 6s native clip @ 720x480
+    assert (spec.num_frames, spec.fps) == (81, 16)  # 5s native clip @ 480x832
 
 
 def test_spec_as_manifest_is_json_safe_and_basename_only():
