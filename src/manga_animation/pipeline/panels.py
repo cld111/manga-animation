@@ -42,6 +42,11 @@ from PIL import Image
 
 from manga_animation.analysis import VLMClient, detect_panels
 from manga_animation.analysis.panels import derive_scene_crop_bbox
+from manga_animation.animation_anything import (
+    AnimateAnythingClient,
+    build_animation_prompt,
+    merge_motion_masks,
+)
 from manga_animation.core.config import PipelineConfig
 from manga_animation.core.logging import get_logger
 from manga_animation.grounding import GroundingClient
@@ -70,6 +75,7 @@ from manga_animation.pipeline.persistence import (
 )
 from manga_animation.pipeline.types import (
     BBoxPx,
+    FrameSequence,
     GroundingResult,
     Layer,
     ObjectDescriptionResult,
@@ -80,6 +86,7 @@ from manga_animation.pipeline.types import (
     SegmentationResult,
 )
 from manga_animation.reconstruction import ReconstructionClient
+from manga_animation.rendering import render
 from manga_animation.schemas.animation_plan import AnimationPlan, ObjectPlan
 from manga_animation.segmentation import SegmentationClient
 
@@ -198,6 +205,7 @@ class _PageRunState:
     reconstructions_by_panel: dict[str, dict[str, ReconstructionResult]] = field(
         default_factory=dict
     )
+    aa_frames_by_panel: dict[str, FrameSequence] = field(default_factory=dict)
 
 
 def _prepare_page_state(
@@ -464,6 +472,35 @@ def _pipeline_stage_segmentation(
     return True
 
 
+def _accepted_for_panel(
+    state: _PageRunState, panel: PanelUnit
+) -> list[
+    tuple[str, int, ObjectPlan, GroundingResult, SegmentationResult, ObjectDescriptionResult]
+]:
+    """The accepted-candidate tuples for one panel (accepted at object description AND with a
+    real segmentation mask), in plan order. Empty when no candidate made it through."""
+    panel_id = panel.panel_id
+    accepted: list[
+        tuple[str, int, ObjectPlan, GroundingResult, SegmentationResult, ObjectDescriptionResult]
+    ] = []
+    for (object_id, rank), description in state.descriptions_by_panel[panel_id].items():
+        if not description.accepted:
+            continue
+        if (object_id, rank) not in state.segmentation_by_panel[panel_id]:
+            continue  # accepted by the VLM but dropped at segmentation
+        accepted.append(
+            (
+                object_id,
+                rank,
+                state.plan_by_object_by_panel[panel_id][object_id],
+                state.candidates_by_panel[panel_id][object_id][rank],
+                state.segmentation_by_panel[panel_id][(object_id, rank)],
+                description,
+            )
+        )
+    return accepted
+
+
 def _pipeline_stage_plan(
     token: _PanelPipelineToken,
     config: PipelineConfig,
@@ -477,22 +514,7 @@ def _pipeline_stage_plan(
         return False  # failed earlier
     state.panel_started_at.setdefault(panel_id, time.perf_counter())
     try:
-        accepted = []
-        for (object_id, rank), description in state.descriptions_by_panel[panel_id].items():
-            if not description.accepted:
-                continue
-            if (object_id, rank) not in state.segmentation_by_panel[panel_id]:
-                continue  # accepted by the VLM but dropped at segmentation
-            accepted.append(
-                (
-                    object_id,
-                    rank,
-                    state.plan_by_object_by_panel[panel_id][object_id],
-                    state.candidates_by_panel[panel_id][object_id][rank],
-                    state.segmentation_by_panel[panel_id][(object_id, rank)],
-                    description,
-                )
-            )
+        accepted = _accepted_for_panel(state, panel)
         plan, primary, kept = _build_plan(
             panel.scene_crop_path,
             state.crops[panel_id].shape[:2],
@@ -576,6 +598,107 @@ def _pipeline_stage_render(token: _PanelPipelineToken, config: PipelineConfig) -
     return True
 
 
+def _pipeline_stage_plan_animate_anything(
+    token: _PanelPipelineToken,
+    config: PipelineConfig,
+    animation_client: AnimateAnythingClient,
+) -> bool:
+    """Generative animation for this panel (stage 3, AnimateAnything engine).
+
+    Replaces the deterministic plan/animate/reconstruct stage: the accepted SAM masks are
+    merged into one motion mask, the accepted Qwen descriptions are composed into one prompt,
+    and AnimateAnything generates the panel's frame sequence directly from (image, mask,
+    prompt). No LaMa reconstruction and no per-object compositing exist in this engine -- the
+    generative model produces the whole frame sequence. Fail-closed semantics are unchanged:
+    `_build_plan` still rejects a panel with no accepted candidate (REJECTED) and isolates an
+    unexpected failure to its panel (ERROR).
+    """
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.descriptions_by_panel:
+        return False  # failed earlier
+    state.panel_started_at.setdefault(panel_id, time.perf_counter())
+    try:
+        accepted = _accepted_for_panel(state, panel)
+        plan, primary, kept = _build_plan(
+            panel.scene_crop_path,
+            state.crops[panel_id].shape[:2],
+            config,
+            accepted=accepted,
+            global_origin=(panel.scene_crop_bbox.x0, panel.scene_crop_bbox.y0),
+            logical_panel_bbox_px=panel.panel_bbox,
+            neighboring_panel_bboxes=tuple(p.panel_bbox for p in state.panels),
+        )
+        animated_objects = [item[0] for item in kept]
+        segmentation_by_object = {item[0].object_id: item[2] for item in kept}
+        descriptions_by_object = {item[0].object_id: item[3] for item in kept}
+
+        motion_mask = merge_motion_masks(
+            [seg.mask for seg in segmentation_by_object.values()]
+        )
+        prompt = build_animation_prompt(
+            [
+                (obj, descriptions_by_object[obj.object_id])
+                for obj in animated_objects
+            ]
+        )
+        frames = animation_client.animate(
+            state.crops[panel_id],
+            motion_mask,
+            prompt,
+            state.page_dir / "animate_anything" / panel_id,
+        )
+        state.plans_by_panel[panel_id] = plan
+        state.animated_by_panel[panel_id] = animated_objects
+        state.seg_by_object_by_panel[panel_id] = segmentation_by_object
+        state.aa_frames_by_panel[panel_id] = frames
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+        return False
+    return True
+
+
+def _pipeline_stage_render_animate_anything(
+    token: _PanelPipelineToken, config: PipelineConfig
+) -> bool:
+    """Render the AnimateAnything-generated frame sequence to H.264, update status, and
+    re-write the manifest (stage 4, CPU). No compositing -- the frames are final."""
+    state, panel = token.state, token.panel
+    panel_id = panel.panel_id
+    if panel_id not in state.aa_frames_by_panel:
+        return False  # failed earlier
+    try:
+        frame_sequence = state.aa_frames_by_panel[panel_id]
+        render_result = render(
+            frame_sequence,
+            state.page_dir / f"{panel_id}.mp4",
+            codec=config.output_codec,
+            keep_frames=True,
+            frames_dir=state.page_dir / "frames" / panel_id,
+        )
+        panel.status = "PASS"
+        panel.output_video = render_result.output_path
+        panel.metrics["frame_count"] = render_result.frame_count
+        panel.metrics["runtime_s"] = round(
+            time.perf_counter() - state.panel_started_at.pop(panel_id), 6
+        )
+        _write_manifest(
+            state.manifest_path,
+            state.page_id,
+            state.image_path,
+            state.panels,
+            started_at=0.0,
+        )
+    except PipelineStageError as exc:
+        _finalize(state, panel, _failure_status(exc.stage), exc.stage, exc.detail)
+    except Exception as exc:  # noqa: BLE001 -- isolate unexpected failure to this panel
+        _finalize(state, panel, "ERROR", type(exc).__name__, str(exc))
+    return True
+
+
 def _pipeline_worker(
     in_q: Queue,
     out_q: Queue | None,
@@ -640,7 +763,8 @@ def _run_panel_pipeline(
     grounding_client: GroundingClient,
     vlm_client: VLMClient | Sequence[VLMClient],
     segmentation_client: SegmentationClient,
-    reconstruction_client: ReconstructionClient,
+    reconstruction_client: ReconstructionClient | None,
+    animation_client: AnimateAnythingClient | None,
     need_dino: bool,
     need_qwen: bool,
     need_sam: bool,
@@ -656,10 +780,19 @@ def _run_panel_pipeline(
     sequential scheme regardless of which worker processed a panel: each worker computes
     the same per-panel stage function, and checkpoints are written per panel.
 
+    The ANIMATION ENGINE is config-selected: with `model_variants.animation =
+    "animate-anything-512-v1.02"` and a live `animation_client`, stage 3 is the generative
+    AnimateAnything engine (image + merged SAM motion mask + Qwen-description prompt ->
+    frames, no LaMa, no compositing); otherwise it is the deterministic plan/animate/
+    reconstruct engine. Both engines keep the same fail-closed per-panel semantics and the
+    same render stage output contract.
+
     Memory split (Phase 22): the VLM instances are run-level resident (ADR 0021); the
     smaller models (DINO/SAM/LaMa) are stage-owned -- loaded when their worker starts,
     unloaded when it finishes -- so a full int8 Qwen + KV cache + prefill is not joined by
     2.6 GiB of permanently resident small models on the same card (a real OOM otherwise).
+    The AnimateAnything client is subprocess-backed (no resident GPU footprint in this
+    process), so it is stage-owned like the other small models.
     """
     vlm_clients = list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
     n_desc = len(vlm_clients)
@@ -670,6 +803,29 @@ def _run_panel_pipeline(
     q_render: Queue = Queue(maxsize=8)
     errors: list[BaseException] = []
     persist_lock = Lock()
+
+    use_animate_anything = animation_client is not None
+    if use_animate_anything:
+        assert animation_client is not None
+        plan_stage = partial(
+            _pipeline_stage_plan_animate_anything,
+            config=config,
+            animation_client=animation_client,
+        )
+    else:
+        assert reconstruction_client is not None
+        plan_stage = partial(
+            _pipeline_stage_plan,
+            config=config,
+            reconstruction_client=reconstruction_client,
+        )
+    render_stage = (
+        partial(_pipeline_stage_render_animate_anything, config=config)
+        if use_animate_anything
+        else partial(_pipeline_stage_render, config=config)
+    )
+    stage3_owned = animation_client if use_animate_anything else reconstruction_client
+    stage3_name = "animation_anything" if use_animate_anything else "reconstruction"
 
     workers: list[Thread] = [
         Thread(
@@ -743,16 +899,12 @@ def _run_panel_pipeline(
                     q_plan,
                     q_render,
                     3,
-                    partial(
-                        _pipeline_stage_plan,
-                        config=config,
-                        reconstruction_client=reconstruction_client,
-                    ),
+                    plan_stage,
                     errors,
                 ),
                 kwargs={
-                    "owned_client": reconstruction_client,
-                    "owned_name": "reconstruction",
+                    "owned_client": stage3_owned,
+                    "owned_name": stage3_name,
                 },
                 name="pipeline-plan-animate-reconstruct",
                 daemon=True,
@@ -763,7 +915,7 @@ def _run_panel_pipeline(
                     q_render,
                     None,
                     4,
-                    partial(_pipeline_stage_render, config=config),
+                    render_stage,
                     errors,
                 ),
                 name="pipeline-render",
@@ -803,7 +955,8 @@ def run_pages(
     vlm_client: VLMClient | Sequence[VLMClient],
     grounding_client: GroundingClient,
     segmentation_client: SegmentationClient,
-    reconstruction_client: ReconstructionClient,
+    reconstruction_client: ReconstructionClient | None = None,
+    animation_client: AnimateAnythingClient | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
 ) -> list[PagePanelsResult]:
@@ -896,7 +1049,9 @@ def run_pages(
         # The concurrent panel pipeline: five stages, bounded queues between them (Phase
         # 21, ADR 0022). No stage barrier: each panel moves forward as soon as the
         # previous stage produced its result. The description stage is a worker pool of
-        # one int8 Qwen per GPU (Phase 22, ADR 0023).
+        # one int8 Qwen per GPU (Phase 22, ADR 0023). The animation engine is
+        # config-selected: AnimateAnything when `animation_client` is provided, otherwise
+        # the deterministic plan/animate/reconstruct engine.
         # ---------------------------------------------------------------------------------
         _run_panel_pipeline(
             states,
@@ -906,6 +1061,7 @@ def run_pages(
             vlm_client=vlm_client,
             segmentation_client=segmentation_client,
             reconstruction_client=reconstruction_client,
+            animation_client=animation_client,
             need_dino=need_dino,
             need_qwen=need_qwen,
             need_sam=need_sam,
@@ -931,7 +1087,8 @@ def run_page_panels(
     vlm_client: VLMClient,
     grounding_client: GroundingClient,
     segmentation_client: SegmentationClient,
-    reconstruction_client: ReconstructionClient,
+    reconstruction_client: ReconstructionClient | None = None,
+    animation_client: AnimateAnythingClient | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
 ) -> PagePanelsResult:
@@ -944,6 +1101,7 @@ def run_page_panels(
         grounding_client=grounding_client,
         segmentation_client=segmentation_client,
         reconstruction_client=reconstruction_client,
+        animation_client=animation_client,
         out_dir=out_dir,
         labels=labels,
     )

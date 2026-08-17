@@ -64,6 +64,12 @@ page -> deterministic panel detection -> bounded scene crops
   post-segmentation shape checks is still dropped (fail closed).
 - Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
   z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
+- The ANIMATION ENGINE is config-selected (ADR 0024): `model_variants.animation =
+  animate-anything-512-v1.02` + passing an `AnimateAnythingClient` activates the generative
+  AnimateAnything engine -- stage 3 consumes (original panel image, merged SAM motion mask,
+  prompt built from the accepted Qwen descriptions) and generates the panel's frame sequence
+  directly (no per-object layers, no LaMa reconstruction, no compositing). Without an
+  `animation_client`, the deterministic engine above runs unchanged.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
   dimensions, and loop metrics.
 
@@ -81,6 +87,7 @@ The baseline in `configs/default.yaml` is:
 | Grounding | `grounding-dino-swin-l` |
 | Segmentation | `sam2.1-hiera-base` |
 | Inpainting | `lama-large` |
+| Animation | `animate-anything-512-v1.02` (generative engine, ADR 0024; activated by passing an `AnimateAnythingClient` -- deterministic CV remains the no-client fallback) |
 | VLM analysis resolution | 1536px long edge (`kaggle`: 2048, `local`: 1024) |
 | VLM dtype | profile-dependent (`float32` default, `float16` on Kaggle) |
 | Grounding/segmentation dtype | verified `float32` |

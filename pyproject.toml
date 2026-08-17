@@ -69,6 +69,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["src/manga_animation/animation_anything/vendored/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -77,6 +78,9 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
+exclude = [
+    "^src/manga_animation/animation_anything/vendored/",
+]
 
 [dependency-groups]
 dev = [

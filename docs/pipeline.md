@@ -33,17 +33,22 @@ Precise segmentation            — src/manga_animation/segmentation
 Post-segmentation safety gates  — segmentation/orchestration boundary
     │  mask shape and cross-object overlap checks
     ▼
-Deterministic / kinematic       — src/manga_animation/animation
-    animation                    │  apply MotionSpec transforms locally
+Animation engine (config-selected) — src/manga_animation/animation_anything OR
+    │  animation        • AnimateAnything (ADR 0024, model_variants.animation):
+    │                     original panel image + merged SAM motion mask + prompt
+    │                     built from the accepted Qwen descriptions -> generated
+    │                     frame sequence (isolated subprocess, pinned model env).
+    │                   • Deterministic CV (the original engine): apply MotionSpec
+    │                     transforms locally to per-object masks.
     ▼
 Layer decomposition             — pipeline/types.py
-    │  collect per-object frames and deterministic z-order
+    │  collect per-object frames and deterministic z-order (deterministic engine only)
     ▼
 Hidden-region reconstruction     — src/manga_animation/reconstruction
-    │  fill only background revealed by an object's motion
+    │  fill only background revealed by an object's motion (deterministic engine only)
     ▼
 Original-image compositing       — src/manga_animation/compositing
-    │  blend layers onto a fresh copy of the original plate
+    │  blend layers onto a fresh copy of the original plate (deterministic engine only)
     ▼
 Decoded-output validation        — src/manga_animation/rendering
     │  verify dimensions, timing, decoded frame count and loop metrics
@@ -81,6 +86,24 @@ rejected; no object splitting, synchronization or ownership graph is attempted.
 The implementation order is intentionally `animation -> reconstruction`: reconstruction
 needs transformed masks to know what motion reveals. The layer and safety-gate blocks are
 pipeline boundaries, not independent model stages.
+
+## Animation Engine Selection (ADR 0024)
+
+The animation stage is config-selected. `model_variants.animation = animate-anything-512-v1.02`
+registers AnimateAnything as the generative animation engine; the engine is ACTIVATED by
+passing an `AnimateAnythingClient` to `run_pages`/`run_page_panels` (it needs the worker-side
+checkpoint path and isolated interpreter, which are not buildable from config alone). When
+active, stage 3 is the generative engine: `(original panel crop, merged SAM motion mask,
+prompt from the accepted Qwen descriptions) -> FrameSequence`, rendered directly by stage 4.
+No LaMa reconstruction, no per-object CV transforms, and no compositing run on this path --
+the model produces the whole frame sequence. When no `animation_client` is passed, the
+deterministic plan/animate/reconstruct + compositing engine runs unchanged.
+
+The generative engine lives in `src/manga_animation/animation_anything/`; its worker runs in
+AnimateAnything's own Python environment (pinned diffusers/transformers, which conflict with
+the project's `ml` extra -- see docs/decisions/0024). The model's native output is a 16-frame
+@ 8 fps clip, rendered as-is; loop metrics are measured and reported, not guaranteed seamless
+by construction.
 
 ## Stage Ownership
 

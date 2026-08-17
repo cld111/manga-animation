@@ -100,3 +100,18 @@ inpainting:
     notes: >
       Higher quality, prompt-guided style matching. Only worth the extra compute if
       LaMa/AOT visibly fail on complex screentone/texture regions.
+
+animation:
+  - id: animate-anything-512-v1.02
+    source: "alibaba/animate-anything (v1.02 checkpoint from the project's aliyun OSS release)"
+    license: apache-2.0 # vendored model code; see src/manga_animation/animation_anything/vendored/LICENSE
+    params: ~1.7B UNet
+    notes: >
+      ADR 0024: the generative animation engine. Mask-conditioned video diffusion
+      (Tune-A-Video architecture); input = original panel image + merged SAM motion mask +
+      text prompt built from the accepted Qwen object descriptions. Requires an isolated
+      worker environment with the upstream pinned stack (diffusers==0.24.0,
+      transformers==4.36.2, torch==2.0.0) because it conflicts with this project's
+      transformers>=5.0 `ml` extra. Native output 16 frames @ 8 fps (~2 s), which the
+      pipeline renders as-is. The checkpoint (animate_anything_512_v1.02) is downloaded to
+      the worker separately; the model source dir is passed by path, never committed.
