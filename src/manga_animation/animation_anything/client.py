@@ -16,6 +16,7 @@ docs/decisions/0024-animate-anything-animation-engine.md defines.
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from manga_animation.core.logging import get_logger
 from manga_animation.pipeline.types import FrameSequence, ImageArray, MaskArray
 
 logger = get_logger(__name__)
+
+# The isolated worker loads the model into the AA GPU on every call. The panel pipeline runs
+# several animation stages concurrently (Phase 21), so without serialization N panels hitting
+# the AA stage at once would spawn N concurrent worker processes on the same GPU and OOM it
+# (real run). One global lock serializes the generative calls across all clients.
+_AA_WORKER_LOCK = threading.Lock()
 
 _DEFAULT_TIMEOUT_S = 3600
 
@@ -131,13 +138,16 @@ class AnimateAnythingClient:
             spec.fps,
             self.python_bin,
         )
-        result = subprocess.run(
-            [self.python_bin, self.worker_script, "--spec", str(spec_path)],
-            capture_output=True,
-            text=True,
-            timeout=self.timeout_s,
-            check=False,
-        )
+        # Serialize across concurrent pipeline workers: only ONE worker process may load the
+        # AA model into its GPU at a time (multiple concurrent loads OOM the card).
+        with _AA_WORKER_LOCK:
+            result = subprocess.run(
+                [self.python_bin, self.worker_script, "--spec", str(spec_path)],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
         if result.returncode != 0:
             raise subprocess.CalledProcessError(
                 result.returncode,
