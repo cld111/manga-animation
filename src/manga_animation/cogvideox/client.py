@@ -1,14 +1,14 @@
-"""`Wan2Client`: the pipeline's Wan2.2 TI2V-5B generative animation engine.
+"""`CogVideoXClient`: the pipeline's CogVideoX-5B-I2V generative animation engine.
 
 The client follows the project's model-client shape (`model_id`, `load()`, `animate()`,
 `unload()`) so the panel orchestrator can hold it behind one interface and run it inside a
-`ModelStage`. The actual diffusion inference happens in `wan2_worker.py`, which runs in an
-ISOLATED environment (Wan2.2 requires diffusers main branch and specific torch/transformers
+`ModelStage`. The actual diffusion inference happens in `cogvideox_worker.py`, which runs in an
+ISOLATED environment (CogVideoX requires diffusers main branch and specific torch/transformers
 versions that may conflict with the project stack). The client therefore shells out: it
-serializes a `Wan2Spec`, invokes the worker interpreter, and reads the frame PNGs back.
+serializes a `CogVideoXSpec`, invokes the worker interpreter, and reads the frame PNGs back.
 
 `animate()` takes the ORIGINAL panel image and the prompt built from the accepted Qwen
-descriptions. Unlike AnimateAnything, there is no motion mask input -- Wan2.2 generates
+descriptions. Unlike AnimateAnything, there is no motion mask input -- CogVideoX generates
 the entire video from the image + prompt (I2V mode).
 """
 
@@ -21,25 +21,25 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from manga_animation.cogvideox.spec import DEFAULT_FPS, CogVideoXSpec
 from manga_animation.core.logging import get_logger
 from manga_animation.pipeline.types import FrameSequence, ImageArray, MaskArray
-from manga_animation.wan2.spec import DEFAULT_FPS, Wan2Spec
 
 logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT_S = 3600
 
 
-class Wan2Client:
-    """Subprocess-backed Wan2.2-TI2V-5B inference client (image + prompt -> frames).
+class CogVideoXClient:
+    """Subprocess-backed CogVideoX-5B-I2V inference client (image + prompt -> frames).
 
     Heavy work stays out of this process: `load()` only verifies the worker environment exists
-    on the worker, and `animate()` launches `wan2_worker.py` under the isolated interpreter
+    on the worker, and `animate()` launches `cogvideox_worker.py` under the isolated interpreter
     and blocks until the frames are written. `unload()` is a no-op (nothing model-related is
     held here). Construction is cheap and safe without the `ml` extra installed.
     """
 
-    model_id = "wan2.2-ti2v-5b"
+    model_id = "cogvideox-5b-i2v"
 
     def __init__(
         self,
@@ -48,16 +48,14 @@ class Wan2Client:
         worker_script: str | Path,
         device: str = "cuda",
         *,
-        num_frames: int = 121,
+        num_frames: int = 49,
         fps: int = DEFAULT_FPS,
         num_inference_steps: int = 50,
-        guidance_scale: float = 5.0,
+        guidance_scale: float = 6.0,
         seed: int = 42,
-        height: int = 704,
-        width: int = 1280,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
     ) -> None:
-        self.source = source  # Wan2.2-TI2V-5B checkpoint dir on the worker
+        self.source = source  # CogVideoX-5B-I2V checkpoint dir on the worker
         self.python_bin = python_bin  # isolated interpreter (venv with the required stack)
         self.worker_script = str(worker_script)
         self.device = device
@@ -66,8 +64,6 @@ class Wan2Client:
         self.num_inference_steps = num_inference_steps
         self.guidance_scale = guidance_scale
         self.seed = seed
-        self.height = height
-        self.width = width
         self.timeout_s = timeout_s
 
     def load(self) -> None:
@@ -80,7 +76,7 @@ class Wan2Client:
         ]
         if missing:
             raise FileNotFoundError(
-                "Wan2.2 worker environment incomplete on this worker; missing "
+                "CogVideoX worker environment incomplete on this worker; missing "
                 + ", ".join(str(p) for p in missing)
             )
 
@@ -94,7 +90,7 @@ class Wan2Client:
         """Generate one panel's animation from (image, prompt) and return the frames.
 
         `image` is the original RGB panel crop. `mask` is accepted for API compatibility
-        with the pipeline but is NOT used by Wan2.2 (the model generates from image+prompt).
+        with the pipeline but is NOT used by CogVideoX (the model generates from image+prompt).
         `prompt` comes from `build_animation_prompt`. Writes the spec + inputs into `out_dir`,
         runs the worker, reads the frame PNGs back. Raises
         `subprocess.CalledProcessError`/`FileNotFoundError` on worker failure (fail closed).
@@ -109,7 +105,7 @@ class Wan2Client:
 
         Image.fromarray(image).save(image_path)
         Image.fromarray(mask).save(mask_path)
-        spec = Wan2Spec(
+        spec = CogVideoXSpec(
             image_path=str(image_path),
             prompt=prompt,
             output_dir=str(frames_dir),
@@ -120,14 +116,12 @@ class Wan2Client:
             num_inference_steps=self.num_inference_steps,
             guidance_scale=self.guidance_scale,
             seed=self.seed,
-            height=self.height,
-            width=self.width,
         )
         spec.to_json_file(spec_path)
 
         started = time.perf_counter()
         logger.info(
-            "wan2: launching worker (prompt=%r, frames=%d, fps=%d) under %s",
+            "cogvideox: launching worker (prompt=%r, frames=%d, fps=%d) under %s",
             prompt,
             spec.num_frames,
             spec.fps,
@@ -142,7 +136,7 @@ class Wan2Client:
         )
         if result.returncode != 0:
             logger.error(
-                "wan2: worker failed rc=%d stderr=%s",
+                "cogvideox: worker failed rc=%d stderr=%s",
                 result.returncode,
                 (result.stderr or "")[-2000:],
             )
@@ -153,7 +147,7 @@ class Wan2Client:
                 stderr=result.stderr,
             )
         logger.info(
-            "wan2: worker finished in %.1fs (%d frames)",
+            "cogvideox: worker finished in %.1fs (%d frames)",
             time.perf_counter() - started,
             spec.num_frames,
         )

@@ -1,6 +1,6 @@
-"""The serialized contract between `Wan2Client` and the isolated `wan2_worker.py`.
+"""The serialized contract between `CogVideoXClient` and the isolated `cogvideox_worker.py`.
 
-Wan2.2-TI2V-5B generates video from an input image + text prompt (I2V mode). Unlike
+CogVideoX-5B-I2V generates video from an input image + text prompt (I2V mode). Unlike
 AnimateAnything, there is no motion mask input -- the model generates the entire video
 from the image and prompt. The spec carries the same filesystem-addressed shape so the
 pipeline can persist work directories and provenance.
@@ -13,16 +13,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Wan2.2-TI2V-5B native output: 121 frames @ 24 fps = 5.04s at 720P.
-DEFAULT_NUM_FRAMES = 121
-DEFAULT_FPS = 24
+# CogVideoX-5B-I2V native output: 49 frames @ 8 fps = 6.12s at 720x480.
+DEFAULT_NUM_FRAMES = 49
+DEFAULT_FPS = 8
 DEFAULT_NUM_INFERENCE_STEPS = 50
-DEFAULT_GUIDANCE_SCALE = 5.0
+DEFAULT_GUIDANCE_SCALE = 6.0
 DEFAULT_SEED = 42
 
 
-class Wan2Spec(BaseModel):
-    """One inference request for the Wan2.2 worker, fully filesystem-addressed.
+class CogVideoXSpec(BaseModel):
+    """One inference request for the CogVideoX worker, fully filesystem-addressed.
 
     The worker needs no knowledge of this project's pipeline: it receives an image,
     a prompt and hyper-parameters, and produces frame PNGs in `output_dir`.
@@ -40,16 +40,14 @@ class Wan2Spec(BaseModel):
     seed: int = Field(default=DEFAULT_SEED)
     negative_prompt: str = Field(
         default="static, blurry, low quality, worst quality",
-        description="Negative prompt for Wan2.2",
+        description="Negative prompt for CogVideoX",
     )
-    height: int = Field(gt=0, default=704, description="Output height (must be divisible by 16)")
-    width: int = Field(gt=0, default=1280, description="Output width (must be divisible by 16)")
 
     def to_json_file(self, path: str | Path) -> None:
         Path(path).write_text(self.model_dump_json(indent=2) + "\n")
 
     @classmethod
-    def from_json_file(cls, path: str | Path) -> Wan2Spec:
+    def from_json_file(cls, path: str | Path) -> CogVideoXSpec:
         return cls.model_validate_json(Path(path).read_text())
 
     def as_manifest(self) -> dict[str, Any]:

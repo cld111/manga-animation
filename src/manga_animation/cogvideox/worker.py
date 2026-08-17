@@ -1,8 +1,8 @@
-"""Isolated Wan2.2-TI2V-5B inference entrypoint (runs OUTSIDE the main pipeline process).
+"""Isolated CogVideoX-5B-I2V inference entrypoint (runs OUTSIDE the main pipeline process).
 
-This script is launched by `Wan2Client` with the worker's DEDICATED interpreter (the
-environment with diffusers main branch, torch>=2.4.0, etc.). It reads one `Wan2Spec` JSON,
-loads the Wan2.2-TI2V-5B checkpoint, generates `num_frames` frames from (image, prompt),
+This script is launched by `CogVideoXClient` with the worker's DEDICATED interpreter (the
+environment with diffusers main branch, torch>=2.4.0, etc.). It reads one `CogVideoXSpec` JSON,
+loads the CogVideoX-5B-I2V checkpoint, generates `num_frames` frames from (image, prompt),
 and writes `frame_%04d.png` files.
 
 It deliberately does NOT import `manga_animation` (the isolated env may not install the
@@ -59,16 +59,14 @@ def _generate(
     guidance_scale: float,
     seed: int,
     negative_prompt: str,
-    height: int,
-    width: int,
 ) -> list:
-    """Generate video frames using Wan2.2-TI2V-5B WanPipeline (I2V mode).
+    """Generate video frames using CogVideoX-5B-I2V CogVideoXImageToVideoPipeline (I2V mode).
 
     Returns the list of RGB uint8 numpy arrays.
     """
     import numpy as np
     import torch
-    from diffusers import AutoencoderKLWan, WanPipeline, WanTransformer3DModel
+    from diffusers import CogVideoXImageToVideoPipeline
     from diffusers.utils import load_image
     from PIL import Image
 
@@ -79,40 +77,23 @@ def _generate(
     orig_w, orig_h = input_image.size
 
     # Resize to target dimensions (must be divisible by 16)
-    input_image_resized = input_image.resize((width, height), Image.Resampling.LANCZOS)
+    target_h = (orig_h // 16) * 16
+    target_w = (orig_w // 16) * 16
+    input_image_resized = input_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # Load VAE (float32 for quality), transformer and text encoder (dtype for memory)
+    # Load pipeline from checkpoint
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    vae = AutoencoderKLWan.from_pretrained(
-        checkpoint_path, subfolder="vae", torch_dtype=torch.float32
-    )
-    transformer = WanTransformer3DModel.from_pretrained(
-        checkpoint_path, subfolder="transformer", torch_dtype=dtype
-    )
-
-    pipe = WanPipeline(
-        vae=vae,
-        transformer=transformer,
-        scheduler=None,  # loaded from checkpoint config
-        tokenizer=None,  # loaded from checkpoint
-        text_encoder=None,  # loaded from checkpoint
-    )
-    pipe = WanPipeline.from_pretrained(
+    pipe = CogVideoXImageToVideoPipeline.from_pretrained(
         checkpoint_path,
-        vae=vae,
         torch_dtype=dtype,
     )
 
     # Move to device with memory optimizations
     pipe.to(device)
-
-    # Enable memory-efficient attention if available
-    if hasattr(pipe, "enable_model_cpu_offload"):
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception:  # noqa: BLE001 -- best-effort optimization
-            pass
+    pipe.enable_sequential_cpu_offload()
+    pipe.vae.enable_tiling()
+    pipe.vae.enable_slicing()
 
     # Set up generator for reproducibility
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -121,10 +102,7 @@ def _generate(
     with torch.no_grad():
         output = pipe(
             prompt=prompt,
-            negative_prompt=negative_prompt,
             image=input_image_resized,
-            height=height,
-            width=width,
             num_frames=num_frames,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
@@ -165,7 +143,7 @@ def _write_frames(frames: list, output_dir: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--spec", required=True, help="path to a Wan2Spec JSON")
+    parser.add_argument("--spec", required=True, help="path to a CogVideoXSpec JSON")
     parser.add_argument("--selfcheck", action="store_true")
     args = parser.parse_args()
 
@@ -187,8 +165,6 @@ def main() -> None:
         guidance_scale=spec["guidance_scale"],
         seed=spec["seed"],
         negative_prompt=spec.get("negative_prompt", "static, blurry, low quality"),
-        height=spec.get("height", 704),
-        width=spec.get("width", 1280),
     )
     _write_frames(frames, spec["output_dir"])
     print(

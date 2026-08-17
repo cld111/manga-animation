@@ -1,4 +1,4 @@
-"""Wan2.2 TI2V-5B end-to-end GPU run: original panel + Qwen descriptions -> video.
+"""CogVideoX-5B-I2V end-to-end GPU run: original panel + Qwen descriptions -> video.
 
 Runs the production panel pipeline (`run_page_panels`) with the GENERATIVE animation engine
 (ADR 0024) in TWO PHASES so the two heavy models never share a GPU:
@@ -6,29 +6,29 @@ Runs the production panel pipeline (`run_page_panels`) with the GENERATIVE anima
   Phase 1 (Qwen phase): ONE Qwen3-VL-4B instance PER GPU processes the whole dataset --
     grounding (DINO) -> object description (Qwen pool) -> segmentation (SAM) -- and persists
     its checkpoints, then Qwen is released. `run_page_panels(stop_after_segmentation=True)`.
-  Phase 2 (Wan2.2 phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and ONE
-    Wan2.2 worker per GPU animates each accepted panel from (original panel image, prompt
+  Phase 2 (CogVideoX phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and ONE
+    CogVideoX worker per GPU animates each accepted panel from (original panel image, prompt
     built from the accepted Qwen descriptions) and renders H.264.
-    `run_page_panels(animation_clients=wan2_pool)`.
+    `run_page_panels(animation_clients=cogvideox_pool)`.
 
-No LaMa reconstruction and no deterministic CV animation are used -- Wan2.2-TI2V-5B is the
+No LaMa reconstruction and no deterministic CV animation are used -- CogVideoX-5B-I2V is the
 ONLY animation engine here.
 
 **Run on the Kaggle/Jupyter GPU worker, never locally** (CLAUDE.md, ADR 0003).
 
-The Wan2.2 model needs its OWN Python environment on the worker because it requires
+The CogVideoX model needs its OWN Python environment on the worker because it requires
 diffusers main branch (not the PyPI release) and specific torch/transformers versions.
 
 Usage:
 
-    python scripts/run_wan2_e2e.py \
+    python scripts/run_cogvideox_e2e.py \
         --pages examples/realworld/wind_breaker_sprint.png \
         --qwen /kaggle/working/models/qwen \
         --dino /kaggle/working/models/dino \
         --sam /kaggle/working/models/sam \
-        --wan2-checkpoint /kaggle/working/models/Wan2.2-TI2V-5B \
-        --wan2-python /kaggle/working/wan2-venv/bin/python \
-        --out outputs/experiments/wan2_<ts>.json
+        --cogvideox-checkpoint /kaggle/working/models/CogVideoX-5B-I2V \
+        --cogvideox-python /kaggle/working/cogvideox-venv/bin/python \
+        --out outputs/experiments/cogvideox_<ts>.json
 
 Writes one git-ignored experiment JSON per invocation: per-panel statuses, the animation
 engine, the prompt(s) used, frame counts and render loop metrics.
@@ -43,18 +43,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from manga_animation.analysis import Qwen3VLClient
+from manga_animation.cogvideox.client import CogVideoXClient
 from manga_animation.core.config import load_config
 from manga_animation.core.logging import setup_logging
 from manga_animation.grounding import GroundingDinoClient
 from manga_animation.pipeline.orchestrator import DEFAULT_ANIMATION_LABELS
 from manga_animation.pipeline.panels import run_page_panels
 from manga_animation.segmentation import Sam21Client
-from manga_animation.wan2.client import Wan2Client
 
 # Path to the isolated worker entrypoint, relative to this script (repo layout is canonical:
 # scripts/ sits next to src/).
 _WORKER_SCRIPT = (
-    Path(__file__).resolve().parents[1] / "src" / "manga_animation" / "wan2" / "worker.py"
+    Path(__file__).resolve().parents[1] / "src" / "manga_animation" / "cogvideox" / "worker.py"
 )
 
 
@@ -89,10 +89,10 @@ def _panel_report(page_result) -> list[dict]:
 
 
 def _prompt_report(page_result, page_dir: Path) -> list[dict]:
-    """Per-panel (prompt, motion mask) provenance from the Wan2.2 work dirs."""
+    """Per-panel (prompt, motion mask) provenance from the CogVideoX work dirs."""
     report = []
     for panel in page_result.panels:
-        workdir = page_dir / "wan2" / panel.panel_id
+        workdir = page_dir / "cogvideox" / panel.panel_id
         spec_path = workdir / "spec.json"
         if not spec_path.exists():
             report.append({"panel_id": panel.panel_id, "spec": None})
@@ -117,8 +117,8 @@ def main() -> None:
     parser.add_argument("--qwen", required=True, help="Qwen3-VL-4B model dir on the worker")
     parser.add_argument("--dino", required=True)
     parser.add_argument("--sam", required=True)
-    parser.add_argument("--wan2-checkpoint", required=True, help="Wan2.2-TI2V-5B model dir")
-    parser.add_argument("--wan2-python", required=True, help="isolated worker interpreter")
+    parser.add_argument("--cogvideox-checkpoint", required=True, help="CogVideoX-5B-I2V model dir")
+    parser.add_argument("--cogvideox-python", required=True, help="isolated worker interpreter")
     parser.add_argument("--out", required=True)
     parser.add_argument("--env", default="kaggle")
     parser.add_argument(
@@ -132,7 +132,7 @@ def main() -> None:
     config = load_config(args.env, overrides={"resolution": 1536})
     config.model_variants.update(
         {
-            "animation": "wan2.2-ti2v-5b",
+            "animation": "cogvideox-5b-i2v",
             "grounding": "grounding-dino-swin-l",
             "segmentation": "sam2.1-hiera-base",
         }
@@ -153,12 +153,12 @@ def main() -> None:
         n_gpus = 0
     devices = [f"cuda:{i}" for i in range(max(1, n_gpus))]
 
-    # Two-phase Wan2.2 run (ADR 0024):
+    # Two-phase CogVideoX run (ADR 0024):
     #   Phase 1 (Qwen phase): ONE Qwen3-VL-4B instance PER GPU processes the whole dataset
     #     (grounding -> object description -> segmentation) and persists its checkpoints,
     #     then Qwen is released.
-    #   Phase 2 (Wan2.2 phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and
-    #     ONE Wan2.2 worker per GPU animates the accepted panels.
+    #   Phase 2 (CogVideoX phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and
+    #     ONE CogVideoX worker per GPU animates the accepted panels.
     qwen_pool: list[CountingVLM] = [
         CountingVLM(
             Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096, device=d)
@@ -169,10 +169,10 @@ def main() -> None:
     aux_device = devices[0]
     dino = GroundingDinoClient(source=args.dino, device=aux_device, dtype="float32")
     sam = Sam21Client(source=args.sam, device=aux_device, dtype="float32")
-    wan2_pool: list[Wan2Client] = [
-        Wan2Client(
-            source=args.wan2_checkpoint,
-            python_bin=args.wan2_python,
+    cogvideox_pool: list[CogVideoXClient] = [
+        CogVideoXClient(
+            source=args.cogvideox_checkpoint,
+            python_bin=args.cogvideox_python,
             worker_script=_WORKER_SCRIPT,
             device=d,
             num_frames=config.animation_num_frames,
@@ -185,14 +185,14 @@ def main() -> None:
     ]
 
     report: dict = {
-        "phase": "wan2-e2e-two-phase",
+        "phase": "cogvideox-e2e-two-phase",
         "timestamp": datetime.now(UTC).isoformat(),
         "pages": [],
-        "animation_engine": "wan2.2-ti2v-5b",
+        "animation_engine": "cogvideox-5b-i2v",
         "vlm_instances": len(qwen_pool),
         "vlm_devices": devices,
-        "wan2_instances": len(wan2_pool),
-        "wan2_devices": devices,
+        "cogvideox_instances": len(cogvideox_pool),
+        "cogvideox_devices": devices,
         "vlm_calls": 0,
     }
     started = time.perf_counter()
@@ -214,7 +214,7 @@ def main() -> None:
             )
         print("phase 1 (Qwen -> checkpoints) done", flush=True)
 
-        # Phase 2: Wan2.2 pool -> animate + render, resuming the persisted stages.
+        # Phase 2: CogVideoX pool -> animate + render, resuming the persisted stages.
         for page in args.pages:
             page_path = Path(page)
             page_result = run_page_panels(
@@ -224,7 +224,7 @@ def main() -> None:
                 grounding_client=dino,
                 segmentation_client=sam,
                 reconstruction_client=None,
-                animation_clients=wan2_pool,
+                animation_clients=cogvideox_pool,
                 out_dir=out_dir / "videos",
                 labels=labels,
             )
@@ -232,12 +232,12 @@ def main() -> None:
             page_entry = {
                 "page": page,
                 "panels": _panel_report(page_result),
-                "wan2": _prompt_report(page_result, page_dir),
+                "cogvideox": _prompt_report(page_result, page_dir),
             }
             report["pages"].append(page_entry)
             print(json.dumps(page_entry, indent=1), flush=True)
     finally:
-        for client in (*qwen_pool, dino, sam, *wan2_pool):
+        for client in (*qwen_pool, dino, sam, *cogvideox_pool):
             unload = getattr(client, "unload", None)
             if callable(unload):
                 try:

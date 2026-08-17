@@ -1,10 +1,10 @@
-"""Pipeline integration tests for the Wan2.2-TI2V-5B generative animation engine (ADR 0024).
+"""Pipeline integration tests for the CogVideoX-5B-I2V generative animation engine (ADR 0024).
 
-These prove the wiring contract locally with fake model clients (including a fake Wan2 client
-that returns deterministic frames) -- real diffusion inference is remote-GPU work and never
-runs in tests. The determinism of the fake Wan2 client means these also verify that the Wan2
-pipeline path produces a PASS panel with a real playable MP4, that the prompt reaches the
-animation engine, and that fail-closed semantics are unchanged.
+These prove the wiring contract locally with fake model clients (including a fake CogVideoX
+client that returns deterministic frames) -- real diffusion inference is remote-GPU work and
+never runs in tests. The determinism of the fake CogVideoX client means these also verify
+that the CogVideoX pipeline path produces a PASS panel with a real playable MP4, that the
+prompt reaches the animation engine, and that fail-closed semantics are unchanged.
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ requires_ffmpeg = pytest.mark.skipif(
 # --- fakes (mirror the style of test_pipeline.py's fakes) ---------------------------------
 
 
-class FakeWan2:
-    """Fake Wan2.2 client: returns deterministic frames and records what it saw."""
+class FakeCogVideoX:
+    """Fake CogVideoX client: returns deterministic frames and records what it saw."""
 
-    model_id = "wan2.2-ti2v-5b"
+    model_id = "cogvideox-5b-i2v"
 
-    def __init__(self, num_frames: int = 4, fps: int = 24):
+    def __init__(self, num_frames: int = 4, fps: int = 8):
         self.num_frames = num_frames
         self.fps = fps
         self.calls: list[dict] = []
@@ -155,15 +155,15 @@ def page_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def config() -> PipelineConfig:
     cfg = PipelineConfig(duration_s=0.5, fps=24)
-    cfg.model_variants["animation"] = "wan2.2-ti2v-5b"
+    cfg.model_variants["animation"] = "cogvideox-5b-i2v"
     return cfg
 
 
 @requires_ffmpeg
-def test_wan2_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
-    """The Wan2 engine replaces plan/animate/reconstruct + compositing: the fake Wan2
+def test_cogvideox_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
+    """The CogVideoX engine replaces plan/animate/reconstruct + compositing: the fake CogVideoX
     client's frames are rendered directly into a real playable MP4, and the panel is PASS."""
-    wan2 = FakeWan2()
+    cogvideox = FakeCogVideoX()
     vlm = BatchVLM()
     result = run_page_panels(
         page_path,
@@ -172,25 +172,25 @@ def test_wan2_engine_renders_pass_video(page_path: Path, config, tmp_path: Path)
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[wan2],
+        animation_clients=[cogvideox],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
-    assert len(wan2.calls) == 1  # exactly one generative call for the one panel
+    assert len(cogvideox.calls) == 1  # exactly one generative call for the one panel
     assert result.panels[0].status == "PASS"
     assert result.panels[0].output_video is not None
     assert result.panels[0].output_video.exists()
-    # No LaMa client was required on the Wan2 path (reconstruction_client=None).
-    assert wan2.loaded and wan2.unloaded
+    # No LaMa client was required on the CogVideoX path (reconstruction_client=None).
+    assert cogvideox.loaded and cogvideox.unloaded
 
 
 @requires_ffmpeg
-def test_wan2_engine_receives_panel_image_and_prompt(
+def test_cogvideox_engine_receives_panel_image_and_prompt(
     page_path: Path, config, tmp_path: Path
 ):
     """The generative engine's input contract: the ORIGINAL panel crop and the prompt
     built from the accepted Qwen description."""
-    wan2 = FakeWan2()
+    cogvideox = FakeCogVideoX()
     result = run_page_panels(
         page_path,
         config,
@@ -198,12 +198,12 @@ def test_wan2_engine_receives_panel_image_and_prompt(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[wan2],
+        animation_clients=[cogvideox],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert result.panels[0].status == "PASS"
-    call = wan2.calls[0]
+    call = cogvideox.calls[0]
     # image_shape is the panel crop (full page here since one panel fills it).
     assert call["image_shape"][:2] == (160, 120)
     assert call["mask_shape"][:2] == (160, 120)
@@ -212,10 +212,10 @@ def test_wan2_engine_receives_panel_image_and_prompt(
     assert "flowing" in call["prompt"]  # motion phrase from the mapped transform kind
 
 
-def test_wan2_engine_requires_animation_client_when_selected(
+def test_cogvideox_engine_requires_animation_client_when_selected(
     page_path: Path, config, tmp_path: Path
 ):
-    """The Wan2 engine is only active when an animation_client is passed; without it, the
+    """The CogVideoX engine is only active when an animation_client is passed; without it, the
     deterministic engine's reconstruction_client is required (fail closed on misuse)."""
     with pytest.raises(AssertionError):
         run_page_panels(
@@ -232,10 +232,10 @@ def test_wan2_engine_requires_animation_client_when_selected(
 
 
 @requires_ffmpeg
-def test_wan2_engine_fails_closed_on_empty_acceptance(
+def test_cogvideox_engine_fails_closed_on_empty_acceptance(
     page_path: Path, config, tmp_path: Path
 ):
-    """A panel with no accepted candidate is REJECTED even on the Wan2 path (the generative
+    """A panel with no accepted candidate is REJECTED even on the CogVideoX path (the generative
     engine never animates an unvalidated panel)."""
 
     class RejectingVLM(BatchVLM):
@@ -266,7 +266,7 @@ def test_wan2_engine_fails_closed_on_empty_acceptance(
                 )
             return json.dumps(entries)
 
-    wan2 = FakeWan2()
+    cogvideox = FakeCogVideoX()
     result = run_page_panels(
         page_path,
         config,
@@ -274,22 +274,23 @@ def test_wan2_engine_fails_closed_on_empty_acceptance(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[wan2],
+        animation_clients=[cogvideox],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert result.panels[0].status == "REJECTED"
-    assert len(wan2.calls) == 0  # the generative engine never ran
+    assert len(cogvideox.calls) == 0  # the generative engine never ran
 
 
 @requires_ffmpeg
-def test_wan2_two_phase_run_restores_checkpoints_and_animates(
+def test_cogvideox_two_phase_run_restores_checkpoints_and_animates(
     page_path: Path, config, tmp_path: Path
 ):
     """ADR 0024 two-phase run: phase 1 (`stop_after_segmentation=True`) runs only
-    grounding/description/segmentation with Qwen and persists checkpoints; phase 2 re-runs
-    `run_page_panels` with the Wan2 pool -- the restored checkpoints skip DINO/Qwen/SAM and
-    the Wan2 engine animates the accepted panel. The Wan2 pool here is a single fake client."""
+    grounding/description/segmentation with Qwen and persists checkpoints; phase 2
+    re-runs `run_page_panels` with the CogVideoX pool -- the restored checkpoints skip
+    DINO/Qwen/SAM and the CogVideoX engine animates the accepted panel. The CogVideoX
+    pool here is a single fake client."""
     vlm = BatchVLM()
     phase1 = run_page_panels(
         page_path,
@@ -306,7 +307,7 @@ def test_wan2_two_phase_run_restores_checkpoints_and_animates(
     assert vlm.call_count == 1  # Qwen phase described the panel
     assert phase1.panels[0].status != "PASS"  # not rendered yet (status may be ERROR)
 
-    wan2 = FakeWan2()
+    cogvideox = FakeCogVideoX()
     phase2 = run_page_panels(
         page_path,
         config,
@@ -314,22 +315,22 @@ def test_wan2_two_phase_run_restores_checkpoints_and_animates(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[wan2],
+        animation_clients=[cogvideox],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert phase2.panels[0].status == "PASS"
-    assert len(wan2.calls) == 1  # Wan2 phase animated the accepted panel
+    assert len(cogvideox.calls) == 1  # CogVideoX phase animated the accepted panel
     # The checkpoints exist on disk.
     assert (tmp_path / "out" / "page" / "grounding.json").exists()
     assert (tmp_path / "out" / "page" / "descriptions.json").exists()
     assert (tmp_path / "out" / "page" / "segmentation.json").exists()
 
 
-def test_wan2_pool_splits_panels_between_clients(
+def test_cogvideox_pool_splits_panels_between_clients(
     page_path: Path, config, tmp_path: Path
 ):
-    """The Wan2 stage runs as a worker pool (one worker per Wan2Client): with two
+    """The CogVideoX stage runs as a worker pool (one worker per CogVideoXClient): with two
     fake clients, panels are split between them rather than serialized by one global lock."""
     # A two-panel page so both pool workers see work.
     def noise_block(h: int, w: int, seed: int) -> np.ndarray:
@@ -342,7 +343,7 @@ def test_wan2_pool_splits_panels_between_clients(
     two_path = tmp_path / "two_panel.png"
     Image.fromarray(two).save(two_path)
 
-    wan2_a, wan2_b = FakeWan2(), FakeWan2()
+    cogvideox_a, cogvideox_b = FakeCogVideoX(), FakeCogVideoX()
     result = run_page_panels(
         two_path,
         config,
@@ -350,10 +351,10 @@ def test_wan2_pool_splits_panels_between_clients(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[wan2_a, wan2_b],
+        animation_clients=[cogvideox_a, cogvideox_b],
         out_dir=tmp_path / "out2",
         labels=["speed_lines"],
     )
-    total_calls = len(wan2_a.calls) + len(wan2_b.calls)
+    total_calls = len(cogvideox_a.calls) + len(cogvideox_b.calls)
     assert total_calls >= 1  # at least the accepted panel(s) animated
     assert all(p.status == "PASS" for p in result.panels)

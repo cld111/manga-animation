@@ -1,9 +1,9 @@
-"""Tests for the Wan2.2-TI2V-5B generative animation engine (ADR 0024).
+"""Tests for the CogVideoX-5B-I2V generative animation engine (ADR 0024).
 
 Covers the deterministic, locally-testable pieces of the engine: the spec contract, the
 prompt builder, the SAM-mask merger, and the client's subprocess hand-off (with a FAKE worker
 script -- real diffusion inference is remote-GPU work and never runs here). The pipeline
-integration is covered in tests/test_wan2_pipeline.py.
+integration is covered in tests/test_cogvideox_pipeline.py.
 """
 
 from __future__ import annotations
@@ -16,6 +16,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from manga_animation.cogvideox.client import CogVideoXClient
+from manga_animation.cogvideox.mask import merge_motion_masks
+from manga_animation.cogvideox.prompt import build_animation_prompt, motion_phrase
+from manga_animation.cogvideox.spec import CogVideoXSpec
 from manga_animation.pipeline.types import ObjectDescriptionResult
 from manga_animation.schemas.animation_plan import (
     MotionSpec,
@@ -23,10 +27,6 @@ from manga_animation.schemas.animation_plan import (
     ObjectPlan,
     TransformKind,
 )
-from manga_animation.wan2.client import Wan2Client
-from manga_animation.wan2.mask import merge_motion_masks
-from manga_animation.wan2.prompt import build_animation_prompt, motion_phrase
-from manga_animation.wan2.spec import Wan2Spec
 
 
 def _description(
@@ -79,45 +79,45 @@ def _object_plan(object_id: str, motion_type: MotionType = MotionType.SECONDARY)
 
 
 def test_spec_round_trips_through_json(tmp_path: Path):
-    spec = Wan2Spec(
+    spec = CogVideoXSpec(
         image_path="/tmp/img.png",
         prompt="the speed lines flowing",
         output_dir="/tmp/out",
         checkpoint_path="/tmp/ckpt",
-        num_frames=121,
-        fps=24,
+        num_frames=49,
+        fps=8,
         seed=7,
     )
     path = tmp_path / "spec.json"
     spec.to_json_file(path)
-    loaded = Wan2Spec.from_json_file(path)
+    loaded = CogVideoXSpec.from_json_file(path)
     assert loaded == spec
-    assert loaded.fps == 24
-    assert loaded.num_frames == 121
+    assert loaded.fps == 8
+    assert loaded.num_frames == 49
 
 
 def test_spec_defaults_match_the_models_native_output():
-    spec = Wan2Spec(
+    spec = CogVideoXSpec(
         image_path="i", prompt="p", output_dir="o", checkpoint_path="c"
     )
-    assert (spec.num_frames, spec.fps) == (121, 24)  # 5s native clip @ 720P
+    assert (spec.num_frames, spec.fps) == (49, 8)  # 6s native clip @ 720x480
 
 
 def test_spec_as_manifest_is_json_safe_and_basename_only():
-    spec = Wan2Spec(
+    spec = CogVideoXSpec(
         image_path="/a/b/c.png",
         prompt="x",
         output_dir="/a/b/o",
-        checkpoint_path="/kaggle/working/models/Wan2.2-TI2V-5B",
+        checkpoint_path="/kaggle/working/models/CogVideoX-5B-I2V",
     )
     manifest = spec.as_manifest()
     assert manifest["image_path"] == "c.png"
-    assert manifest["checkpoint_path"] == "Wan2.2-TI2V-5B"
+    assert manifest["checkpoint_path"] == "CogVideoX-5B-I2V"
     assert "/" not in manifest["checkpoint_path"]
 
 
 # -------------------------------------------------------------------------------------
-# Prompt builder (Qwen descriptions -> Wan2.2 prompt)
+# Prompt builder (Qwen descriptions -> CogVideoX prompt)
 # -------------------------------------------------------------------------------------
 
 
@@ -230,7 +230,7 @@ def fake_worker(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def fake_checkpoint(tmp_path: Path) -> Path:
-    ckpt = tmp_path / "Wan2.2-TI2V-5B"
+    ckpt = tmp_path / "CogVideoX-5B-I2V"
     for sub in ("transformer", "vae", "tokenizer", "text_encoder"):
         (ckpt / sub).mkdir(parents=True, exist_ok=True)
     return ckpt
@@ -239,13 +239,13 @@ def fake_checkpoint(tmp_path: Path) -> Path:
 def test_client_animate_writes_spec_inputs_and_reads_frames(
     fake_worker: Path, fake_checkpoint: Path, tmp_path: Path
 ):
-    client = Wan2Client(
+    client = CogVideoXClient(
         source=str(fake_checkpoint),
         python_bin=sys.executable,
         worker_script=fake_worker,
         device="cpu",
         num_frames=4,
-        fps=24,
+        fps=8,
     )
     client.load()
     image = np.full((32, 32, 3), 200, dtype=np.uint8)
@@ -253,7 +253,7 @@ def test_client_animate_writes_spec_inputs_and_reads_frames(
     mask[:16, :16] = 255
     frames = client.animate(image, mask, "the character flowing", tmp_path / "out")
 
-    assert frames.fps == 24
+    assert frames.fps == 8
     assert len(frames.frames) == 4
     assert all(f.shape == (16, 16, 3) for f in frames.frames)
 
@@ -264,7 +264,7 @@ def test_client_animate_writes_spec_inputs_and_reads_frames(
 
 
 def test_client_load_raises_on_missing_worker_env(fake_checkpoint: Path):
-    client = Wan2Client(
+    client = CogVideoXClient(
         source=str(fake_checkpoint),
         python_bin="/nonexistent/python",
         worker_script="/nonexistent/worker.py",
@@ -279,7 +279,7 @@ def test_client_animate_fails_closed_on_worker_error(
 ):
     bad_worker = tmp_path / "bad_worker.py"
     bad_worker.write_text("import sys; sys.exit(1)\n")
-    client = Wan2Client(
+    client = CogVideoXClient(
         source=str(fake_checkpoint),
         python_bin=sys.executable,
         worker_script=bad_worker,
