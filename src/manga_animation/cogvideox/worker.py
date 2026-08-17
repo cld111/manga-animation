@@ -89,14 +89,14 @@ def _generate(
         torch_dtype=dtype,
     )
 
-    # Move to device with memory optimizations
-    pipe.to(device)
+    # Memory optimizations — do NOT call pipe.to(device) first, it OOMs on T4.
+    # enable_sequential_cpu_offload moves each module to GPU only when needed.
     pipe.enable_sequential_cpu_offload()
     pipe.vae.enable_tiling()
     pipe.vae.enable_slicing()
 
-    # Set up generator for reproducibility
-    generator = torch.Generator(device=device).manual_seed(seed)
+    # Set up generator for reproducibility (CPU — model uses CPU offload)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
 
     # Run inference in I2V mode
     with torch.no_grad():
