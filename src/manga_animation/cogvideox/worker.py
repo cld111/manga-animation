@@ -93,9 +93,6 @@ def _generate(
     pipe.enable_model_cpu_offload()
     pipe.vae.enable_tiling()
     pipe.vae.enable_slicing()
-    # Also enable text encoder CPU offload to save GPU memory
-    if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
-        pipe.text_encoder.enable_cpu_offload()
 
     # Set up generator for reproducibility (CPU — model uses CPU offload)
     generator = torch.Generator(device="cpu").manual_seed(seed)
