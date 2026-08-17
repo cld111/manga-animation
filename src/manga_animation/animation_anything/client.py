@@ -149,6 +149,11 @@ class AnimateAnythingClient:
                 check=False,
             )
         if result.returncode != 0:
+            logger.error(
+                "animation_anything: worker failed rc=%d stderr=%s",
+                result.returncode,
+                (result.stderr or "")[-2000:],
+            )
             raise subprocess.CalledProcessError(
                 result.returncode,
                 [self.python_bin, self.worker_script],

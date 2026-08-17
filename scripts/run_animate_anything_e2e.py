@@ -165,25 +165,17 @@ def main() -> None:
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     except ImportError:
         n_gpus = 0
-    # Qwen pool: ONE instance per GPU (ADR 0023) so the description stage splits panels
-    # between the cards. DINO/SAM are stage-owned and small; they share the last card with
-    # one Qwen instance. AnimateAnything runs as an isolated worker on a DEDICATED GPU
-    # (the last card) so its ~2 GiB fp16 model never competes with the resident Qwen for
-    # VRAM -- the first GPU stays Qwen-only (this was a real OOM in the first run).
-    qwen_devices = [f"cuda:{i}" for i in range(max(1, n_gpus))]
-    qwen: CountingVLM | list[CountingVLM] = CountingVLM(
+    # Device split (two cards): Qwen3-VL-4B fp16 (~8.5 GiB) runs as ONE instance on GPU 0,
+    # and the AnimateAnything worker gets GPU 1 DEDICATED (its fp16 model is another ~2 GiB
+    # with the CLIP text encoder). DINO/SAM are stage-owned and small; they share GPU 0.
+    # Running Qwen on both cards would put a resident 8.5 GiB model on the AA card and OOM
+    # the generative worker (real run) -- Qwen stays single-card here.
+    qwen_device = "cuda:0" if n_gpus else "cpu"
+    qwen: CountingVLM = CountingVLM(
         Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096,
-                      device=qwen_devices[0])
+                      device=qwen_device)
     )
-    if len(qwen_devices) > 1:
-        qwen = [
-            CountingVLM(
-                Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096,
-                              device=d)
-            )
-            for d in qwen_devices
-        ]
-    aux_device = "cuda:1" if n_gpus > 1 else ("cuda:0" if n_gpus == 1 else "cpu")
+    aux_device = "cuda:0" if n_gpus else "cpu"
     aa_device = "cuda:1" if n_gpus > 1 else ("cuda:0" if n_gpus == 1 else "cpu")
     dino = GroundingDinoClient(source=args.dino, device=aux_device, dtype="float32")
     sam = Sam21Client(source=args.sam, device=aux_device, dtype="float32")
@@ -205,7 +197,7 @@ def main() -> None:
         "timestamp": datetime.now(UTC).isoformat(),
         "pages": [],
         "animation_engine": "animate-anything-512-v1.02",
-        "vlm_instances": len(qwen) if isinstance(qwen, list) else 1,
+        "vlm_instances": 1,
         "aa_device": aa_device,
         "vlm_calls": 0,
     }
@@ -233,8 +225,7 @@ def main() -> None:
             report["pages"].append(page_entry)
             print(json.dumps(page_entry, indent=1), flush=True)
     finally:
-        qwen_clients = qwen if isinstance(qwen, list) else [qwen]
-        for client in (*qwen_clients, dino, sam, aa):
+        for client in (qwen, dino, sam, aa):
             unload = getattr(client, "unload", None)
             if callable(unload):
                 try:
@@ -243,9 +234,7 @@ def main() -> None:
                     pass
 
     report["elapsed_s"] = round(time.perf_counter() - started, 1)
-    report["vlm_calls"] = (
-        sum(c.call_count for c in qwen) if isinstance(qwen, list) else qwen.call_count
-    )
+    report["vlm_calls"] = qwen.call_count
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"wrote {args.out}")
 
