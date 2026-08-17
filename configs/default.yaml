@@ -12,22 +12,21 @@ model_variants:
   grounding: grounding-dino-swin-l
   segmentation: sam2.1-hiera-base
   inpainting: lama-large
-  animation: animate-anything-512-v1.02
+  animation: wan2.2-ti2v-5b
 
 resolution: 1536 # max VLM analysis long-edge resolution, px
 fps: 24
 duration_s: 4.0 # ~3-5s seamless loop, per the project goal
 
-# AnimateAnything generative animation engine (ADR 0024): the model's native output is a
-# 16-frame @ 8 fps clip (~2 s), which the pipeline renders as-is. `animation_*` are the
-# hyper-parameters passed to the isolated worker; `model_variants.animation` selects the
-# engine (passing `AnimateAnythingClient`s to run_pages activates it). `animation_motion_strength`
-# is deliberately LOW so the generated motion is gentle ("minimum visually justified motion").
-animation_fps: 8
-animation_num_frames: 16
-animation_num_inference_steps: 25
-animation_guidance_scale: 9.0
-animation_motion_strength: 1.0
+# Wan2.2-TI2V-5B generative animation engine (ADR 0024): the model's native output is a
+# 121-frame @ 24 fps clip (~5s) at 720P, which the pipeline renders as-is.
+# `animation_*` are the hyper-parameters passed to the isolated worker;
+# `model_variants.animation` selects the engine (passing `Wan2Client`s to run_pages
+# activates it).
+animation_fps: 24
+animation_num_frames: 121
+animation_num_inference_steps: 50
+animation_guidance_scale: 5.0
 
 output_codec: h264
 seed: 42

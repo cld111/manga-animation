@@ -42,11 +42,6 @@ from PIL import Image
 
 from manga_animation.analysis import VLMClient, detect_panels
 from manga_animation.analysis.panels import derive_scene_crop_bbox
-from manga_animation.animation_anything import (
-    AnimateAnythingClient,
-    build_animation_prompt,
-    merge_motion_masks,
-)
 from manga_animation.core.config import PipelineConfig
 from manga_animation.core.logging import get_logger
 from manga_animation.grounding import GroundingClient
@@ -89,6 +84,11 @@ from manga_animation.reconstruction import ReconstructionClient
 from manga_animation.rendering import render
 from manga_animation.schemas.animation_plan import AnimationPlan, ObjectPlan
 from manga_animation.segmentation import SegmentationClient
+from manga_animation.wan2 import (
+    Wan2Client,
+    build_animation_prompt,
+    merge_motion_masks,
+)
 
 logger = get_logger(__name__)
 
@@ -598,17 +598,17 @@ def _pipeline_stage_render(token: _PanelPipelineToken, config: PipelineConfig) -
     return True
 
 
-def _pipeline_stage_plan_animate_anything(
+def _pipeline_stage_plan_wan2(
     token: _PanelPipelineToken,
     config: PipelineConfig,
-    animation_client: AnimateAnythingClient,
+    animation_client: Wan2Client,
 ) -> bool:
-    """Generative animation for this panel (stage 3, AnimateAnything engine).
+    """Generative animation for this panel (stage 3, Wan2.2 engine).
 
     Replaces the deterministic plan/animate/reconstruct stage: the accepted SAM masks are
     merged into one motion mask, the accepted Qwen descriptions are composed into one prompt,
-    and AnimateAnything generates the panel's frame sequence directly from (image, mask,
-    prompt). No LaMa reconstruction and no per-object compositing exist in this engine -- the
+    and Wan2.2-TI2V-5B generates the panel's frame sequence directly from (image, prompt).
+    No LaMa reconstruction and no per-object compositing exist in this engine -- the
     generative model produces the whole frame sequence. Fail-closed semantics are unchanged:
     `_build_plan` still rejects a panel with no accepted candidate (REJECTED) and isolates an
     unexpected failure to its panel (ERROR).
@@ -646,7 +646,7 @@ def _pipeline_stage_plan_animate_anything(
             state.crops[panel_id],
             motion_mask,
             prompt,
-            state.page_dir / "animate_anything" / panel_id,
+            state.page_dir / "wan2" / panel_id,
         )
         state.plans_by_panel[panel_id] = plan
         state.animated_by_panel[panel_id] = animated_objects
@@ -661,10 +661,10 @@ def _pipeline_stage_plan_animate_anything(
     return True
 
 
-def _pipeline_stage_render_animate_anything(
+def _pipeline_stage_render_wan2(
     token: _PanelPipelineToken, config: PipelineConfig
 ) -> bool:
-    """Render the AnimateAnything-generated frame sequence to H.264, update status, and
+    """Render the Wan2.2-generated frame sequence to H.264, update status, and
     re-write the manifest (stage 4, CPU). No compositing -- the frames are final."""
     state, panel = token.state, token.panel
     panel_id = panel.panel_id
@@ -764,7 +764,7 @@ def _run_panel_pipeline(
     vlm_client: VLMClient | Sequence[VLMClient],
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient | None,
-    animation_clients: Sequence[AnimateAnythingClient] | None,
+    animation_clients: Sequence[Wan2Client] | None,
     need_dino: bool,
     need_qwen: bool,
     need_sam: bool,
@@ -782,32 +782,32 @@ def _run_panel_pipeline(
     per-panel stage function, and checkpoints are written per panel.
 
     The ANIMATION ENGINE is config-selected: with a live `animation_clients` pool (one
-    `AnimateAnythingClient` per GPU), stage 3 is the generative AnimateAnything engine
-    (image + merged SAM motion mask + Qwen-description prompt -> frames, no LaMa, no
-    compositing), ALSO as a worker pool -- one worker per AA client, panels split between
-    the GPUs. Otherwise it is the deterministic plan/animate/reconstruct engine. Both
-    engines keep the same fail-closed per-panel semantics and the same render stage output.
+    `Wan2Client` per GPU), stage 3 is the generative Wan2.2 engine
+    (image + prompt -> frames, no LaMa, no compositing), ALSO as a worker pool -- one worker
+    per client, panels split between the GPUs. Otherwise it is the deterministic
+    plan/animate/reconstruct engine. Both engines keep the same fail-closed per-panel
+    semantics and the same render stage output.
 
     `stop_after_segmentation=True` runs ONLY stages 0-2 (grounding -> description ->
     segmentation), persists their checkpoints, and returns WITHOUT animation/rendering --
-    the "Qwen phase" of the two-phase AnimateAnything run: Qwen3-VL (one instance per GPU)
+    the "Qwen phase" of the two-phase Wan2.2 run: Qwen3-VL (one instance per GPU)
     processes the WHOLE dataset and writes `grounding.json`/`descriptions.json`/
     `segmentation.json`, then is released; a second `run_pages` call then restores those
-    checkpoints and runs ONLY the AA phase (no DINO/Qwen/SAM load), so the two heavy models
-    never share a GPU. See docs/decisions/0024.
+    checkpoints and runs ONLY the Wan2.2 phase (no DINO/Qwen/SAM load), so the two heavy
+    models never share a GPU. See docs/decisions/0024.
 
     Memory split (Phase 22): the VLM instances are run-level resident (ADR 0021); the
     smaller models (DINO/SAM/LaMa) are stage-owned -- loaded when their worker starts,
     unloaded when it finishes -- so a full int8 Qwen + KV cache + prefill is not joined by
     2.6 GiB of permanently resident small models on the same card (a real OOM otherwise).
-    The AnimateAnything client is subprocess-backed (no resident GPU footprint in this
+    The Wan2.2 client is subprocess-backed (no resident GPU footprint in this
     process), so it is stage-owned like the other small models.
     """
     vlm_clients = list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
     n_desc = len(vlm_clients)
-    aa_clients = list(animation_clients) if animation_clients is not None else []
-    n_aa = len(aa_clients)
-    use_animate_anything = n_aa > 0
+    wan2_clients = list(animation_clients) if animation_clients is not None else []
+    n_wan2 = len(wan2_clients)
+    use_wan2 = n_wan2 > 0
     q_ground: Queue = Queue(maxsize=8)
     q_desc: Queue = Queue(maxsize=8)
     q_seg: Queue = Queue(maxsize=8)
@@ -817,21 +817,22 @@ def _run_panel_pipeline(
     persist_lock = Lock()
 
     if stop_after_segmentation:
-        # Two-phase AA run, Qwen phase: only stages 0-2 build. No animation/render stage is
-        # constructed, so neither an AA pool nor a reconstruction client is required here.
+        # Two-phase Wan2.2 run, Qwen phase: only stages 0-2 build. No animation/render
+        # stage is constructed, so neither a Wan2.2 pool nor a reconstruction client is
+        # required here.
         plan_stage = None
         render_stage = None
         stage3_owned: object | None = None
         stage3_name = "none"
-    elif use_animate_anything:
+    elif use_wan2:
         plan_stage = partial(
-            _pipeline_stage_plan_animate_anything,
+            _pipeline_stage_plan_wan2,
             config=config,
-            animation_client=aa_clients[0],
+            animation_client=wan2_clients[0],
         )
-        render_stage = partial(_pipeline_stage_render_animate_anything, config=config)
-        stage3_owned = aa_clients[0]
-        stage3_name = "animation_anything"
+        render_stage = partial(_pipeline_stage_render_wan2, config=config)
+        stage3_owned = wan2_clients[0]
+        stage3_name = "wan2"
     else:
         assert reconstruction_client is not None
         plan_stage = partial(
@@ -889,10 +890,10 @@ def _run_panel_pipeline(
         )
     # The segmentation worker feeds either the plan stage (full run) or, when
     # `stop_after_segmentation`, a sink queue the workers ignore. It must emit one sentinel
-    # per downstream consumer (n_aa when the AA pool follows, else 1 for the single plan
+    # per downstream consumer (n_wan2 when the AA pool follows, else 1 for the single plan
     # worker).
     seg_out = q_plan
-    seg_end_sent = n_aa if use_animate_anything else 1
+    seg_end_sent = n_wan2 if use_wan2 else 1
     seg_stage = 3 if stop_after_segmentation else 2
     workers.extend(
         [
@@ -920,10 +921,11 @@ def _run_panel_pipeline(
         ]
     )
     if not stop_after_segmentation:
-        if use_animate_anything:
-            # AA stage 3 is a WORKER POOL: one worker per AA client (one per GPU). The
-            # segmentation worker sent n_aa sentinels; each pool worker terminates on its own.
-            for index, aa_client in enumerate(aa_clients):
+        if use_wan2:
+            # Wan2 stage 3 is a WORKER POOL: one worker per client (one per GPU). The
+            # segmentation worker sent n_wan2 sentinels; each pool worker terminates on its
+            # own.
+            for index, wan2_client in enumerate(wan2_clients):
                 workers.append(
                     Thread(
                         target=_pipeline_worker,
@@ -932,19 +934,19 @@ def _run_panel_pipeline(
                             q_render,
                             3,
                             partial(
-                                _pipeline_stage_plan_animate_anything,
+                                _pipeline_stage_plan_wan2,
                                 config=config,
-                                animation_client=aa_client,
+                                animation_client=wan2_client,
                             ),
                             errors,
                         ),
                         kwargs={
                             "end_expected": 1,
                             "end_sent": 1,
-                            "owned_client": aa_client,
-                            "owned_name": "animation_anything",
+                            "owned_client": wan2_client,
+                            "owned_name": "wan2",
                         },
-                        name=f"pipeline-animate-anything-{index}",
+                        name=f"pipeline-wan2-{index}",
                         daemon=True,
                     )
                 )
@@ -978,7 +980,7 @@ def _run_panel_pipeline(
                     errors,
                 ),
                 kwargs={
-                    "end_expected": n_aa if use_animate_anything else 1,
+                    "end_expected": n_wan2 if use_wan2 else 1,
                     "owned_client": None,
                     "owned_name": "render",
                 },
@@ -1019,7 +1021,7 @@ def run_pages(
     grounding_client: GroundingClient,
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient | None = None,
-    animation_clients: Sequence[AnimateAnythingClient] | None = None,
+    animation_clients: Sequence[Wan2Client] | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
     stop_after_segmentation: bool = False,
@@ -1035,16 +1037,16 @@ def run_pages(
     accepts ONE VLM client OR a pool of them (Phase 22, ADR 0023): one Qwen instance per
     GPU, all consuming the shared panel queue, so panels are split across the GPUs.
 
-    The ANIMATION stage also accepts a POOL of `AnimateAnythingClient`s (one per GPU): stage
+    The ANIMATION stage also accepts a POOL of `Wan2Client`s (one per GPU): stage
     3 then runs as a worker pool like the description stage, splitting panels between the
     cards (ADR 0024). Pass `None` to keep the deterministic plan/animate/reconstruct engine.
 
-    Two-phase AnimateAnything runs (ADR 0024): call `run_pages` first with
+    Two-phase Wan2.2 runs (ADR 0024): call `run_pages` first with
     `stop_after_segmentation=True` -- ONLY stages 0-2 (grounding -> description ->
     segmentation) run and persist their checkpoints, with Qwen3-VL one instance per GPU
     processing the whole dataset; then call `run_pages` AGAIN with `animation_clients` set
-    -- the restored checkpoints skip DINO/Qwen/SAM entirely and only the AA pool animates.
-    The two heavy models never share a card.
+    -- the restored checkpoints skip DINO/Qwen/SAM entirely and only the Wan2.2 pool
+    animates. The two heavy models never share a card.
 
     Resume is per-panel (Phase 18.4 persistence): a panel whose checkpoint entry exists for
     a stage skips that stage -- and its model is never loaded if NO panel needs it -- so a
@@ -1125,7 +1127,7 @@ def run_pages(
         # 21, ADR 0022). No stage barrier: each panel moves forward as soon as the
         # previous stage produced its result. The description stage is a worker pool of
         # one int8 Qwen per GPU (Phase 22, ADR 0023). The animation engine is
-        # config-selected: AnimateAnything when `animation_client` is provided, otherwise
+        # config-selected: Wan2.2 when `animation_client` is provided, otherwise
         # the deterministic plan/animate/reconstruct engine.
         # ---------------------------------------------------------------------------------
         _run_panel_pipeline(
@@ -1164,7 +1166,7 @@ def run_page_panels(
     grounding_client: GroundingClient,
     segmentation_client: SegmentationClient,
     reconstruction_client: ReconstructionClient | None = None,
-    animation_clients: Sequence[AnimateAnythingClient] | None = None,
+    animation_clients: Sequence[Wan2Client] | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
     stop_after_segmentation: bool = False,

@@ -1,10 +1,10 @@
-"""Pipeline integration tests for the AnimateAnything generative animation engine (ADR 0024).
+"""Pipeline integration tests for the Wan2.2-TI2V-5B generative animation engine (ADR 0024).
 
-These prove the wiring contract locally with fake model clients (including a fake AA client
+These prove the wiring contract locally with fake model clients (including a fake Wan2 client
 that returns deterministic frames) -- real diffusion inference is remote-GPU work and never
-runs in tests. The determinism of the fake AA client means these also verify that the AA
-pipeline path produces a PASS panel with a real playable MP4, that the motion mask and prompt
-reach the animation engine, and that fail-closed semantics are unchanged.
+runs in tests. The determinism of the fake Wan2 client means these also verify that the Wan2
+pipeline path produces a PASS panel with a real playable MP4, that the prompt reaches the
+animation engine, and that fail-closed semantics are unchanged.
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ requires_ffmpeg = pytest.mark.skipif(
 # --- fakes (mirror the style of test_pipeline.py's fakes) ---------------------------------
 
 
-class FakeAA:
-    """Fake AnimateAnything client: returns deterministic frames and records what it saw."""
+class FakeWan2:
+    """Fake Wan2.2 client: returns deterministic frames and records what it saw."""
 
-    model_id = "animate-anything-512-v1.02"
+    model_id = "wan2.2-ti2v-5b"
 
-    def __init__(self, num_frames: int = 4, fps: int = 8):
+    def __init__(self, num_frames: int = 4, fps: int = 24):
         self.num_frames = num_frames
         self.fps = fps
         self.calls: list[dict] = []
@@ -154,16 +154,16 @@ def page_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def config() -> PipelineConfig:
-    cfg = PipelineConfig(duration_s=0.5, fps=8)
-    cfg.model_variants["animation"] = "animate-anything-512-v1.02"
+    cfg = PipelineConfig(duration_s=0.5, fps=24)
+    cfg.model_variants["animation"] = "wan2.2-ti2v-5b"
     return cfg
 
 
 @requires_ffmpeg
-def test_aa_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
-    """The AA engine replaces plan/animate/reconstruct + compositing: the fake AA client's
-    frames are rendered directly into a real playable MP4, and the panel is PASS."""
-    aa = FakeAA()
+def test_wan2_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
+    """The Wan2 engine replaces plan/animate/reconstruct + compositing: the fake Wan2
+    client's frames are rendered directly into a real playable MP4, and the panel is PASS."""
+    wan2 = FakeWan2()
     vlm = BatchVLM()
     result = run_page_panels(
         page_path,
@@ -172,26 +172,25 @@ def test_aa_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[aa],
+        animation_clients=[wan2],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
-    assert len(aa.calls) == 1  # exactly one generative call for the one panel
+    assert len(wan2.calls) == 1  # exactly one generative call for the one panel
     assert result.panels[0].status == "PASS"
     assert result.panels[0].output_video is not None
     assert result.panels[0].output_video.exists()
-    # No LaMa client was required on the AA path (reconstruction_client=None).
-    assert aa.loaded and aa.unloaded
+    # No LaMa client was required on the Wan2 path (reconstruction_client=None).
+    assert wan2.loaded and wan2.unloaded
 
 
 @requires_ffmpeg
-def test_aa_engine_receives_panel_image_merged_mask_and_prompt(
+def test_wan2_engine_receives_panel_image_and_prompt(
     page_path: Path, config, tmp_path: Path
 ):
-    """The generative engine's input contract: the ORIGINAL panel crop, the merged SAM motion
-    mask (union of accepted masks, 0/255), and the prompt built from the accepted Qwen
-    description."""
-    aa = FakeAA()
+    """The generative engine's input contract: the ORIGINAL panel crop and the prompt
+    built from the accepted Qwen description."""
+    wan2 = FakeWan2()
     result = run_page_panels(
         page_path,
         config,
@@ -199,12 +198,12 @@ def test_aa_engine_receives_panel_image_merged_mask_and_prompt(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[aa],
+        animation_clients=[wan2],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert result.panels[0].status == "PASS"
-    call = aa.calls[0]
+    call = wan2.calls[0]
     # image_shape is the panel crop (full page here since one panel fills it).
     assert call["image_shape"][:2] == (160, 120)
     assert call["mask_shape"][:2] == (160, 120)
@@ -213,8 +212,10 @@ def test_aa_engine_receives_panel_image_merged_mask_and_prompt(
     assert "flowing" in call["prompt"]  # motion phrase from the mapped transform kind
 
 
-def test_aa_engine_requires_animation_client_when_selected(page_path: Path, config, tmp_path: Path):
-    """The AA engine is only active when an animation_client is passed; without it, the
+def test_wan2_engine_requires_animation_client_when_selected(
+    page_path: Path, config, tmp_path: Path
+):
+    """The Wan2 engine is only active when an animation_client is passed; without it, the
     deterministic engine's reconstruction_client is required (fail closed on misuse)."""
     with pytest.raises(AssertionError):
         run_page_panels(
@@ -231,8 +232,10 @@ def test_aa_engine_requires_animation_client_when_selected(page_path: Path, conf
 
 
 @requires_ffmpeg
-def test_aa_engine_fails_closed_on_empty_acceptance(page_path: Path, config, tmp_path: Path):
-    """A panel with no accepted candidate is REJECTED even on the AA path (the generative
+def test_wan2_engine_fails_closed_on_empty_acceptance(
+    page_path: Path, config, tmp_path: Path
+):
+    """A panel with no accepted candidate is REJECTED even on the Wan2 path (the generative
     engine never animates an unvalidated panel)."""
 
     class RejectingVLM(BatchVLM):
@@ -263,7 +266,7 @@ def test_aa_engine_fails_closed_on_empty_acceptance(page_path: Path, config, tmp
                 )
             return json.dumps(entries)
 
-    aa = FakeAA()
+    wan2 = FakeWan2()
     result = run_page_panels(
         page_path,
         config,
@@ -271,22 +274,22 @@ def test_aa_engine_fails_closed_on_empty_acceptance(page_path: Path, config, tmp
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[aa],
+        animation_clients=[wan2],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert result.panels[0].status == "REJECTED"
-    assert len(aa.calls) == 0  # the generative engine never ran
+    assert len(wan2.calls) == 0  # the generative engine never ran
 
 
 @requires_ffmpeg
-def test_aa_two_phase_run_restores_checkpoints_and_animates(
+def test_wan2_two_phase_run_restores_checkpoints_and_animates(
     page_path: Path, config, tmp_path: Path
 ):
     """ADR 0024 two-phase run: phase 1 (`stop_after_segmentation=True`) runs only
     grounding/description/segmentation with Qwen and persists checkpoints; phase 2 re-runs
-    `run_page_panels` with the AA pool -- the restored checkpoints skip DINO/Qwen/SAM and the
-    AA engine animates the accepted panel. The AA pool here is a single fake client."""
+    `run_page_panels` with the Wan2 pool -- the restored checkpoints skip DINO/Qwen/SAM and
+    the Wan2 engine animates the accepted panel. The Wan2 pool here is a single fake client."""
     vlm = BatchVLM()
     phase1 = run_page_panels(
         page_path,
@@ -303,7 +306,7 @@ def test_aa_two_phase_run_restores_checkpoints_and_animates(
     assert vlm.call_count == 1  # Qwen phase described the panel
     assert phase1.panels[0].status != "PASS"  # not rendered yet (status may be ERROR)
 
-    aa = FakeAA()
+    wan2 = FakeWan2()
     phase2 = run_page_panels(
         page_path,
         config,
@@ -311,25 +314,24 @@ def test_aa_two_phase_run_restores_checkpoints_and_animates(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[aa],
+        animation_clients=[wan2],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert phase2.panels[0].status == "PASS"
-    assert len(aa.calls) == 1  # AA phase animated the accepted panel
+    assert len(wan2.calls) == 1  # Wan2 phase animated the accepted panel
     # The checkpoints exist on disk.
     assert (tmp_path / "out" / "page" / "grounding.json").exists()
     assert (tmp_path / "out" / "page" / "descriptions.json").exists()
     assert (tmp_path / "out" / "page" / "segmentation.json").exists()
 
 
-def test_aa_pool_splits_panels_between_clients(page_path: Path, config, tmp_path: Path):
-    """The AA stage runs as a worker pool (one worker per AnimateAnythingClient): with two
+def test_wan2_pool_splits_panels_between_clients(
+    page_path: Path, config, tmp_path: Path
+):
+    """The Wan2 stage runs as a worker pool (one worker per Wan2Client): with two
     fake clients, panels are split between them rather than serialized by one global lock."""
     # A two-panel page so both pool workers see work.
-    import numpy as np
-    from PIL import Image as PILImage
-
     def noise_block(h: int, w: int, seed: int) -> np.ndarray:
         r = np.random.default_rng(seed)
         return r.integers(0, 255, size=(h, w, 3), dtype=np.uint8)
@@ -338,9 +340,9 @@ def test_aa_pool_splits_panels_between_clients(page_path: Path, config, tmp_path
     two[0:300, 0:300] = noise_block(300, 300, seed=21)
     two[500:900, 0:300] = noise_block(400, 300, seed=22)
     two_path = tmp_path / "two_panel.png"
-    PILImage.fromarray(two).save(two_path)
+    Image.fromarray(two).save(two_path)
 
-    aa_a, aa_b = FakeAA(), FakeAA()
+    wan2_a, wan2_b = FakeWan2(), FakeWan2()
     result = run_page_panels(
         two_path,
         config,
@@ -348,10 +350,10 @@ def test_aa_pool_splits_panels_between_clients(page_path: Path, config, tmp_path
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_clients=[aa_a, aa_b],
+        animation_clients=[wan2_a, wan2_b],
         out_dir=tmp_path / "out2",
         labels=["speed_lines"],
     )
-    total_calls = len(aa_a.calls) + len(aa_b.calls)
+    total_calls = len(wan2_a.calls) + len(wan2_b.calls)
     assert total_calls >= 1  # at least the accepted panel(s) animated
     assert all(p.status == "PASS" for p in result.panels)

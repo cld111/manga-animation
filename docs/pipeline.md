@@ -33,11 +33,11 @@ Precise segmentation            — src/manga_animation/segmentation
 Post-segmentation safety gates  — segmentation/orchestration boundary
     │  mask shape and cross-object overlap checks
     ▼
-Animation engine (config-selected) — src/manga_animation/animation_anything OR
-    │  animation        • AnimateAnything (ADR 0024, model_variants.animation):
-    │                     original panel image + merged SAM motion mask + prompt
-    │                     built from the accepted Qwen descriptions -> generated
-    │                     frame sequence (isolated subprocess, pinned model env).
+Animation engine (config-selected) — src/manga_animation/wan2 OR
+    │  animation        • Wan2.2-TI2V-5B (ADR 0024, model_variants.animation):
+    │                     original panel image + prompt built from the accepted Qwen
+    │                     descriptions -> generated frame sequence via I2V mode
+    │                     (isolated subprocess, pinned model env).
     │                   • Deterministic CV (the original engine): apply MotionSpec
     │                     transforms locally to per-object masks.
     ▼
@@ -89,21 +89,21 @@ pipeline boundaries, not independent model stages.
 
 ## Animation Engine Selection (ADR 0024)
 
-The animation stage is config-selected. `model_variants.animation = animate-anything-512-v1.02`
-registers AnimateAnything as the generative animation engine; the engine is ACTIVATED by
-passing an `AnimateAnythingClient` to `run_pages`/`run_page_panels` (it needs the worker-side
+The animation stage is config-selected. `model_variants.animation = wan2.2-ti2v-5b`
+registers Wan2.2-TI2V-5B as the generative animation engine; the engine is ACTIVATED by
+passing a `Wan2Client` to `run_pages`/`run_page_panels` (it needs the worker-side
 checkpoint path and isolated interpreter, which are not buildable from config alone). When
-active, stage 3 is the generative engine: `(original panel crop, merged SAM motion mask,
-prompt from the accepted Qwen descriptions) -> FrameSequence`, rendered directly by stage 4.
-No LaMa reconstruction, no per-object CV transforms, and no compositing run on this path --
-the model produces the whole frame sequence. When no `animation_client` is passed, the
-deterministic plan/animate/reconstruct + compositing engine runs unchanged.
+active, stage 3 is the generative engine: `(original panel crop,
+prompt from the accepted Qwen descriptions) -> FrameSequence` via I2V mode, rendered directly
+by stage 4. No LaMa reconstruction, no per-object CV transforms, and no compositing run on
+this path -- the model produces the whole frame sequence. When no `animation_client` is
+passed, the deterministic plan/animate/reconstruct + compositing engine runs unchanged.
 
-The generative engine lives in `src/manga_animation/animation_anything/`; its worker runs in
-AnimateAnything's own Python environment (pinned diffusers/transformers, which conflict with
-the project's `ml` extra -- see docs/decisions/0024). The model's native output is a 16-frame
-@ 8 fps clip, rendered as-is; loop metrics are measured and reported, not guaranteed seamless
-by construction.
+The generative engine lives in `src/manga_animation/wan2/`; its worker runs in
+Wan2.2's own Python environment (diffusers main branch, which may conflict with
+the project's `ml` extra -- see docs/decisions/0024). The model's native output is a 121-frame
+@ 24 fps clip at 720P, rendered as-is; loop metrics are measured and reported, not guaranteed
+seamless by construction.
 
 ## Stage Ownership
 
