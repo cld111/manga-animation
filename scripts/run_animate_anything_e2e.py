@@ -1,10 +1,18 @@
 """AnimateAnything end-to-end GPU run: original panel + SAM masks + Qwen descriptions -> video.
 
 Runs the production panel pipeline (`run_page_panels`) with the GENERATIVE animation engine
-(ADR 0024): grounding (DINO) -> object description (Qwen) -> segmentation (SAM) ->
-AnimateAnything (merged SAM motion mask + prompt built from the accepted Qwen descriptions ->
-frame sequence) -> render (H.264). No LaMa reconstruction and no deterministic CV animation
-are used on this path -- AnimateAnything is the ONLY animation engine here.
+(ADR 0024) in TWO PHASES so the two heavy models never share a GPU:
+
+  Phase 1 (Qwen phase): ONE Qwen3-VL-4B instance PER GPU processes the whole dataset --
+    grounding (DINO) -> object description (Qwen pool) -> segmentation (SAM) -- and persists
+    its checkpoints, then Qwen is released. `run_page_panels(stop_after_segmentation=True)`.
+  Phase 2 (AA phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and ONE
+    AnimateAnything worker per GPU animates each accepted panel from (original panel image,
+    merged SAM motion mask, prompt built from the accepted Qwen descriptions) and renders
+    H.264. `run_page_panels(animation_clients=aa_pool)`.
+
+No LaMa reconstruction and no deterministic CV animation are used -- AnimateAnything is the
+ONLY animation engine here.
 
 **Run on the Kaggle/Jupyter GPU worker, never locally** (CLAUDE.md, ADR 0003).
 
@@ -159,60 +167,84 @@ def main() -> None:
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     except ImportError:
         n_gpus = 0
-    try:
-        import torch
+    devices = [f"cuda:{i}" for i in range(max(1, n_gpus))]
 
-        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    except ImportError:
-        n_gpus = 0
-    # Device split (two cards): Qwen3-VL-4B fp16 (~8.5 GiB) runs as ONE instance on GPU 0,
-    # and the AnimateAnything worker gets GPU 1 DEDICATED (its fp16 model is another ~2 GiB
-    # with the CLIP text encoder). DINO/SAM are stage-owned and small; they share GPU 0.
-    # Running Qwen on both cards would put a resident 8.5 GiB model on the AA card and OOM
-    # the generative worker (real run) -- Qwen stays single-card here.
-    qwen_device = "cuda:0" if n_gpus else "cpu"
-    qwen: CountingVLM = CountingVLM(
-        Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096,
-                      device=qwen_device)
-    )
-    aux_device = "cuda:0" if n_gpus else "cpu"
-    aa_device = "cuda:1" if n_gpus > 1 else ("cuda:0" if n_gpus == 1 else "cpu")
+    # Two-phase AnimateAnything run (ADR 0024):
+    #   Phase 1 (Qwen phase): ONE Qwen3-VL-4B instance PER GPU processes the whole dataset
+    #     (grounding -> object description -> segmentation) and persists its checkpoints,
+    #     then Qwen is released. The description stage runs as a worker pool, panels split
+    #     between the cards.
+    #   Phase 2 (AA phase): the restored checkpoints skip DINO/Qwen/SAM entirely, and ONE
+    #     AnimateAnything worker per GPU animates the accepted panels (also a worker pool).
+    # The two heavy models therefore NEVER share a card -- this was the root OOM cause of the
+    # earlier single-card approach.
+    qwen_pool: list[CountingVLM] = [
+        CountingVLM(
+            Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096, device=d)
+        )
+        for d in devices
+    ]
+    # DINO/SAM are stage-owned and small; they live on the first card during the Qwen phase.
+    aux_device = devices[0]
     dino = GroundingDinoClient(source=args.dino, device=aux_device, dtype="float32")
     sam = Sam21Client(source=args.sam, device=aux_device, dtype="float32")
-    aa = AnimateAnythingClient(
-        source=args.aa_checkpoint,
-        python_bin=args.aa_python,
-        worker_script=_WORKER_SCRIPT,
-        device=aa_device,
-        num_frames=config.animation_num_frames,
-        fps=config.animation_fps,
-        num_inference_steps=config.animation_num_inference_steps,
-        guidance_scale=config.animation_guidance_scale,
-        motion_strength=config.animation_motion_strength,
-        seed=config.seed,
-    )
+    aa_pool: list[AnimateAnythingClient] = [
+        AnimateAnythingClient(
+            source=args.aa_checkpoint,
+            python_bin=args.aa_python,
+            worker_script=_WORKER_SCRIPT,
+            device=d,
+            num_frames=config.animation_num_frames,
+            fps=config.animation_fps,
+            num_inference_steps=config.animation_num_inference_steps,
+            guidance_scale=config.animation_guidance_scale,
+            motion_strength=config.animation_motion_strength,
+            seed=config.seed,
+        )
+        for d in devices
+    ]
 
     report: dict = {
-        "phase": "animate-anything-e2e",
+        "phase": "animate-anything-e2e-two-phase",
         "timestamp": datetime.now(UTC).isoformat(),
         "pages": [],
         "animation_engine": "animate-anything-512-v1.02",
-        "vlm_instances": 1,
-        "aa_device": aa_device,
+        "vlm_instances": len(qwen_pool),
+        "vlm_devices": devices,
+        "aa_instances": len(aa_pool),
+        "aa_devices": devices,
         "vlm_calls": 0,
     }
     started = time.perf_counter()
     try:
+        # Phase 1: Qwen pool -> grounding/description/segmentation checkpoints (no animation).
+        for page in args.pages:
+            page_path = Path(page)
+            run_page_panels(
+                page_path,
+                config,
+                vlm_client=qwen_pool,
+                grounding_client=dino,
+                segmentation_client=sam,
+                reconstruction_client=None,
+                animation_clients=None,
+                out_dir=out_dir / "videos",
+                labels=labels,
+                stop_after_segmentation=True,
+            )
+        print("phase 1 (Qwen -> checkpoints) done", flush=True)
+
+        # Phase 2: AA pool -> animate + render, resuming the persisted stages.
         for page in args.pages:
             page_path = Path(page)
             page_result = run_page_panels(
                 page_path,
                 config,
-                vlm_client=qwen,
+                vlm_client=qwen_pool,
                 grounding_client=dino,
                 segmentation_client=sam,
                 reconstruction_client=None,
-                animation_client=aa,
+                animation_clients=aa_pool,
                 out_dir=out_dir / "videos",
                 labels=labels,
             )
@@ -225,7 +257,7 @@ def main() -> None:
             report["pages"].append(page_entry)
             print(json.dumps(page_entry, indent=1), flush=True)
     finally:
-        for client in (qwen, dino, sam, aa):
+        for client in (*qwen_pool, dino, sam, *aa_pool):
             unload = getattr(client, "unload", None)
             if callable(unload):
                 try:
@@ -234,7 +266,7 @@ def main() -> None:
                     pass
 
     report["elapsed_s"] = round(time.perf_counter() - started, 1)
-    report["vlm_calls"] = qwen.call_count
+    report["vlm_calls"] = sum(c.call_count for c in qwen_pool)
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"wrote {args.out}")
 

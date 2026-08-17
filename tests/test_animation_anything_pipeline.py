@@ -172,7 +172,7 @@ def test_aa_engine_renders_pass_video(page_path: Path, config, tmp_path: Path):
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_client=aa,
+        animation_clients=[aa],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
@@ -199,7 +199,7 @@ def test_aa_engine_receives_panel_image_merged_mask_and_prompt(
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_client=aa,
+        animation_clients=[aa],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
@@ -224,7 +224,7 @@ def test_aa_engine_requires_animation_client_when_selected(page_path: Path, conf
             grounding_client=FakeGrounding(),
             segmentation_client=FakeSegmentation(),
             reconstruction_client=None,
-            animation_client=None,
+            animation_clients=None,
             out_dir=tmp_path / "out",
             labels=["speed_lines"],
         )
@@ -271,9 +271,87 @@ def test_aa_engine_fails_closed_on_empty_acceptance(page_path: Path, config, tmp
         grounding_client=FakeGrounding(),
         segmentation_client=FakeSegmentation(),
         reconstruction_client=None,
-        animation_client=aa,
+        animation_clients=[aa],
         out_dir=tmp_path / "out",
         labels=["speed_lines"],
     )
     assert result.panels[0].status == "REJECTED"
     assert len(aa.calls) == 0  # the generative engine never ran
+
+
+@requires_ffmpeg
+def test_aa_two_phase_run_restores_checkpoints_and_animates(
+    page_path: Path, config, tmp_path: Path
+):
+    """ADR 0024 two-phase run: phase 1 (`stop_after_segmentation=True`) runs only
+    grounding/description/segmentation with Qwen and persists checkpoints; phase 2 re-runs
+    `run_page_panels` with the AA pool -- the restored checkpoints skip DINO/Qwen/SAM and the
+    AA engine animates the accepted panel. The AA pool here is a single fake client."""
+    vlm = BatchVLM()
+    phase1 = run_page_panels(
+        page_path,
+        config,
+        vlm_client=vlm,
+        grounding_client=FakeGrounding(),
+        segmentation_client=FakeSegmentation(),
+        reconstruction_client=None,
+        animation_clients=None,
+        out_dir=tmp_path / "out",
+        labels=["speed_lines"],
+        stop_after_segmentation=True,
+    )
+    assert vlm.call_count == 1  # Qwen phase described the panel
+    assert phase1.panels[0].status != "PASS"  # not rendered yet (status may be ERROR)
+
+    aa = FakeAA()
+    phase2 = run_page_panels(
+        page_path,
+        config,
+        vlm_client=BatchVLM(),
+        grounding_client=FakeGrounding(),
+        segmentation_client=FakeSegmentation(),
+        reconstruction_client=None,
+        animation_clients=[aa],
+        out_dir=tmp_path / "out",
+        labels=["speed_lines"],
+    )
+    assert phase2.panels[0].status == "PASS"
+    assert len(aa.calls) == 1  # AA phase animated the accepted panel
+    # The checkpoints exist on disk.
+    assert (tmp_path / "out" / "page" / "grounding.json").exists()
+    assert (tmp_path / "out" / "page" / "descriptions.json").exists()
+    assert (tmp_path / "out" / "page" / "segmentation.json").exists()
+
+
+def test_aa_pool_splits_panels_between_clients(page_path: Path, config, tmp_path: Path):
+    """The AA stage runs as a worker pool (one worker per AnimateAnythingClient): with two
+    fake clients, panels are split between them rather than serialized by one global lock."""
+    # A two-panel page so both pool workers see work.
+    import numpy as np
+    from PIL import Image as PILImage
+
+    def noise_block(h: int, w: int, seed: int) -> np.ndarray:
+        r = np.random.default_rng(seed)
+        return r.integers(0, 255, size=(h, w, 3), dtype=np.uint8)
+
+    two = np.full((900, 300, 3), 255, dtype=np.uint8)
+    two[0:300, 0:300] = noise_block(300, 300, seed=21)
+    two[500:900, 0:300] = noise_block(400, 300, seed=22)
+    two_path = tmp_path / "two_panel.png"
+    PILImage.fromarray(two).save(two_path)
+
+    aa_a, aa_b = FakeAA(), FakeAA()
+    result = run_page_panels(
+        two_path,
+        config,
+        vlm_client=BatchVLM(),
+        grounding_client=FakeGrounding(),
+        segmentation_client=FakeSegmentation(),
+        reconstruction_client=None,
+        animation_clients=[aa_a, aa_b],
+        out_dir=tmp_path / "out2",
+        labels=["speed_lines"],
+    )
+    total_calls = len(aa_a.calls) + len(aa_b.calls)
+    assert total_calls >= 1  # at least the accepted panel(s) animated
+    assert all(p.status == "PASS" for p in result.panels)

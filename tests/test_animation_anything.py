@@ -97,7 +97,7 @@ def test_spec_round_trips_through_json(tmp_path: Path):
     loaded = AnimateAnythingSpec.from_json_file(path)
     assert loaded == spec
     assert loaded.fps == 8
-    assert loaded.motion_strength == 5.0  # default
+    assert loaded.motion_strength == 1.0  # default is deliberately slow/gentle motion
 
 
 def test_spec_defaults_match_the_models_native_output():

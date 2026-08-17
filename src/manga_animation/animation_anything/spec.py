@@ -25,7 +25,10 @@ DEFAULT_NUM_FRAMES = 16
 DEFAULT_FPS = 8
 DEFAULT_NUM_INFERENCE_STEPS = 25
 DEFAULT_GUIDANCE_SCALE = 9.0
-DEFAULT_MOTION_STRENGTH = 5.0
+# Motion strength is intentionally LOW ("slow"/gentle motion): AnimateAnything's `motion`
+# scalar scales how much the masked region moves, and a small value keeps the animation
+# subtle -- the project's "minimum visually justified motion" principle (architecture.md).
+DEFAULT_MOTION_STRENGTH = 1.0
 DEFAULT_SEED = 42
 
 
