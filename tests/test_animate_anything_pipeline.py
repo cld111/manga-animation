@@ -196,3 +196,57 @@ def test_animate_anything_path_no_sam_loaded(two_panel_page_path: Path, config, 
     # If the pipeline tried to build/load SAM we would have raised above; assert the engine
     # actually animated so this test is not vacuous.
     assert aa.calls
+
+
+def test_stop_after_description_phase_does_not_animate_then_aa_phase_does(
+    two_panel_page_path: Path, config, tmp_path: Path
+):
+    """The two-phase generative run: Phase 1 (Qwen, stop_after_description) writes grounding
+    + description checkpoints and does NOT animate; Phase 2 (AA, resume) animates the
+    accepted crops without reloading Qwen."""
+    out = tmp_path / "videos"
+
+    # Phase 1: Qwen only, no AA. No animation should happen.
+    vlm1 = FakeVLMClient()
+    grounding1 = FakeGroundingClient({"banner": (20, 20, 90, 120)})
+    aa1 = FakeAnimateAnythingClient()
+    res1 = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=vlm1,
+        grounding_client=grounding1,
+        segmentation_client=None,
+        reconstruction_client=None,
+        animation_clients=None,
+        out_dir=out,
+        labels=["banner"],
+        stop_after_description=True,
+    )
+    assert vlm1.call_count <= len(res1.panels)
+    assert aa1.calls == [], "phase 1 must not animate"
+    # Checkpoints were written so phase 2 can resume.
+    page_dir = out / two_panel_page_path.stem
+    assert (page_dir / "grounding.json").exists()
+    assert (page_dir / "descriptions.json").exists()
+
+    # Phase 2: AA animates the accepted crops; Qwen is NOT reloaded (checkpoints skipped).
+    vlm2 = FakeVLMClient()
+    grounding2 = FakeGroundingClient({"banner": (20, 20, 90, 120)})
+    aa2 = FakeAnimateAnythingClient()
+    res2 = run_page_panels(
+        two_panel_page_path,
+        config,
+        vlm_client=vlm2,
+        grounding_client=grounding2,
+        segmentation_client=None,
+        reconstruction_client=None,
+        animation_clients=[aa2],
+        out_dir=out,
+        labels=["banner"],
+    )
+    assert vlm2.call_count == 0, "phase 2 must resume descriptions, not re-run Qwen"
+    assert aa2.calls, "phase 2 must animate the accepted crops"
+    rendered = [p for p in res2.panels if p.status == "PASS"]
+    assert rendered
+    for panel in rendered:
+        assert panel.output_videos

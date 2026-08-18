@@ -786,6 +786,7 @@ def _run_panel_pipeline(
     need_dino: bool,
     need_qwen: bool,
     need_sam: bool,
+    stop_after_description: bool = False,
 ) -> None:
     """Run the five-stage concurrent panel pipeline over every eligible panel.
 
@@ -810,6 +811,13 @@ def _run_panel_pipeline(
     pool, and stage 4 renders one video per object. Otherwise it is the deterministic
     SAM + plan/animate/reconstruct engine. Both keep the same fail-closed per-panel
     semantics.
+
+    `stop_after_description=True` runs ONLY stages 0-1 (grounding -> object description),
+    persists their checkpoints, and returns WITHOUT animation -- the "Qwen phase" of the
+    two-phase generative run: Qwen3-VL processes the whole dataset and writes
+    `grounding.json`/`descriptions.json`, then is released; a second `run_pages` call then
+    restores those checkpoints and runs ONLY the AnimateAnything phase (no Qwen/DINO load),
+    so the two heavy models never share a GPU.
     """
     vlm_clients = list(vlm_client) if isinstance(vlm_client, Sequence) else [vlm_client]
     n_desc = len(vlm_clients)
@@ -847,13 +855,14 @@ def _run_panel_pipeline(
             daemon=True,
         ),
     ]
+    desc_out = None if stop_after_description else q_seg
     for index, vlm in enumerate(vlm_clients):
         workers.append(
             Thread(
                 target=_pipeline_worker,
                 args=(
                     q_desc,
-                    q_seg,
+                    desc_out,
                     1,
                     partial(
                         _pipeline_stage_description,
@@ -868,6 +877,12 @@ def _run_panel_pipeline(
                 daemon=True,
             )
         )
+
+    if stop_after_description:
+        # Qwen phase: only stages 0-1 build. No animation/render stage is constructed, so
+        # neither a AA pool nor a segmentation/reconstruction client is required here.
+        _feed_panels_and_join(workers, states, q_ground, errors)
+        return
 
     if use_aa:
         # Generative engine (2026 architecture): NO SAM segmentation. The description worker
@@ -1010,6 +1025,16 @@ def _run_panel_pipeline(
             daemon=True,
         )
     )
+    _feed_panels_and_join(workers, states, q_ground, errors)
+
+
+def _feed_panels_and_join(
+    workers: list[Thread],
+    states: list[_PageRunState],
+    q_ground: Queue,
+    errors: list[BaseException],
+) -> None:
+    """Start every worker, feed every eligible panel into the pipeline, then join."""
     for worker in workers:
         worker.start()
     try:
@@ -1046,6 +1071,7 @@ def run_pages(
     animation_clients: Sequence[AnimateAnythingClient] | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
+    stop_after_description: bool = False,
 ) -> list[PagePanelsResult]:
     """Process MANY pages through the concurrent panel pipeline (Phase 21).
 
@@ -1119,7 +1145,11 @@ def run_pages(
     need_dino = any(start == 0 for start in starts)
     need_qwen = any(start <= 1 for start in starts)
     use_aa = animation_clients is not None and len(list(animation_clients)) > 0
-    need_sam = (not use_aa) and any(start <= 2 for start in starts)
+    need_sam = (
+        (not use_aa)
+        and (not stop_after_description)
+        and any(start <= 2 for start in starts)
+    )
 
     # -------------------------------------------------------------------------------------
     # Phase 20/22 residency: the VLM instances are run-level co-resident (ADR 0021) --
@@ -1158,6 +1188,7 @@ def run_pages(
             need_dino=need_dino,
             need_qwen=need_qwen,
             need_sam=need_sam,
+            stop_after_description=stop_after_description,
         )
 
     _write_all_manifests(states)
@@ -1184,10 +1215,13 @@ def run_page_panels(
     animation_clients: Sequence[AnimateAnythingClient] | None = None,
     out_dir: Path,
     labels: Sequence[str] | None = None,
+    stop_after_description: bool = False,
 ) -> PagePanelsResult:
     """Single-page convenience wrapper over `run_pages` (Phase 18.4 batch residency:
     each model loads once per call -- here, once for this one page). Pass
-    `animation_clients` to select the generative AnimateAnything engine (no SAM)."""
+    `animation_clients` to select the generative AnimateAnything engine (no SAM), and
+    `stop_after_description=True` to run only the Qwen phase (grounding + description
+    checkpoints, no animation)."""
     results = run_pages(
         [image_path],
         config,
@@ -1198,5 +1232,6 @@ def run_page_panels(
         animation_clients=animation_clients,
         out_dir=out_dir,
         labels=labels,
+        stop_after_description=stop_after_description,
     )
     return results[0]

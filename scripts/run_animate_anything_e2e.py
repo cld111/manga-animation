@@ -1,12 +1,16 @@
 """AnimateAnything end-to-end GPU run: DINO bbox crop + Qwen description -> per-object video.
 
 Runs the production panel pipeline (`run_page_panels`) with the GENERATIVE animation engine
-(2026 architecture change): NO SAM segmentation. For each panel:
+(2026 architecture change): NO SAM segmentation. The run is TWO-PHASE so the two heavy models
+never share a GPU (Qwen holds ~12 GiB/card, the AA checkpoint ~8 GiB -- co-residency OOM'd a
+single phase):
 
-    grounding (DINO) -> object description (Qwen pool, one call per panel with all its bboxes)
-      -> for each ACCEPTED candidate: crop the panel by its DINO bbox, build the prompt from
-        the accepted Qwen description, and animate the crop with AnimateAnything
-      -> render one H.264 MP4 per object
+  Phase 1 (Qwen phase): grounding (DINO) + object description (Qwen pool, one call per panel
+    with all its bboxes), persisted to checkpoints, then Qwen is released.
+    `run_page_panels(stop_after_description=True)`.
+  Phase 2 (AA phase): the restored checkpoints skip DINO/Qwen entirely, and ONE AnimateAnything
+    worker per GPU animates each ACCEPTED candidate's DINO bbox crop (crop + prompt ->
+    frames), rendering one H.264 MP4 per object. `run_page_panels(animation_clients=aa_pool)`.
 
 No SAM, no LaMa reconstruction and no deterministic CV animation -- AnimateAnything is the
 ONLY animation engine here.
@@ -163,9 +167,14 @@ def main() -> None:
         n_gpus = 0
     devices = [f"cuda:{i}" for i in range(max(1, n_gpus))]
 
-    # The heavy models never share a card: Qwen (one instance per GPU) and AnimateAnything
-    # (one worker per GPU) are separated by running the AA worker as a subprocess on its own
-    # device (the client's subprocess loads the model itself). No SAM at all on this path.
+    # TWO-PHASE run so the two heavy models NEVER share a GPU (the single-phase version
+    # OOM'd: Qwen holds ~12 GiB/card and the AA worker cannot load its ~8 GiB checkpoint on
+    # the same card):
+    #   Phase 1 (Qwen phase): ONE Qwen3-VL-4B instance PER GPU grounds + describes the whole
+    #     dataset (stop_after_description=True) and persists grounding/descriptions
+    #     checkpoints, then Qwen is released.
+    #   Phase 2 (AA phase): the restored checkpoints skip DINO/Qwen entirely, and ONE
+    #     AnimateAnything worker per GPU animates each accepted object's DINO bbox crop.
     qwen_pool: list[CountingVLM] = [
         CountingVLM(
             Qwen3VLClient(source=args.qwen, dtype="float16", max_new_tokens=4096, device=d)
@@ -190,7 +199,7 @@ def main() -> None:
     ]
 
     report: dict = {
-        "phase": "animate-anything-e2e",
+        "phase": "animate-anything-e2e-two-phase",
         "architecture": "dino-bbox-crop-no-sam",
         "timestamp": datetime.now(UTC).isoformat(),
         "pages": [],
@@ -203,6 +212,25 @@ def main() -> None:
     }
     started = time.perf_counter()
     try:
+        # Phase 1: Qwen pool -> grounding + description checkpoints (no animation, no AA).
+        for page in args.pages:
+            page_path = Path(page)
+            run_page_panels(
+                page_path,
+                config,
+                vlm_client=qwen_pool,
+                grounding_client=dino,
+                segmentation_client=None,
+                reconstruction_client=None,
+                animation_clients=None,
+                out_dir=out_dir / "videos",
+                labels=labels,
+                stop_after_description=True,
+            )
+        print("phase 1 (Qwen -> grounding/description checkpoints) done", flush=True)
+
+        # Phase 2: AA pool -> animate each accepted object's crop + render, resuming the
+        # persisted stages. Qwen/DINO are NOT loaded (checkpoints skip them).
         for page in args.pages:
             page_path = Path(page)
             page_result = run_page_panels(
