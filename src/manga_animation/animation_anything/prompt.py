@@ -35,17 +35,30 @@ def motion_phrase(description: ObjectDescriptionResult) -> str:
     return _MOTION_PHRASES.get(description.motion_spec.transform_kind, "moving")
 
 
+# Detected from the VLM's own text (identity/reason), never invented here: a bicycle context
+# deserves an explicit pedaling/wheel-spinning instruction that the generic motion phrase
+# would otherwise leave implicit. Matched case-insensitively on the joined identity+reason.
+_BICYCLE_HINTS: tuple[str, ...] = ("bicycle", "bike", "cycling", "cyclist")
+
+
+def _bicycle_clause(text: str) -> str | None:
+    lowered = text.lower()
+    if any(hint in lowered for hint in _BICYCLE_HINTS):
+        return "the character is pedaling, the bicycle wheels are spinning"
+    return None
+
+
 def build_animation_prompt(obj: ObjectPlan, description: ObjectDescriptionResult) -> str:
     """Compose the AnimateAnything text prompt for ONE accepted object (its DINO bbox crop).
 
     The prompt is a direct MOTION instruction: `"<identity> <motion>, <reason>. static
     camera, no camera movement"`. The identity is the VLM's short object name (underscores
     replaced by spaces), the motion phrase is mapped from the accepted description's
-    transform kind, and the reason is the VLM's own one-sentence read of the action. The
-    trailing "static camera" clause is deliberate: it tells the model to move the OBJECT, not
-    the camera. An empty identity falls back to the semantic label (never invented here).
-    This is a flat instruction the crop is animated against; the crop itself is the only
-    image signal.
+    transform kind, and the reason is the VLM's own one-sentence read of the action. For a
+    bicycle context the prompt additionally states that the character is pedaling and the
+    wheels are spinning (deterministic, matched on the VLM's own text). The trailing
+    "static camera" clause tells the model to move the OBJECT, not the camera. An empty
+    identity falls back to the semantic label (never invented here).
     """
     identity = description.object_identity or obj.semantic_label
     identity = identity.replace("_", " ")
@@ -54,4 +67,7 @@ def build_animation_prompt(obj: ObjectPlan, description: ObjectDescriptionResult
         reason = description.reason.strip().rstrip(".")
         if reason and reason.lower() not in phrase.lower():
             phrase = f"{phrase}, {reason}"
+    bicycle_clause = _bicycle_clause(f"{identity} {description.reason or ''}")
+    if bicycle_clause:
+        phrase = f"{phrase}, {bicycle_clause}"
     return f"{phrase}. static camera, no camera movement"
