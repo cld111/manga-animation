@@ -228,12 +228,11 @@ class TestFailClosed:
         ("assessment", "expected_reason"),
         [
             ("ambiguous", "bbox_assessment=ambiguous"),
-            ("partial", "bbox_assessment=partial"),
             ("reject", "bbox_assessment=reject"),
             ("not_animatable", "bbox_assessment=not_animatable"),
         ],
     )
-    def test_every_non_pass_assessment_is_fail_closed(self, assessment, expected_reason):
+    def test_every_non_animatable_assessment_is_fail_closed(self, assessment, expected_reason):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)
         client = RecordingVLMClient([_valid_batch_response(1, bbox_assessment=assessment)])
         result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
@@ -242,6 +241,20 @@ class TestFailClosed:
         assert expected_reason in result.rejection_reason
         assert result.motion_spec is None
         assert result.assessment == assessment
+
+    def test_partial_assessment_is_accepted_when_animatable(self):
+        """2026 generative architecture: a `partial` box (part of the object) is accepted for a
+        crop-based animation as long as the object is animatable and matches its label."""
+        image = np.full((200, 220, 3), 245, dtype=np.uint8)
+        client = RecordingVLMClient(
+            [_valid_batch_response(1, bbox_assessment="partial", animatable=True)]
+        )
+        result = describe_object(image, BBoxPx(10, 10, 60, 90), _object_plan(), client,
+                                 max_long_edge=1536)
+        assert result.accepted is True
+        assert result.assessment == "partial"
+        assert result.rejection_reason is None
+        assert result.motion_spec is not None
 
     def test_semantic_label_mismatch_is_fail_closed(self):
         image = np.full((200, 220, 3), 245, dtype=np.uint8)

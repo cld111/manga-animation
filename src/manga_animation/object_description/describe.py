@@ -128,9 +128,18 @@ def _parse_batch(raw_text: str, n_expected: int) -> dict[int, ObjectDescriptionR
 def _accepted(parsed: ObjectDescriptionResponse) -> tuple[bool, str | None]:
     """The fail-closed acceptance rule, with the exact reason for a rejection. `rejection_reason`
     is machine-readable ("bbox_assessment=...", "semantic_label_mismatch", "not_animatable",
-    "identity_conflict")."""
-    if parsed.bbox_assessment != BBoxAssessment.PASS:
-        return False, f"bbox_assessment={parsed.bbox_assessment.value} (must be 'pass')"
+    "identity_conflict").
+
+    Since the 2026 architecture change (generative per-object animation from a DINO bbox crop)
+    both `pass` and `partial` are accepted, provided the object is still animatable and matches
+    its semantic label: a `partial` box captures only part of the object, which is fine for a
+    generative crop animation (the crop shows the object; no exact mask is needed). `ambiguous`,
+    `reject` and `not_animatable` remain rejections (fail closed)."""
+    if parsed.bbox_assessment not in (BBoxAssessment.PASS, BBoxAssessment.PARTIAL):
+        return (
+            False,
+            f"bbox_assessment={parsed.bbox_assessment.value} (must be 'pass' or 'partial')",
+        )
     if not parsed.matches_semantic_label:
         return False, "semantic_label_mismatch"
     if not parsed.animatable:
