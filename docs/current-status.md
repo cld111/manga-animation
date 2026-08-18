@@ -6,64 +6,74 @@ evidence remain in `docs/phase*-results.md`; decision rationale remains in `docs
 
 ## Status
 
-The deterministic pipeline and local test/evaluation infrastructure are implemented through
-Phase 13's panel-first orchestration, hardened by Phase 14's stage-level model lifecycle,
-reordered by Phase 18.3 (single VLM object-description stage) and Phase 18.4 (VLM before
-segmentation: SAM segments only bboxes with an accepted action description), and validated
-across multiple real pages and repeated GPU runs. Real model execution
-remains a remote-GPU operation. The project is an engineering prototype with real end-to-end
-evidence and known real-world visual limitations, not a production animation service.
-
-## Current Pipeline
-
-The implemented order is:
+The pipeline was re-architected on the `video-generation-kaggle` branch (2026): the
+deterministic SAM + CV animation + LaMa reconstruction + compositing engine was replaced by the
+generative AnimateAnything engine, and SAM segmentation is no longer used. The current
+production path is:
 
 ```text
 page -> deterministic panel detection -> bounded scene crops
   -> grounding (DINO) -> object_description (Qwen, ONE call with ALL bboxes)
-  -> segmentation (SAM, only for accepted bboxes) -> animation
-  -> reconstruction -> compositing -> rendering
+  -> per-object AnimateAnything (DINO bbox crop + Qwen description prompt -> frames)
+  -> one H.264 MP4 per accepted object
+```
+
+The deterministic pipeline (SAM/animation/reconstruction/compositing) remains in the codebase
+as the legacy/regression path, selected by NOT passing `animation_clients` to
+`run_pages`/`run_page_panels`. Real model execution remains a remote-GPU operation. The project
+is an engineering prototype with real end-to-end evidence and known real-world visual
+limitations, not a production animation service.
+
+## Current Pipeline
+
+The implemented production order on the generative path:
+
+```text
+page -> deterministic panel detection -> bounded scene crops
+  -> grounding (DINO) -> object_description (Qwen, ONE call with ALL bboxes)
+  -> for each ACCEPTED candidate: crop the panel at its DINO bbox, build the prompt from the
+     accepted Qwen description, animate the crop with AnimateAnything
+  -> one H.264 MP4 per accepted object
 ```
 
 - `run_page_panels` is the production page entry point: every detected panel gets a stable unit,
-  its own scene crop, independent stages, output video or explicit status, and a page manifest.
+  its own scene crop, independent stages, output video(s) or explicit status, and a page manifest.
   It is the single-page wrapper over the Phase 18.4 batch entry point `run_pages`, which
   processes MANY pages in one call. Phase 20 gives `run_pages` run-level model co-residency
-  (ADR 0021): every model with pending work (DINO, Qwen3-VL, SAM 2.1, LaMa) loads TOGETHER
-  at the start and stays resident until the run ends -- no stage-by-stage load/unload cycle.
-  Phase 21 executes the stages as a concurrent panel pipeline (ADR 0022): five workers pass
-  panels through bounded queues, so a panel moves to the next model as soon as the previous
-  stage produced its result (no stage barrier). Each model stage persists its outputs to disk
-  per panel (`grounding.json`, `descriptions.json`, `segmentation.json` + mask `.npz` per
+  (ADR 0021): every model with pending work loads TOGETHER at the start and stays resident until
+  the run ends -- no stage-by-stage load/unload cycle. Phase 21 executes the stages as a
+  concurrent panel pipeline (ADR 0022): workers pass panels through bounded queues, so a panel
+  moves to the next stage as soon as the previous stage produced its result (no stage barrier).
+  Each model stage persists its outputs to disk per panel (`grounding.json`,
+  `descriptions.json`, and on the deterministic path `segmentation.json` + mask `.npz` per
   page), and a later invocation loads completed stages from disk without loading their models
   at all (a killed session resumes from the last completed stage, per panel).
+- **2026 generative path**: with `animation_clients` passed, the SAM segmentation stage is
+  SKIPPED entirely (a no-op pass-through worker). For each accepted candidate the pipeline
+  crops the panel by its DINO bbox, builds the prompt from the accepted Qwen description
+  (identity + motion phrase + the VLM's own reason sentence), and calls
+  `AnimateAnythingClient.animate(crop, prompt)` (a subprocess-backed worker). Each accepted
+  object renders to its OWN H.264 MP4; the panel manifest lists them all in `output_videos`.
+  The animation unit is the accepted OBJECT, not the panel. A panel with no accepted candidate
+  is REJECTED; a crop that degenerates after clamping to the panel is skipped.
 - `panel_bbox` is logical geometry; `scene_crop_bbox` is the actual analysis/render canvas and
   is bounded by page edges and nearby panel geometry.
 - Analysis is panel-aware by default; page analysis remains explicit. A panel's all-STATIC result
   is recorded as `STATIC` by the panel runner without inventing a video.
 - Grounding uses a real panel crop when analysis provides one and returns page coordinates.
-- `validation` checks grounded bbox plausibility, semantic agreement, and transform geometry
-  before segmentation.
-- `segmentation` produces a full-source-image `uint8` mask and applies coverage and asymmetric
-  edge-touch safety checks.
 - `object_description` (Phase 18.3) is the pipeline's ONLY VLM stage. A per-panel Qwen call
   (one call per panel with all its grounded candidates' bboxes in crop-local coordinates) is
   the production path: Qwen3-VL-4B fp16 (Phase 22 A/B, see `phase22-ab-test.md`) sees the FULL
   panel plus ALL of its grounded candidates' bboxes as pixel coordinates in ONE call (never a
   crop, never the mask), reads the ACTION happening in the scene, judges each candidate
   (pass/ambiguous/partial/reject/not_animatable), and produces a structured animation
-  description whose deterministically-mapped `MotionSpec` drives the animation stage (with the
-  SAM mask). Fail-closed: candidates with a non-pass read, an identity-conflict (text/bubble/
-  background), or a geometrically unsafe bbox+transform are dropped; a panel with no accepted
-  candidate is REJECTED. The architecture has no analysis stage, no crop-based VLM validation
-  and no mask-semantics stage; candidate labels come from the caller
-  (`DEFAULT_ANIMATION_LABELS`). See docs/phase18.3-results.md.
-- Segmentation runs AFTER object description (Phase 18.4 ordering: DINO -> Qwen -> SAM): SAM2
-  segments ONLY the bboxes that earned an accepted action description, so it never spends an
-  inference on a rejected candidate. A VLM-accepted bbox whose mask then fails the
-  post-segmentation shape checks is still dropped (fail closed).
-- Animation uses deterministic OpenCV/NumPy transforms. Layers are composited in deterministic
-  z-order with cross-object overlap protection; LaMa is used only for motion-revealed holes.
+  description. On the generative path the description's `motion_spec` maps to a motion phrase
+  and its `reason` sentence contributes to the AnimateAnything prompt. Fail-closed: candidates
+  with a non-pass read, an identity-conflict (text/bubble/background), or a geometrically
+  unsafe bbox+transform are dropped; a panel with no accepted candidate is REJECTED. The
+  architecture has no analysis stage, no crop-based VLM validation and no mask-semantics stage;
+  candidate labels come from the caller (`DEFAULT_ANIMATION_LABELS`). See
+  docs/phase18.3-results.md.
 - Rendering produces H.264 and validates the decoded output, including frame count, timing,
   dimensions, and loop metrics.
 
@@ -79,35 +89,44 @@ The baseline in `configs/default.yaml` is:
 | Analysis mode default | `run_pipeline(..., analysis_mode="panel")` |
 | VLM | `qwen3-vl-4b` fp16, one instance per GPU (worker pool, ADR 0023) |
 | Grounding | `grounding-dino-swin-l` |
-| Segmentation | `sam2.1-hiera-base` |
-| Inpainting | `lama-large` |
+| Animation engine | `animate-anything-512-v1.02` (generative, per-object) |
+| Segmentation | `sam2.1-hiera-base` (legacy deterministic path only) |
+| Inpainting | `lama-large` (legacy deterministic path only) |
 | VLM analysis resolution | 1536px long edge (`kaggle`: 2048, `local`: 1024) |
 | VLM dtype | profile-dependent (`float32` default, `float16` on Kaggle) |
-| Grounding/segmentation dtype | verified `float32` |
-| Loop | 4.0s at 24 FPS |
+| Grounding dtype | verified `float32` |
+| AnimateAnything output | 16 frames @ 8 fps (~2s), ~512x512 |
 | Codec | H.264 only |
-| Semantic mask validation stage | not part of the 18.3/18.4 runtime (flag retained for legacy evaluation) |
-| Per-candidate VLM object description | enabled (Phase 18.3, runs before segmentation since Phase 18.4) |
+| Semantic mask validation stage | not part of the runtime on the generative path (flag retained for legacy evaluation) |
+| Per-candidate VLM object description | enabled (Phase 18.3) |
 
 These are preliminary operational selections, not an exhaustive cross-candidate benchmark
 conclusion. Candidates without implemented adapters remain research entries.
 
 ## Current Invariants
 
+- **2026 generative path (default with `animation_clients`)**: the pipeline does NOT use SAM
+  segmentation, deterministic CV animation, LaMa reconstruction, or CV compositing. The
+  animation unit is the accepted object (a DINO bbox crop). Each accepted object renders to
+  its own H.264 MP4. A crop that degenerates after clamping to the panel is skipped; a panel
+  with no accepted candidate is REJECTED. The deterministic engine remains available as the
+  legacy/regression path when `animation_clients` is not passed.
 - Raw composited frames copy the original image outside transformed masks exactly, except for
-  deliberately filled motion-revealed holes. Decoded H.264 frames may contain bounded codec
-  noise; that is validated separately.
+  deliberately filled motion-revealed holes (deterministic path only). Decoded H.264 frames may
+  contain bounded codec noise; that is validated separately.
 - A plan has at most one `PRIMARY`. A PRIMARY failure rejects the run; a SECONDARY/MICRO
   failure is isolated and drops only that object.
 - Masks are full-source-image, 2D `uint8` arrays. Cross-object overlap can drop a secondary
-  object rather than render a duplicate silhouette.
+  object rather than render a duplicate silhouette (deterministic path only).
 - Transform-aware validation runs inside the object-description stage, before segmentation,
   because it validates a bbox against a transform kind; mask-level shape checks are
   post-segmentation because they need the real mask.
 - `parent_id`/`children_ids` are structurally validated, but parent transforms are not
   inherited automatically; each animated object needs its own motion spec.
 - Model-backed stages release their clients after the stage, including grounding, the VLM
-  object-description stage, segmentation, and reconstruction.
+  object-description stage, segmentation, and reconstruction. The AnimateAnything client is
+  subprocess-backed (no resident GPU footprint in the pipeline process); its worker loads the
+  model per call on its own device and exits.
 - GPU model lifecycle is run-level (Phase 20, ADR 0021, superseding Phase 14/ADR 0020's
   stage-level scheme): every model with pending work loads once, together, at the start of
   `run_pages` and stays resident until the run ends; all models are deterministically
@@ -115,8 +134,8 @@ conclusion. Candidates without implemented adapters remain research entries.
   can no longer leave a model resident to poison later panels. The VLM's `device_map="auto"`
   client is released with `gc.collect()` before the caching-allocator flush -- the phase-14
   root cause of cross-panel CUDA OOM. Resume skips loading any fully checkpointed model.
-- Stage execution is a concurrent panel pipeline (Phase 21, ADR 0022): five single-threaded
-  workers (DINO -> Qwen -> SAM -> plan/LaMa -> render) connected by bounded queues; each
+- Stage execution is a concurrent panel pipeline (Phase 21, ADR 0022): single-threaded workers
+  (DINO -> Qwen -> animate -> render on the generative path) connected by bounded queues; each
   worker calls only its own client, a panel advances as soon as the previous stage produced
   its result, and per-panel results are identical to the sequential scheme (FIFO order).
 - `PipelineConfig.resolution` changes VLM analysis resizing only; downstream CV uses source

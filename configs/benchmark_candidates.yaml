@@ -100,3 +100,14 @@ inpainting:
     notes: >
       Higher quality, prompt-guided style matching. Only worth the extra compute if
       LaMa/AOT visibly fail on complex screentone/texture regions.
+
+animation:
+  - id: animate-anything-512-v1.02
+    source: "https://cloudbook-public-production.oss-cn-shanghai.aliyuncs.com/animation/animate_anything_512_v1.02.tar"
+    license: apache-2.0 # vendored inference subset; see src/manga_animation/animation_anything/vendored/LICENSE
+    params: ~1B
+    notes: >
+      2026 architecture default animation engine. Mask-guidance video diffusion; native
+      output 16 frames @ 8 fps at ~512x512. Runs as a subprocess in a dedicated pinned-stack
+      environment (diffusers==0.24.0/transformers==4.36.2), so it is a remote-GPU concern
+      (ADR 0003), not a local dependency.

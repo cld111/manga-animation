@@ -43,6 +43,15 @@ class PipelineConfig(BaseModel):
     fps: int = Field(gt=0, le=60, default=24)
     duration_s: float = Field(gt=0.0, le=30.0, default=4.0)
 
+    # AnimateAnything generative animation engine (2026 architecture): the model's native
+    # output is 16 frames @ 8 fps = 2s at ~512x512. These hyper-parameters are handed to the
+    # isolated worker.
+    animation_fps: int = Field(gt=0, le=60, default=8)
+    animation_num_frames: int = Field(gt=0, default=16)
+    animation_num_inference_steps: int = Field(gt=0, default=25)
+    animation_guidance_scale: float = Field(gt=0.0, default=9.0)
+    animation_motion_strength: float = Field(gt=0.0, default=1.0)
+
     output_codec: Codec = "h264"
     seed: int = 42
 

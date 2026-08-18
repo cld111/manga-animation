@@ -181,6 +181,11 @@ class PanelUnit:
     scene_crop_path: Path
     status: PanelStatus = "ERROR"
     output_video: Path | None = None
+    output_videos: list[Path] = field(default_factory=list)
+    """Per-object videos on the generative engine path (2026 architecture): the DINO bbox
+    crop animation of each accepted object renders to its own MP4, so one panel can produce
+    several videos. `output_video` mirrors the first of these for backward compatibility
+    with the single-video deterministic path."""
     failure_stage: str | None = None
     failure_reason: str | None = None
     metrics: dict[str, int | float] = field(default_factory=dict)
@@ -196,6 +201,7 @@ class PanelUnit:
             "source_crop": str(self.scene_crop_path),
             "status": self.status,
             "output_video": str(self.output_video) if self.output_video is not None else None,
+            "output_videos": [str(v) for v in self.output_videos],
             "failure_stage": self.failure_stage,
             "failure_reason": self.failure_reason,
             "metrics": self.metrics,

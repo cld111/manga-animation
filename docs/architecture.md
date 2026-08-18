@@ -32,6 +32,21 @@ Prefer deterministic CV transforms (affine transforms, mesh warps and alpha comp
 desired motion can be expressed that way. Generative techniques such as inpainting are
 reserved for content that motion reveals but that was never present in the source image.
 
+### Generative Engine (2026 architecture change)
+
+On the `video-generation-kaggle` branch the animation engine is GENERATIVE
+(`src/manga_animation/animation_anything`): AnimateAnything turns an accepted object's DINO
+bbox crop plus its Qwen description prompt directly into a short video. This is the selected
+engine, and SAM segmentation, deterministic CV animation, LaMa reconstruction and CV
+compositing are NOT used on this path. The deterministic engine remains available as the
+legacy/regression path when `animation_clients` is not passed to `run_pages`/`run_page_panels`.
+
+The generative path still respects the original-image principle per crop: each accepted object
+is animated from its own unmodified bbox crop of the source artwork, and the rest of the page
+is left untouched. The minimal-motion principle is honored through the AnimateAnything
+`motion_strength` (default low, for gentle motion) and through the object-description stage
+rejecting un-animatable content before any generation happens.
+
 ## Local Modification
 
 Every stage should touch the smallest region necessary for its job. Segmentation should not
@@ -52,6 +67,11 @@ VLM, grounding, segmentation and reconstruction are stage-boundary components. T
 candidate is configured through `PipelineConfig.model_variants`; the production factory
 must reject candidate IDs for which no client adapter is implemented. Benchmark candidates
 without adapters remain research entries, not fake runtime substitutions.
+
+The generative AnimateAnything engine is selected through `model_variants.animation` and
+activated by passing `animation_clients` to `run_pages`/`run_page_panels`; it is
+subprocess-backed (its pinned diffusers/transformers stack cannot coexist with the project's
+`ml` extra), so it is a remote-GPU concern (ADR 0003) rather than a local dependency.
 
 ## GPU Awareness
 
