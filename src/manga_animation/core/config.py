@@ -50,7 +50,7 @@ class PipelineConfig(BaseModel):
     animation_num_frames: int = Field(gt=0, default=16)
     animation_num_inference_steps: int = Field(gt=0, default=25)
     animation_guidance_scale: float = Field(gt=0.0, default=9.0)
-    animation_motion_strength: float = Field(gt=0.0, default=1.0)
+    animation_motion_strength: float = Field(gt=0.0, default=5.0)
 
     output_codec: Codec = "h264"
     seed: int = 42

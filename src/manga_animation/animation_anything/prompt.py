@@ -38,11 +38,14 @@ def motion_phrase(description: ObjectDescriptionResult) -> str:
 def build_animation_prompt(obj: ObjectPlan, description: ObjectDescriptionResult) -> str:
     """Compose the AnimateAnything text prompt for ONE accepted object (its DINO bbox crop).
 
-    The prompt is `"<identity> <motion>, <reason>"`: the identity is the VLM's short object
-    name with underscores replaced by spaces, the motion phrase is mapped from the accepted
-    description's transform kind, and the reason is the VLM's own one-sentence read of the
-    action. An empty identity falls back to the semantic label (never invented here). This is
-    a flat instruction the crop is animated against; the crop itself is the only image signal.
+    The prompt is a direct MOTION instruction: `"<identity> <motion>, <reason>. static
+    camera, no camera movement"`. The identity is the VLM's short object name (underscores
+    replaced by spaces), the motion phrase is mapped from the accepted description's
+    transform kind, and the reason is the VLM's own one-sentence read of the action. The
+    trailing "static camera" clause is deliberate: it tells the model to move the OBJECT, not
+    the camera. An empty identity falls back to the semantic label (never invented here).
+    This is a flat instruction the crop is animated against; the crop itself is the only
+    image signal.
     """
     identity = description.object_identity or obj.semantic_label
     identity = identity.replace("_", " ")
@@ -51,4 +54,4 @@ def build_animation_prompt(obj: ObjectPlan, description: ObjectDescriptionResult
         reason = description.reason.strip().rstrip(".")
         if reason and reason.lower() not in phrase.lower():
             phrase = f"{phrase}, {reason}"
-    return phrase
+    return f"{phrase}. static camera, no camera movement"

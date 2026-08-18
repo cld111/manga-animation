@@ -27,10 +27,11 @@ DEFAULT_NUM_FRAMES = 16
 DEFAULT_FPS = 8
 DEFAULT_NUM_INFERENCE_STEPS = 25
 DEFAULT_GUIDANCE_SCALE = 9.0
-# Motion strength is intentionally LOW ("slow"/gentle motion): AnimateAnything's `motion`
-# scalar scales how much the masked region moves, and a small value keeps the animation
-# subtle -- the project's "minimum visually justified motion" principle (architecture.md).
-DEFAULT_MOTION_STRENGTH = 1.0
+# Motion strength is a meaningful value (upstream's README uses 5) because without a motion
+# mask the WHOLE crop is the motion area and a small scalar leaves the object near-static --
+# the real 2026 run measured visibly static objects at 1.0. The project's "minimum visually
+# justified motion" principle still applies; 5.0 is the upstream default, not an extreme.
+DEFAULT_MOTION_STRENGTH = 5.0
 DEFAULT_SEED = 42
 
 

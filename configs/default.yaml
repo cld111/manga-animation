@@ -19,12 +19,13 @@ fps: 24
 duration_s: 4.0 # ~3-5s seamless loop, per the project goal
 
 # AnimateAnything generative animation engine (2026 architecture): native output is
-# 16 frames @ 8 fps = 2s at ~512x512.
+# 16 frames @ 8 fps = 2s at ~512x512. motion_strength scales the amount of motion
+# (upstream uses 5; 1.0 produced near-static objects without a motion mask).
 animation_fps: 8
 animation_num_frames: 16
 animation_num_inference_steps: 25
 animation_guidance_scale: 9.0
-animation_motion_strength: 1.0
+animation_motion_strength: 5.0
 
 output_codec: h264
 seed: 42
